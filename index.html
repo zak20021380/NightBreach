@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#8f9da0" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>Night Breach</title>
+  </head>
+  <body>
+    <canvas id="renderCanvas" aria-label="Night Breach FPS game"></canvas>
+    <div id="assetLoading" role="status" aria-live="polite">
+      <span id="assetLoadingLabel">Preparing local assets</span>
+      <progress id="assetLoadingProgress" max="1" value="0" aria-label="Asset loading progress"></progress>
+    </div>
+    <div id="crosshair" aria-hidden="true"></div>
+    <div id="hitMarker" aria-hidden="true"></div>
+    <div id="headshotIndicator" aria-hidden="true">HEADSHOT</div>
+    <div id="damageIndicator" aria-hidden="true"></div>
+    <div
+      id="healthHud"
+      role="progressbar"
+      aria-label="Health"
+      aria-valuemin="0"
+      aria-valuemax="100"
+      aria-valuenow="100"
+    >
+      <div class="healthLabel">HEALTH <span id="healthValue">100</span></div>
+      <div class="healthTrack"><div id="healthFill"></div></div>
+    </div>
+    <div id="ammo" aria-label="Ammunition">30/120</div>
+    <button id="instructions" type="button">Click to deploy<br /><span>WASD to move - Mouse to aim - R to reload</span></button>
+    <div id="mobileControls" aria-label="Mobile game controls">
+      <div id="lookArea" aria-label="Swipe to aim"></div>
+      <div id="movementControl" aria-label="Movement joystick">
+        <div id="joystickBase">
+          <div id="joystickKnob"></div>
+        </div>
+      </div>
+      <button id="adsButton" class="touchButton" type="button" aria-label="Hold to aim down sights">ADS</button>
+      <button id="reloadButton" class="touchButton" type="button" aria-label="Reload weapon">R</button>
+      <button id="fireButton" class="touchButton" type="button" aria-label="Hold to fire">FIRE</button>
+    </div>
+    <div id="retryOverlay" role="dialog" aria-modal="true" aria-labelledby="retryTitle" aria-hidden="true">
+      <div class="retryPanel">
+        <h1 id="retryTitle">Overrun</h1>
+        <p>The breach team went down.</p>
+        <button id="retryButton" type="button">Retry</button>
+      </div>
+    </div>
+    <div id="orientationNotice" role="status">Rotate your phone<br /><span>Landscape orientation required</span></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
