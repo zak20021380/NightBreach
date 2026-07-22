@@ -99,7 +99,9 @@ export const ASSET_CONFIG = {
       path: '/assets/zombies/zombie_basic.glb',
       transform: {
         position: [0, 0, 0],
-        rotation: [0, Math.PI, 0],
+        // The imported hierarchy already resolves the character's chest/face
+        // toward Babylon's +Z forward axis. No additional yaw flip is needed.
+        rotation: [0, 0, 0],
         scale: [1.387821, 1.387821, 1.387821],
       },
       animation: { speed: 0.95, autoplay: false, loop: false },

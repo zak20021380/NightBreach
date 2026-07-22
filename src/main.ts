@@ -3549,6 +3549,20 @@ if (import.meta.env.DEV) {
         }
         return true
       },
+      zombieFacingDot(zombieIndex: number) {
+        const zombie = zombies[zombieIndex]
+        if (!zombie || zombie.root.isDisposed()) return -1
+        zombie.visual.root.computeWorldMatrix(true)
+        const forward = Vector3.TransformNormal(
+          Vector3.Forward(),
+          zombie.visual.root.getWorldMatrix(),
+        )
+        forward.y = 0
+        const toPlayer = camera.position.subtract(zombie.root.position)
+        toPlayer.y = 0
+        if (forward.lengthSquared() < 0.000001 || toPlayer.lengthSquared() < 0.000001) return 1
+        return Vector3.Dot(forward.normalize(), toPlayer.normalize())
+      },
       verifyProceduralSharing() {
         const firstParts = zombies[0]?.visual.proceduralParts
         if (!firstParts) return canvas.dataset.zombieSource !== 'procedural'

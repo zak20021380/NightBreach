@@ -338,7 +338,7 @@ try {
     assert(startup.state.zombieAnimationMapping
       === 'idle:Idle,walk:Walk1,run:Walk1,attack:Attack1.001,hit:hit-root-fallback,death:death-root-fallback',
     `The zombie animation mapping changed: ${startup.state.zombieAnimationMapping}.`)
-    assert(startup.state.zombieFinalRotation === '0.000000,3.141593,0.000000'
+    assert(startup.state.zombieFinalRotation === '0.000000,0.000000,0.000000'
       && Math.abs(startup.state.zombieFinalScale - 1.387821) < 0.00001,
     `The zombie parent transform changed: scale=${startup.state.zombieFinalScale}, rotation=${startup.state.zombieFinalRotation}.`)
     assert(startup.state.zombies.every((zombie) => zombie.animation.endsWith('_Idle')),
@@ -448,6 +448,8 @@ try {
   if (!forceZombieFallback) {
     assert(chasing.zombies.some((zombie) => zombie.animation.endsWith('_Walk1')),
       `Zombie chase did not select Walk1: ${JSON.stringify(chasing.zombies)}.`)
+    assert(await cdp.evaluate(`window.__nightBreachTest.zombieFacingDot(2) > 0.8`),
+      'The imported zombie visual did not face the player while chasing.')
   }
   console.log('runtime-smoke: detection and chase passed')
 
@@ -478,19 +480,22 @@ try {
   )
   const firstAttack = await cdp.evaluate(`(() => {
     const snapshot = window.__nightBreachTest.snapshot();
+    const facingDot = window.__nightBreachTest.zombieFacingDot(1);
     window.__nightBreachTest.setZombiePosition(1, -23, 23);
-    return snapshot;
+    return { snapshot, facingDot };
   })()`)
-  const attackDamage = healthBeforeAttack - firstAttack.health
+  const attackDamage = healthBeforeAttack - firstAttack.snapshot.health
   assert(attackDamage >= 14 && attackDamage % 14 === 0,
     `A zombie attack did not apply configured 14-point damage: ${attackDamage}.`)
   if (!forceZombieFallback) {
-    assert(firstAttack.zombies[1].animation.endsWith('_Attack1.001'),
-      `Zombie attack did not select Attack1.001: ${JSON.stringify(firstAttack.zombies[1])}.`)
+    assert(firstAttack.snapshot.zombies[1].animation.endsWith('_Attack1.001'),
+      `Zombie attack did not select Attack1.001: ${JSON.stringify(firstAttack.snapshot.zombies[1])}.`)
+    assert(firstAttack.facingDot > 0.95,
+      'The imported zombie visual did not face the player while attacking.')
   }
   await delay(200)
   const afterDamageWindow = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
-  assert(afterDamageWindow.health === firstAttack.health,
+  assert(afterDamageWindow.health === firstAttack.snapshot.health,
     'One zombie swing applied damage more than once.')
   console.log('runtime-smoke: attack timing and damage window passed')
 
