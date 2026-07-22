@@ -1979,7 +1979,6 @@ const RIFLE_ASSET_CONFIG = {
   position: vector3FromTuple(RIFLE_ASSET_DEFINITION.transform.position),
   rotation: vector3FromTuple(RIFLE_ASSET_DEFINITION.transform.rotation),
   scaling: vector3FromTuple(RIFLE_ASSET_DEFINITION.transform.scale),
-  boundsCenter: vector3FromTuple(RIFLE_ASSET_DEFINITION.boundsCenter),
   animationSpeed: RIFLE_ASSET_DEFINITION.animation.speed,
   material: RIFLE_ASSET_DEFINITION.material,
 }
@@ -2057,17 +2056,17 @@ function inspectImportedRifleBounds(
   if (size.x <= 0 || size.y <= 0 || size.z <= 0) {
     throw new Error('The rifle GLB returned empty authored bounds.')
   }
-  if (size.z <= Math.max(size.x, size.y)) {
-    throw new Error('The rifle GLB barrel is no longer authored along the expected +Z axis.')
-  }
-  if (Vector3.Distance(center, RIFLE_ASSET_CONFIG.boundsCenter) > 0.01) {
+  const dominantAxis = size.x >= size.y && size.x >= size.z
+    ? '+X'
+    : size.y >= size.z ? '+Y' : '+Z'
+  if (dominantAxis !== '+Z') {
     throw new Error(
-      `The rifle GLB bounds center changed from the configured pivot (${RIFLE_ASSET_CONFIG.boundsCenter.asArray().join(', ')}).`,
+      `The rifle GLB barrel must resolve to +Z after its authored wrappers; measured dominant axis ${dominantAxis}.`,
     )
   }
 
   console.info(
-    `[Night Breach][Rifle] Authored bounds ${size.x.toFixed(3)} x ${size.y.toFixed(3)} x ${size.z.toFixed(3)} centered at (${center.x.toFixed(3)}, ${center.y.toFixed(3)}, ${center.z.toFixed(3)}); barrel axis +Z.`,
+    `[Night Breach][Rifle] Complete authored bounds ${size.x.toFixed(3)} x ${size.y.toFixed(3)} x ${size.z.toFixed(3)} centered at (${center.x.toFixed(3)}, ${center.y.toFixed(3)}, ${center.z.toFixed(3)}); dominant/barrel axis ${dominantAxis}.`,
   )
 
   return { center, max, min, size }
@@ -2097,7 +2096,7 @@ async function validateImportedRifleRendering(meshes: readonly AbstractMesh[]) {
       new Promise<never>((_resolve, reject) => {
         timeoutId = window.setTimeout(() => {
           reject(new Error('Rifle material validation timed out.'))
-        }, isMobile ? 8_000 : 5_000)
+        }, isMobile ? 30_000 : 15_000)
       }),
     ])
   } finally {
@@ -2282,20 +2281,37 @@ function createEmergencyRifle(parent: TransformNode) {
   return rifle
 }
 
-let proceduralRifle: TransformNode
-try {
-  proceduralRifle = createProceduralRifle(viewModelPivot)
+let proceduralRifle: TransformNode | null = null
+
+function ensureProceduralRifle() {
+  if (proceduralRifle && !proceduralRifle.isDisposed()) {
+    proceduralRifle.setEnabled(true)
+    return proceduralRifle
+  }
+
+  try {
+    proceduralRifle = createProceduralRifle(viewModelPivot)
+    console.info('[Night Breach][Rifle] Procedural fallback ready.')
+  } catch (error) {
+    logRuntimeWarning('Procedural rifle creation failed; using emergency geometry.', error)
+    scene.getTransformNodeByName('proceduralRifle')?.dispose()
+    proceduralRifle = createEmergencyRifle(viewModelPivot)
+    console.info('[Night Breach][Rifle] Emergency procedural fallback ready.')
+  }
   canvas.dataset.weaponSource = 'procedural'
   canvas.dataset.rifleReady = 'procedural'
-  console.info('[Night Breach][Rifle] Procedural fallback ready; local GLB loading started.')
-} catch (error) {
-  logRuntimeWarning('Procedural rifle creation failed; using emergency geometry.', error)
-  scene.getTransformNodeByName('proceduralRifle')?.dispose()
-  proceduralRifle = createEmergencyRifle(viewModelPivot)
-  canvas.dataset.weaponSource = 'procedural'
-  canvas.dataset.rifleReady = 'procedural'
-  console.info('[Night Breach][Rifle] Emergency procedural fallback ready.')
+  canvas.dataset.weaponActiveAnimation = 'procedural'
+  canvas.dataset.weaponClipNames = 'none'
+  canvas.dataset.weaponSkeletonCount = '0'
+  canvas.dataset.weaponBoneCount = '0'
+  canvas.dataset.weaponSkinnedMeshCount = '0'
+  canvas.dataset.proceduralRifle = 'active'
+  canvas.dataset.visibleRifleHierarchies = '1'
+  return proceduralRifle
 }
+
+ensureProceduralRifle()
+console.info('[Night Breach][Rifle] Local GLB loading started with procedural fallback active.')
 
 const muzzleFlashMaterial = new StandardMaterial('muzzleFlashMaterial', scene)
 muzzleFlashMaterial.diffuseColor = new Color3(1, 0.62, 0.22)
@@ -2364,7 +2380,7 @@ async function loadLocalRifleModel(parent: TransformNode) {
   let modelRoot: TransformNode | null = null
   try {
     entries = result.container.instantiateModelsToScene(
-      (sourceName) => `rifle_${sourceName}`,
+      (sourceName) => sourceName,
       false,
       { doNotInstantiate: false },
     )
@@ -2383,13 +2399,15 @@ async function loadLocalRifleModel(parent: TransformNode) {
     if (modelMeshes.length === 0) {
       throw new Error('The rifle GLB did not instantiate any renderable meshes.')
     }
+    const renderableMeshCount = modelMeshes.filter((mesh) => mesh.getTotalVertices() > 0).length
+    const skinnedMeshCount = modelMeshes.filter(
+      (mesh) => mesh.getTotalVertices() > 0 && mesh.skeleton !== null,
+    ).length
 
-    inspectImportedRifleBounds(boundsOffsetRoot, modelMeshes)
-    boundsOffsetRoot.position.set(
-      -RIFLE_ASSET_CONFIG.boundsCenter.x,
-      -RIFLE_ASSET_CONFIG.boundsCenter.y,
-      -RIFLE_ASSET_CONFIG.boundsCenter.z,
-    )
+    const authoredBounds = inspectImportedRifleBounds(boundsOffsetRoot, modelMeshes)
+    // Recenter only this wrapper. Every loader-created node, bone, skin, mesh,
+    // and animation target keeps its exact authored local transform.
+    boundsOffsetRoot.position.copyFrom(authoredBounds.center).scaleInPlace(-1)
     modelRoot.position.copyFrom(RIFLE_ASSET_CONFIG.position)
     // Model-axis correction is applied exactly once here. Hip/ADS motion lives
     // exclusively on viewModelPivot and never touches this static hierarchy.
@@ -2417,6 +2435,23 @@ async function loadLocalRifleModel(parent: TransformNode) {
     const detectedAnimationNames = (Object.keys(importedWeaponAnimations) as WeaponAnimationName[])
     const fallbackAnimationNames = (Object.keys(weaponAnimationAliases) as WeaponAnimationName[])
       .filter((name) => !importedWeaponAnimations[name])
+    const clipNames = importedAnimationGroups.map((animation) => animation.name)
+    const skeletonBoneCount = entries.skeletons.reduce(
+      (total, skeleton) => total + skeleton.bones.length,
+      0,
+    )
+    if (entries.skeletons.length > 0 && skinnedMeshCount !== renderableMeshCount) {
+      throw new Error(
+        `The animated rifle rig detached from its meshes (${skinnedMeshCount}/${renderableMeshCount} skinned).`,
+      )
+    }
+    const hierarchyNodes = entries.rootNodes.flatMap((rootNode) => [
+      rootNode,
+      ...rootNode.getDescendants(false),
+    ])
+    if (entries.rootNodes.some((rootNode) => rootNode.parent !== boundsOffsetRoot)) {
+      throw new Error('The imported rifle hierarchy was not preserved beneath its viewmodel root.')
+    }
     const activatedEntries = entries
     const activatedRoot = modelRoot
     importedRifleRoot = activatedRoot
@@ -2431,20 +2466,22 @@ async function loadLocalRifleModel(parent: TransformNode) {
     canvas.dataset.rifleReady = 'validating-first-frame'
     canvas.dataset.weaponAnimations = detectedAnimationNames.join(',') || 'none'
     canvas.dataset.weaponAnimationFallbacks = fallbackAnimationNames.join(',') || 'none'
+    canvas.dataset.weaponClipNames = clipNames.join(',') || 'none'
+    canvas.dataset.weaponSkeletonCount = String(entries.skeletons.length)
+    canvas.dataset.weaponBoneCount = String(skeletonBoneCount)
+    canvas.dataset.weaponHierarchyNodeCount = String(hierarchyNodes.length)
+    canvas.dataset.weaponMeshCount = String(renderableMeshCount)
+    canvas.dataset.weaponSkinnedMeshCount = String(skinnedMeshCount)
     if (reloadElapsed >= 0) playImportedWeaponAnimation('reload')
     else if (deployed && playImportedWeaponAnimation('equip')) {
       // The equip clip returns to the appropriate idle/ADS state on completion.
     } else playImportedWeaponAnimation('idle', true)
     // Swap atomically before the next render: the procedural standby and GLB
     // are never submitted in the same frame.
-    proceduralRifle.setEnabled(false)
+    proceduralRifle?.setEnabled(false)
     activatedRoot.setEnabled(true)
     assertSingleVisibleRifleHierarchy()
 
-    const hierarchyNodes = entries.rootNodes.flatMap((rootNode) => [
-      rootNode,
-      ...rootNode.getDescendants(false),
-    ])
     const visibleControlMesh = modelMeshes.reduce((largest, mesh) => (
       mesh.getTotalVertices() > largest.getTotalVertices() ? mesh : largest
     ))
@@ -2453,7 +2490,7 @@ async function loadLocalRifleModel(parent: TransformNode) {
     )
 
     console.info(
-      `[Night Breach][Rifle] GLB validated (${modelMeshes.length} meshes; animations: ${detectedAnimationNames.join(', ') || 'procedural fallbacks'}); awaiting one successful render before fallback retirement.`,
+      `[Night Breach][Rifle] GLB validated (${renderableMeshCount} renderable/${skinnedMeshCount} skinned meshes; ${entries.skeletons.length} skeletons/${skeletonBoneCount} bones; clips: ${clipNames.join(', ')}; mapped actions: ${detectedAnimationNames.join(', ') || 'procedural fallbacks'}); awaiting one successful render before fallback retirement.`,
     )
     return modelRoot
   } catch (error) {
@@ -2474,7 +2511,7 @@ async function loadLocalRifleModel(parent: TransformNode) {
     } catch (disposeError) {
       logRuntimeWarning('[Rifle] Partial GLB cleanup was skipped.', disposeError)
     }
-    proceduralRifle.setEnabled(true)
+    ensureProceduralRifle()
     canvas.dataset.weaponSource = 'procedural'
     canvas.dataset.rifleReady = 'procedural'
     logRuntimeWarning('[Rifle] GLB setup failed; procedural fallback remains active.', error)
@@ -2504,7 +2541,7 @@ function activateProceduralRifleFallback(context: string, error: unknown) {
   importedAnimationGroups = []
   importedWeaponAnimations = {}
   activeImportedWeaponAnimation = null
-  proceduralRifle.setEnabled(true)
+  ensureProceduralRifle()
   canvas.dataset.weaponSource = 'procedural'
   canvas.dataset.rifleReady = 'procedural'
   canvas.dataset.weaponAnimations = 'none'
@@ -2515,8 +2552,11 @@ function activateProceduralRifleFallback(context: string, error: unknown) {
 
 function assertSingleVisibleRifleHierarchy() {
   const visibleRoots: string[] = []
-  if (proceduralRifle.isEnabled()) visibleRoots.push(proceduralRifle.name)
+  if (proceduralRifle?.isEnabled() && !proceduralRifle.isDisposed()) {
+    visibleRoots.push(proceduralRifle.name)
+  }
   if (importedRifleRoot?.isEnabled()) visibleRoots.push(importedRifleRoot.name)
+  canvas.dataset.visibleRifleHierarchies = String(visibleRoots.length)
   if (visibleRoots.length !== 1) {
     throw new Error(
       `Expected exactly one visible rifle hierarchy; found ${visibleRoots.length} (${visibleRoots.join(', ') || 'none'}).`,
@@ -2613,6 +2653,7 @@ function playImportedWeaponAnimation(
     false,
   )
   activeImportedWeaponAnimation = animation
+  canvas.dataset.weaponActiveAnimation = animation.name
   return true
 }
 
@@ -3168,8 +3209,12 @@ function renderFrame() {
       pendingImportedRifleFirstFrame = false
       canvas.dataset.weaponSource = 'glb'
       canvas.dataset.rifleReady = 'glb'
+      proceduralRifle?.dispose()
+      proceduralRifle = null
+      canvas.dataset.proceduralRifle = 'disposed'
+      assertSingleVisibleRifleHierarchy()
       logFinalImportedRiflePresentation()
-      console.info('[Night Breach][Rifle] First GLB frame succeeded; procedural fallback is standing by.')
+      console.info('[Night Breach][Rifle] First GLB frame succeeded; procedural rifle removed from the scene.')
     }
   } catch (error) {
     renderFailureCount += 1
@@ -3295,6 +3340,14 @@ if (import.meta.env.DEV) {
           reloadElapsed,
           renderLoop: canvas.dataset.renderLoop,
           rifleReady: canvas.dataset.rifleReady,
+          weaponActiveAnimation: canvas.dataset.weaponActiveAnimation,
+          weaponBoneCount: Number(canvas.dataset.weaponBoneCount ?? 0),
+          weaponClipNames: canvas.dataset.weaponClipNames ?? 'none',
+          weaponHierarchyNodeCount: Number(canvas.dataset.weaponHierarchyNodeCount ?? 0),
+          weaponMeshCount: Number(canvas.dataset.weaponMeshCount ?? 0),
+          weaponSkeletonCount: Number(canvas.dataset.weaponSkeletonCount ?? 0),
+          weaponSkinnedMeshCount: Number(canvas.dataset.weaponSkinnedMeshCount ?? 0),
+          visibleRifleHierarchies: Number(canvas.dataset.visibleRifleHierarchies ?? 0),
           weaponSource: canvas.dataset.weaponSource,
           webViewActive,
           zombies: zombies.map((zombie) => ({

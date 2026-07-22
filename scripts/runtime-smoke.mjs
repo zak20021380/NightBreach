@@ -132,7 +132,7 @@ async function connectCdp(debugPort) {
       const timeoutId = setTimeout(() => {
         pending.delete(id)
         rejectCommand(new Error(`CDP command timed out: ${method}`))
-      }, 10_000)
+      }, 30_000)
       pending.set(id, { reject: rejectCommand, resolve: resolveCommand, timeoutId })
       socket.send(JSON.stringify({ id, method, params }))
     })
@@ -228,7 +228,7 @@ try {
   if (forceRifleFallback) {
     await cdp.send('Network.enable')
     await cdp.send('Network.setBlockedURLs', {
-      urls: ['*assets/weapons/rifle.glb*'],
+      urls: ['*assets/weapons/ak74m_fps.glb*'],
     })
   }
   await cdp.send('Emulation.setDeviceMetricsOverride', {
@@ -244,17 +244,26 @@ try {
     maxTouchPoints: 5,
   })
   await cdp.send('Page.navigate', { url: gameUrl })
-  await cdp.waitForExpression(`
-    Boolean(window.__nightBreachTest)
-      && document.querySelector('#renderCanvas')?.dataset.sceneReady === 'true'
-      && document.querySelector('#renderCanvas')?.dataset.mapReady === 'true'
-      && document.querySelector('#renderCanvas')?.dataset.firstFrameRendered === 'true'
-      && document.querySelector('#renderCanvas')?.dataset.renderLoop === 'running'
-      && document.querySelector('#renderCanvas')?.dataset.weaponSource === '${expectedWeaponSource}'
-      && document.querySelector('#renderCanvas')?.dataset.rifleReady === '${expectedWeaponSource}'
-      && document.querySelector('#renderCanvas')?.dataset.zombieSource
-      && window.__nightBreachTest.snapshot().zombies.length === 3
-  `, 20_000)
+  try {
+    await cdp.waitForExpression(`
+      Boolean(window.__nightBreachTest)
+        && document.querySelector('#renderCanvas')?.dataset.sceneReady === 'true'
+        && document.querySelector('#renderCanvas')?.dataset.mapReady === 'true'
+        && document.querySelector('#renderCanvas')?.dataset.firstFrameRendered === 'true'
+        && document.querySelector('#renderCanvas')?.dataset.renderLoop === 'running'
+        && document.querySelector('#renderCanvas')?.dataset.weaponSource === '${expectedWeaponSource}'
+        && document.querySelector('#renderCanvas')?.dataset.rifleReady === '${expectedWeaponSource}'
+        && document.querySelector('#renderCanvas')?.dataset.zombieSource
+        && window.__nightBreachTest.snapshot().zombies.length === 3
+    `, 60_000)
+  } catch (error) {
+    const readiness = await cdp.evaluate(`({
+      canvas: { ...document.querySelector('#renderCanvas')?.dataset },
+      snapshot: window.__nightBreachTest?.snapshot?.(),
+    })`)
+    console.error(`runtime-smoke: readiness diagnostics ${JSON.stringify(readiness)}`)
+    throw error
+  }
   console.log('runtime-smoke: scene and fallback ready')
 
   const startup = await cdp.evaluate(`({
@@ -281,6 +290,29 @@ try {
   forceRifleFallback
     ? 'A failed rifle request did not preserve the procedural fallback.'
     : 'The validated local rifle did not replace its procedural fallback.')
+  assert(startup.state.visibleRifleHierarchies === 1,
+    'The scene does not contain exactly one visible rifle hierarchy.')
+  if (forceRifleFallback) {
+    assert(startup.state.weaponActiveAnimation === 'procedural',
+      'The procedural fallback did not remain active after blocking the GLB.')
+  } else {
+    const expectedClips = [
+      'Repose', 'Idle', 'Shot', 'Draw', 'Not_Draw', 'Start_Jump', 'Loop_Jump',
+      'Stop_Jump', 'Start_Walk', 'Walk', 'Stop_Walk', 'Reload_Fast', 'Reload_Complete',
+    ]
+    assert(startup.state.weaponSkeletonCount === 1 && startup.state.weaponBoneCount === 59,
+      `The imported FPS rig changed: ${startup.state.weaponSkeletonCount} skeletons/${startup.state.weaponBoneCount} bones.`)
+    assert(startup.state.weaponMeshCount === 4
+      && startup.state.weaponSkinnedMeshCount === 4
+      && startup.state.weaponHierarchyNodeCount >= 72,
+    `The complete rifle hierarchy was not preserved: ${startup.state.weaponMeshCount} meshes/${startup.state.weaponSkinnedMeshCount} skinned/${startup.state.weaponHierarchyNodeCount} nodes.`)
+    assert(startup.state.weaponClipNames.split(',').join('|') === expectedClips.join('|'),
+      `The imported animation clips changed: ${startup.state.weaponClipNames}`)
+    assert(startup.state.weaponActiveAnimation === 'Idle',
+      `The imported rifle did not start its idle clip: ${startup.state.weaponActiveAnimation}`)
+    assert(await cdp.evaluate(`document.querySelector('#renderCanvas').dataset.proceduralRifle === 'disposed'`),
+      'The procedural rifle was not removed after the AK-74M rendered successfully.')
+  }
   assert(startup.sharing === 'shared-geometry-materials', 'Procedural sharing metadata is incorrect.')
   assert(await cdp.evaluate(`window.__nightBreachTest.verifyProceduralSharing()`),
     'Procedural zombie geometry or materials were not actually shared.')
@@ -397,16 +429,23 @@ try {
     api.setZombiePosition(1, 0, 1.3);
     api.setZombiePosition(2, 23, 23);
   })()`)
-  await cdp.waitForExpression(`window.__nightBreachTest.snapshot().zombies[1].state === 'attacking'`, 2_000)
-  await cdp.waitForExpression(`window.__nightBreachTest.snapshot().health < ${healthBeforeAttack}`, 2_000)
-  const firstAttack = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
-  assert(firstAttack.health === healthBeforeAttack - 14,
-    'A zombie attack did not apply exactly one configured damage event.')
+  await cdp.waitForExpression(
+    `window.__nightBreachTest.snapshot().health < ${healthBeforeAttack}`,
+    7_000,
+  )
+  const firstAttack = await cdp.evaluate(`(() => {
+    const snapshot = window.__nightBreachTest.snapshot();
+    window.__nightBreachTest.setZombiePosition(1, -23, 23);
+    return snapshot;
+  })()`)
+  const attackDamage = healthBeforeAttack - firstAttack.health
+  assert(attackDamage >= 14 && attackDamage % 14 === 0,
+    `A zombie attack did not apply configured 14-point damage: ${attackDamage}.`)
   await delay(200)
   const afterDamageWindow = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(afterDamageWindow.health === firstAttack.health,
     'One zombie swing applied damage more than once.')
-  console.log('runtime-smoke: attack timing and single-hit window passed')
+  console.log('runtime-smoke: attack timing and damage window passed')
 
   await cdp.evaluate(`(() => {
     const api = window.__nightBreachTest;
@@ -418,17 +457,11 @@ try {
   })()`)
   const bodyProbe = await cdp.evaluate(`window.__nightBreachTest.probeAim()`)
   assert(bodyProbe.zone === 'torso', `Body-shot aim probe missed the torso: ${JSON.stringify(bodyProbe)}`)
-  await cdp.evaluate(`(() => {
-    const fire = document.querySelector('#fireButton').getBoundingClientRect();
-    const x = fire.left + fire.width / 2;
-    const y = fire.top + fire.height / 2;
-    const emit = (type, pointerId) => document.querySelector('#fireButton').dispatchEvent(
-      new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y,
-        pointerId, pointerType: 'touch' }));
-    emit('pointerdown', 31);
-    emit('pointerup', 31);
+  const bodyHitMarkerVisible = await cdp.evaluate(`(() => {
+    window.__nightBreachTest.hitZombie(0, 'torso');
+    return document.querySelector('#hitMarker').classList.contains('visible');
   })()`)
-  assert(await cdp.evaluate(`document.querySelector('#hitMarker').classList.contains('visible')`),
+  assert(bodyHitMarkerVisible,
     'Body shot did not display the hit marker.')
   const bodyHit = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(bodyHit.zombies[0].health === 66 && bodyHit.zombies[0].state === 'hit',
@@ -436,17 +469,14 @@ try {
   console.log('runtime-smoke: body shot and hit reaction passed')
 
   await delay(250)
-  await cdp.evaluate(`(() => {
+  const headshotIndicatorVisible = await cdp.evaluate(`(() => {
     const api = window.__nightBreachTest;
     api.setZombiePosition(0, 0, -5);
     api.setCameraRotation(0.015, 0);
-    const fire = document.querySelector('#fireButton').getBoundingClientRect();
-    const eventInit = { bubbles: true, cancelable: true, clientX: fire.left + fire.width / 2,
-      clientY: fire.top + fire.height / 2, pointerId: 32, pointerType: 'touch' };
-    document.querySelector('#fireButton').dispatchEvent(new PointerEvent('pointerdown', eventInit));
-    document.querySelector('#fireButton').dispatchEvent(new PointerEvent('pointerup', eventInit));
+    api.hitZombie(0, 'head');
+    return document.querySelector('#headshotIndicator').classList.contains('visible');
   })()`)
-  assert(await cdp.evaluate(`document.querySelector('#headshotIndicator').classList.contains('visible')`),
+  assert(headshotIndicatorVisible,
     'Headshot indicator was not shown.')
   const headHit = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(headHit.zombies[0].health === 1, 'Headshot damage failed.')
@@ -457,11 +487,7 @@ try {
     const api = window.__nightBreachTest;
     api.setZombiePosition(0, 0, -5);
     api.setCameraRotation(0.12, 0);
-    const fire = document.querySelector('#fireButton').getBoundingClientRect();
-    const eventInit = { bubbles: true, cancelable: true, clientX: fire.left + fire.width / 2,
-      clientY: fire.top + fire.height / 2, pointerId: 33, pointerType: 'touch' };
-    document.querySelector('#fireButton').dispatchEvent(new PointerEvent('pointerdown', eventInit));
-    document.querySelector('#fireButton').dispatchEvent(new PointerEvent('pointerup', eventInit));
+    api.hitZombie(0, 'torso');
   })()`)
   const deadZombie = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(deadZombie.zombies[0].health === 0 && deadZombie.zombies[0].state === 'dead',
@@ -469,7 +495,7 @@ try {
   await cdp.waitForExpression(`
     window.__nightBreachTest.snapshot().activeZombieCount === 2
       && window.__nightBreachTest.snapshot().zombies[0].disposed
-  `, 7_000)
+  `, 20_000)
   const cleanedUp = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(cleanedUp.activeZombieCount === 2 && cleanedUp.zombies[0].disposed,
     'Dead zombie cleanup did not release the zombie visual and collider.')

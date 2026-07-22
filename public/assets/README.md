@@ -2,7 +2,7 @@
 
 Place production GLB files at these exact same-origin paths:
 
-- `weapons/rifle.glb`
+- `weapons/ak74m_fps.glb`
 - `zombies/zombie.glb`
 - `environment/environment.glb`
 

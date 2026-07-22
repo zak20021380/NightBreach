@@ -45,12 +45,7 @@ interface LocalGlbAssetDefinition<TKey extends LocalAssetKey> {
   readonly material: AssetMaterialSettings
 }
 
-export interface RifleAssetDefinition extends LocalGlbAssetDefinition<'rifle'> {
-  // Measured after the GLB's authored node transforms and Babylon's handedness
-  // conversion. Keeping this explicit prevents runtime normalization from
-  // silently moving or resizing the visible hierarchy.
-  readonly boundsCenter: Vector3Tuple
-}
+export interface RifleAssetDefinition extends LocalGlbAssetDefinition<'rifle'> {}
 
 export interface ZombieAssetDefinition extends LocalGlbAssetDefinition<'zombie'> {
   readonly normalizedHeight: number
@@ -82,16 +77,15 @@ export const ASSET_CONFIG = {
     rifle: {
       key: 'rifle',
       label: 'Rifle',
-      path: '/assets/weapons/rifle.glb',
+      path: '/assets/weapons/ak74m_fps.glb',
       transform: {
-        // Static model-space values beneath the animated viewModelPivot.
-        position: [0, 0.08, 0.2],
-        // The authored node hierarchy already maps the barrel from +Y to the
-        // first-person rig's forward +Z axis. An extra correction tilts it.
+        // Applied once to the complete animated hierarchy beneath the dynamic
+        // viewModelPivot. The Sketchfab wrapper already resolves the barrel to
+        // +Z, so no bone or individual mesh corrections are needed.
+        position: [0, 0.06, 0.24],
         rotation: [0, 0, 0],
-        scale: [0.25, 0.25, 0.25],
+        scale: [0.025, 0.025, 0.025],
       },
-      boundsCenter: [0.005388, -0.197938, 0.162028],
       animation: { speed: 1, autoplay: false, loop: false },
       material: {
         mode: 'source',
