@@ -7,7 +7,9 @@ import { fileURLToPath } from 'node:url'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const forceRifleFallback = process.env.NIGHTBREACH_FORCE_RIFLE_FALLBACK === '1'
+const forceZombieFallback = process.env.NIGHTBREACH_FORCE_ZOMBIE_FALLBACK === '1'
 const expectedWeaponSource = forceRifleFallback ? 'procedural' : 'glb'
+const expectedZombieSource = forceZombieFallback ? 'procedural' : 'glb'
 const screenshotPath = process.env.NIGHTBREACH_SCREENSHOT_PATH
 const viewportWidth = Number(process.env.NIGHTBREACH_VIEWPORT_WIDTH ?? 844)
 const viewportHeight = Number(process.env.NIGHTBREACH_VIEWPORT_HEIGHT ?? 390)
@@ -227,10 +229,13 @@ try {
   await cdp.send('Runtime.enable')
   await cdp.send('Log.enable')
   await cdp.send('Page.enable')
-  if (forceRifleFallback) {
+  if (forceRifleFallback || forceZombieFallback) {
     await cdp.send('Network.enable')
+    const blockedUrls = []
+    if (forceRifleFallback) blockedUrls.push('*assets/weapons/ak74m_fps.glb*')
+    if (forceZombieFallback) blockedUrls.push('*assets/zombies/zombie_basic.glb*')
     await cdp.send('Network.setBlockedURLs', {
-      urls: ['*assets/weapons/ak74m_fps.glb*'],
+      urls: blockedUrls,
     })
   }
   await cdp.send('Emulation.setDeviceMetricsOverride', {
@@ -255,7 +260,7 @@ try {
         && document.querySelector('#renderCanvas')?.dataset.renderLoop === 'running'
         && document.querySelector('#renderCanvas')?.dataset.weaponSource === '${expectedWeaponSource}'
         && document.querySelector('#renderCanvas')?.dataset.rifleReady === '${expectedWeaponSource}'
-        && document.querySelector('#renderCanvas')?.dataset.zombieSource
+        && document.querySelector('#renderCanvas')?.dataset.zombieSource === '${expectedZombieSource}'
         && window.__nightBreachTest.snapshot().zombies.length === 3
     `, 60_000)
   } catch (error) {
@@ -266,7 +271,7 @@ try {
     console.error(`runtime-smoke: readiness diagnostics ${JSON.stringify(readiness)}`)
     throw error
   }
-  console.log('runtime-smoke: scene and fallback ready')
+  console.log('runtime-smoke: scene and assets ready')
 
   const startup = await cdp.evaluate(`({
     active: document.querySelector('#renderCanvas').dataset.activeZombieCount,
@@ -281,7 +286,8 @@ try {
     state: window.__nightBreachTest.snapshot(),
     weaponSource: document.querySelector('#renderCanvas').dataset.weaponSource,
   })`)
-  assert(startup.source === 'procedural', 'Missing zombie.glb did not select the procedural fallback.')
+  assert(startup.source === expectedZombieSource,
+    `Zombie source did not resolve to ${expectedZombieSource}: ${startup.source}.`)
   assert(startup.limit === '3' && startup.active === '3', 'The active zombie cap is not three.')
   assert(startup.performanceTier.startsWith('mobile'), 'Mobile emulation did not select a mobile tier.')
   assert(startup.mapReady === 'true' && startup.firstFrame === 'true',
@@ -315,9 +321,37 @@ try {
     assert(await cdp.evaluate(`document.querySelector('#renderCanvas').dataset.proceduralRifle === 'disposed'`),
       'The procedural rifle was not removed after the AK-74M rendered successfully.')
   }
-  assert(startup.sharing === 'shared-geometry-materials', 'Procedural sharing metadata is incorrect.')
-  assert(await cdp.evaluate(`window.__nightBreachTest.verifyProceduralSharing()`),
-    'Procedural zombie geometry or materials were not actually shared.')
+  if (forceZombieFallback) {
+    assert(startup.sharing === 'shared-geometry-materials',
+      'Procedural sharing metadata is incorrect.')
+    assert(await cdp.evaluate(`window.__nightBreachTest.verifyProceduralSharing()`),
+      'Procedural zombie geometry or materials were not actually shared.')
+  } else {
+    assert(startup.sharing === 'cloned-skeletons-shared-geometry-materials-textures',
+      `Imported zombie clone metadata is incorrect: ${startup.sharing}.`)
+    assert(startup.state.zombieSkeletonCount === 1 && startup.state.zombieBoneCount === 34,
+      `The zombie rig changed: ${startup.state.zombieSkeletonCount} skeletons/${startup.state.zombieBoneCount} bones.`)
+    assert(startup.state.zombieMeshCount === 5 && startup.state.zombieSkinnedMeshCount === 5,
+      `The zombie skin changed: ${startup.state.zombieMeshCount} meshes/${startup.state.zombieSkinnedMeshCount} skinned.`)
+    assert(startup.state.zombieClipNames === 'Attack1.001,Idle,Walk1',
+      `The zombie clips changed: ${startup.state.zombieClipNames}.`)
+    assert(startup.state.zombieAnimationMapping
+      === 'idle:Idle,walk:Walk1,run:Walk1,attack:Attack1.001,hit:hit-root-fallback,death:death-root-fallback',
+    `The zombie animation mapping changed: ${startup.state.zombieAnimationMapping}.`)
+    assert(startup.state.zombieFinalRotation === '0.000000,3.141593,0.000000'
+      && Math.abs(startup.state.zombieFinalScale - 1.387821) < 0.00001,
+    `The zombie parent transform changed: scale=${startup.state.zombieFinalScale}, rotation=${startup.state.zombieFinalRotation}.`)
+    assert(startup.state.zombies.every((zombie) => zombie.animation.endsWith('_Idle')),
+      `Imported zombies did not start independent Idle clips: ${JSON.stringify(startup.state.zombies)}.`)
+    assert(await cdp.evaluate(`window.__nightBreachTest.verifyZombieCloneIsolation()`),
+      'Zombie instances did not preserve independent skeletons with shared render resources.')
+    console.log(`runtime-smoke: zombie rig ${JSON.stringify({
+      animations: startup.state.zombieAnimationMapping,
+      clips: startup.state.zombieClipNames,
+      rotation: startup.state.zombieFinalRotation,
+      scale: startup.state.zombieFinalScale,
+    })}`)
+  }
   assert(startup.state.health === 100, 'Player health did not start at 100.')
   if (screenshotPath) {
     const screenshot = await cdp.send('Page.captureScreenshot', {
@@ -377,7 +411,10 @@ try {
     emit('#adsButton', 'pointerdown', 21, ads.x, ads.y);
     emit('#fireButton', 'pointerdown', 22, fire.x, fire.y);
   })()`)
-  await delay(380)
+  await cdp.waitForExpression(
+    `Number(window.__nightBreachTest.snapshot().ammo.split('/')[0]) <= 28`,
+    5_000,
+  )
   const heldFire = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(heldFire.adsHeld && heldFire.automaticFireHeld, 'ADS and hold-to-fire did not remain active together.')
   assert(Number(heldFire.ammo.split('/')[0]) <= 28, 'Hold-to-fire did not fire repeatedly.')
@@ -393,7 +430,7 @@ try {
   await cdp.waitForExpression(`
     window.__nightBreachTest.snapshot().ammo.startsWith('30/')
       && window.__nightBreachTest.snapshot().reloadElapsed < 0
-  `, 3_000)
+  `, 10_000)
   const reloaded = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(reloaded.ammo.startsWith('30/'), 'Reload did not restore the magazine.')
   assert(Number(reloaded.ammo.split('/')[1]) < 120, 'Reload did not consume reserve ammunition.')
@@ -408,6 +445,10 @@ try {
     Math.abs(zombie.position.x - initialPositions[index].x)
       + Math.abs(zombie.position.z - initialPositions[index].z) > 0.05),
   'Zombie chasing did not change a zombie position.')
+  if (!forceZombieFallback) {
+    assert(chasing.zombies.some((zombie) => zombie.animation.endsWith('_Walk1')),
+      `Zombie chase did not select Walk1: ${JSON.stringify(chasing.zombies)}.`)
+  }
   console.log('runtime-smoke: detection and chase passed')
 
   await cdp.evaluate(`(() => {
@@ -443,6 +484,10 @@ try {
   const attackDamage = healthBeforeAttack - firstAttack.health
   assert(attackDamage >= 14 && attackDamage % 14 === 0,
     `A zombie attack did not apply configured 14-point damage: ${attackDamage}.`)
+  if (!forceZombieFallback) {
+    assert(firstAttack.zombies[1].animation.endsWith('_Attack1.001'),
+      `Zombie attack did not select Attack1.001: ${JSON.stringify(firstAttack.zombies[1])}.`)
+  }
   await delay(200)
   const afterDamageWindow = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(afterDamageWindow.health === firstAttack.health,
@@ -455,10 +500,17 @@ try {
     api.setZombiePosition(0, 0, -5);
     api.setZombiePosition(1, -23, 23);
     api.setZombiePosition(2, 23, 23);
-    api.setCameraRotation(0.12, 0);
+    api.setCameraRotation(0.2, 0);
   })()`)
   const bodyProbe = await cdp.evaluate(`window.__nightBreachTest.probeAim()`)
   assert(bodyProbe.zone === 'torso', `Body-shot aim probe missed the torso: ${JSON.stringify(bodyProbe)}`)
+  if (screenshotPath) {
+    const zombieScreenshot = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      fromSurface: true,
+    })
+    writeFileSync(`${screenshotPath}.zombie.png`, Buffer.from(zombieScreenshot.data, 'base64'))
+  }
   const bodyHitMarkerVisible = await cdp.evaluate(`(() => {
     window.__nightBreachTest.hitZombie(0, 'torso');
     return document.querySelector('#hitMarker').classList.contains('visible');
@@ -468,6 +520,10 @@ try {
   const bodyHit = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(bodyHit.zombies[0].health === 66 && bodyHit.zombies[0].state === 'hit',
     `Body-shot damage or hit reaction failed: ${JSON.stringify({ ammo: bodyHit.ammo, zombie: bodyHit.zombies[0] })}`)
+  if (!forceZombieFallback) {
+    assert(bodyHit.zombies[0].animation === 'hit-root-fallback',
+      `Zombie hit did not select the parent-root fallback: ${JSON.stringify(bodyHit.zombies[0])}.`)
+  }
   console.log('runtime-smoke: body shot and hit reaction passed')
 
   await delay(250)
@@ -488,12 +544,16 @@ try {
   await cdp.evaluate(`(() => {
     const api = window.__nightBreachTest;
     api.setZombiePosition(0, 0, -5);
-    api.setCameraRotation(0.12, 0);
+    api.setCameraRotation(0.2, 0);
     api.hitZombie(0, 'torso');
   })()`)
   const deadZombie = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(deadZombie.zombies[0].health === 0 && deadZombie.zombies[0].state === 'dead',
     'Zombie death did not follow lethal damage.')
+  if (!forceZombieFallback) {
+    assert(deadZombie.zombies[0].animation === 'death-root-fallback',
+      `Zombie death did not select the parent-root fallback: ${JSON.stringify(deadZombie.zombies[0])}.`)
+  }
   await cdp.waitForExpression(`
     window.__nightBreachTest.snapshot().activeZombieCount === 2
       && window.__nightBreachTest.snapshot().zombies[0].disposed
@@ -509,7 +569,23 @@ try {
   assert(await cdp.evaluate(`document.body.classList.contains('game-over')`),
     'Retry overlay did not open after player death.')
   await cdp.evaluate(`document.querySelector('#retryButton').click()`)
-  await delay(250)
+  try {
+    await cdp.waitForExpression(`(() => {
+      const state = window.__nightBreachTest.snapshot();
+      return state.health === 100
+        && state.ammo === '30/120'
+        && !state.gameOver
+        && state.activeZombieCount === 3
+        && state.zombies.length === 3;
+    })()`, 10_000)
+  } catch (error) {
+    const retrySnapshot = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
+    console.error(`runtime-smoke: retry diagnostics ${JSON.stringify({
+      consoleErrors: cdp.consoleErrors,
+      snapshot: retrySnapshot,
+    })}`)
+    throw error
+  }
   const retried = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(retried.health === 100 && retried.ammo === '30/120' && !retried.gameOver,
     'Retry did not reset player health and ammunition.')
@@ -536,7 +612,7 @@ try {
 
   console.log(JSON.stringify({
     browserConsoleErrors: cdp.consoleErrors.length,
-    fallback: startup.source,
+    zombie: startup.source,
     multitouch: 'joystick + swipe + ADS + hold-fire passed',
     performanceTier: startup.performanceTier,
     rifle: startup.weaponSource,

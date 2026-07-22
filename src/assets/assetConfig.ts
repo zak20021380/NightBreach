@@ -96,11 +96,11 @@ export const ASSET_CONFIG = {
     zombie: {
       key: 'zombie',
       label: 'Zombie',
-      path: '/assets/zombies/zombie.glb',
+      path: '/assets/zombies/zombie_basic.glb',
       transform: {
         position: [0, 0, 0],
         rotation: [0, Math.PI, 0],
-        scale: [0.92, 0.92, 0.92],
+        scale: [1.387821, 1.387821, 1.387821],
       },
       animation: { speed: 0.95, autoplay: false, loop: false },
       material: { mode: 'source' },

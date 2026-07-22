@@ -1084,7 +1084,18 @@ function detectZombieAnimations(groups: AnimationGroup[]): ZombieAnimationMap {
     }
   }
 
+  // This asset has one locomotion clip. Reusing the independently cloned
+  // Walk1 group at a higher playback rate gives each zombie a run/chase state
+  // without altering the authored skeleton or any skinned mesh transforms.
+  animations.run ??= animations.walk
   return animations
+}
+
+function describeZombieAnimationMapping(animations: ZombieAnimationMap) {
+  const animationNames = Object.keys(zombieAnimationAliases) as ZombieAnimationName[]
+  return animationNames.map((name) => (
+    `${name}:${animations[name]?.name ?? `${name}-root-fallback`}`
+  )).join(',')
 }
 
 function configureZombieVisualMesh(mesh: AbstractMesh, allowShadows: boolean) {
@@ -1094,61 +1105,90 @@ function configureZombieVisualMesh(mesh: AbstractMesh, allowShadows: boolean) {
   if (allowShadows) shadowGenerator?.addShadowCaster(mesh)
 }
 
+function cloneSkinnedZombieInstance(container: AssetContainer, name: string) {
+  // Babylon's equivalent of Three.js SkeletonUtils.clone(): skinned meshes,
+  // skeletons, linked bone nodes, and animation groups are cloned together,
+  // while immutable geometry, materials, and textures remain shared.
+  return container.instantiateModelsToScene(
+    (sourceName) => `${name}_${sourceName}`,
+    false,
+    { doNotInstantiate: false },
+  )
+}
+
 function createGlbZombieFactory(
   container: AssetContainer,
 ): ZombieVisualFactory {
   return {
     source: 'glb',
     create(name: string) {
-      const entries = container.instantiateModelsToScene(
-        (sourceName) => `${name}_${sourceName}`,
-        // Geometry, materials, and their textures remain shared. Babylon only
-        // duplicates mutable skeleton/animation state needed per zombie.
-        false,
-        { doNotInstantiate: false },
-      )
+      const entries = cloneSkinnedZombieInstance(container, name)
       const root = new TransformNode(`${name}VisualRoot`, scene)
-      for (const rootNode of entries.rootNodes) rootNode.parent = root
-
-      root.rotation.copyFrom(ZOMBIE_ASSET_CONFIG.rotation)
-      root.scaling.copyFrom(ZOMBIE_ASSET_CONFIG.scale)
-      const modelMeshes = root.getChildMeshes(false)
-      modelMeshes.forEach((mesh) => {
-        configureZombieVisualMesh(mesh, !isMobile && !isLowEndMobile)
-      })
-      applyImportedMaterialSettings(modelMeshes, ZOMBIE_ASSET_CONFIG.material)
-
       try {
+        for (const rootNode of entries.rootNodes) rootNode.parent = root
+
+        // Presentation correction is isolated to this complete instance root.
+        // Loader nodes, bones, and skinned meshes keep their authored transforms.
+        root.rotation.copyFrom(ZOMBIE_ASSET_CONFIG.rotation)
+        root.scaling.copyFrom(ZOMBIE_ASSET_CONFIG.scale)
+        const modelMeshes = root.getChildMeshes(false)
+        const renderableMeshes = modelMeshes.filter((mesh) => mesh.getTotalVertices() > 0)
+        const skinnedMeshes = renderableMeshes.filter((mesh) => mesh.skeleton !== null)
+        if (entries.skeletons.length === 0 || skinnedMeshes.length !== renderableMeshes.length) {
+          throw new Error(
+            `Zombie skin clone was incomplete (${entries.skeletons.length} skeletons; ${skinnedMeshes.length}/${renderableMeshes.length} skinned meshes).`,
+          )
+        }
+        modelMeshes.forEach((mesh) => {
+          configureZombieVisualMesh(mesh, shadowGenerator !== null)
+        })
+        applyImportedMaterialSettings(modelMeshes, ZOMBIE_ASSET_CONFIG.material)
+
         root.computeWorldMatrix(true)
         modelMeshes.forEach((mesh) => mesh.computeWorldMatrix(true))
         const initialBounds = root.getHierarchyBoundingVectors(true)
         const initialHeight = initialBounds.max.y - initialBounds.min.y
-        if (initialHeight > 0.001) {
-          root.scaling.scaleInPlace(ZOMBIE_ASSET_CONFIG.height / initialHeight)
-          root.computeWorldMatrix(true)
-          modelMeshes.forEach((mesh) => mesh.computeWorldMatrix(true))
-          const groundedBounds = root.getHierarchyBoundingVectors(true)
-          root.position.y -= groundedBounds.min.y
+        if (!Number.isFinite(initialHeight) || initialHeight <= 0.001) {
+          throw new Error(`Zombie clone returned an invalid height: ${initialHeight}.`)
+        }
+        if (Math.abs(initialHeight - ZOMBIE_ASSET_CONFIG.height) > 0.03) {
+          throw new Error(
+            `Zombie parent scale no longer resolves to ${ZOMBIE_ASSET_CONFIG.height}m (measured ${initialHeight.toFixed(3)}m).`,
+          )
+        }
+        root.position.y -= initialBounds.min.y
+        root.position.addInPlace(ZOMBIE_ASSET_CONFIG.position)
+
+        const animationGroups = [...entries.animationGroups]
+        for (const group of animationGroups) {
+          group.speedRatio = ZOMBIE_ASSET_CONFIG.animationSpeed
+        }
+        const animations = detectZombieAnimations(animationGroups)
+        if (!animations.idle || !animations.walk || !animations.attack) {
+          throw new Error(
+            `Zombie animation clone lost a required clip (${describeZombieAnimationMapping(animations)}).`,
+          )
+        }
+
+        canvas.dataset.zombieFinalScale = root.scaling.x.toFixed(6)
+        canvas.dataset.zombieFinalRotation = [root.rotation.x, root.rotation.y, root.rotation.z]
+          .map((value) => value.toFixed(6))
+          .join(',')
+
+        return {
+          root,
+          animationGroups,
+          animations,
+          proceduralParts: null,
+          dispose: () => {
+            entries.dispose()
+            root.dispose()
+          },
         }
       } catch (error) {
-        logRuntimeWarning(`Could not normalize ${name} to the configured zombie height.`, error)
-      }
-      root.position.addInPlace(ZOMBIE_ASSET_CONFIG.position)
-
-      const animationGroups = [...entries.animationGroups]
-      for (const group of animationGroups) {
-        group.speedRatio = ZOMBIE_ASSET_CONFIG.animationSpeed
-      }
-
-      return {
-        root,
-        animationGroups,
-        animations: detectZombieAnimations(animationGroups),
-        proceduralParts: null,
-        dispose: () => {
-          entries.dispose()
-          root.dispose()
-        },
+        entries.dispose()
+        root.dispose()
+        throw error
       }
     },
   }
@@ -1279,6 +1319,19 @@ function createProceduralZombieFactory(): ZombieVisualFactory {
 
 let zombieFactoryPromise: Promise<ZombieVisualFactory> | null = null
 
+function markProceduralZombieSource() {
+  canvas.dataset.zombieSource = 'procedural'
+  canvas.dataset.zombieSharing = 'shared-geometry-materials'
+  canvas.dataset.zombieClipNames = 'none'
+  canvas.dataset.zombieAnimationMapping = 'procedural-root-animation'
+  canvas.dataset.zombieSkeletonCount = '0'
+  canvas.dataset.zombieBoneCount = '0'
+  canvas.dataset.zombieMeshCount = '0'
+  canvas.dataset.zombieSkinnedMeshCount = '0'
+  canvas.dataset.zombieFinalScale = '0'
+  canvas.dataset.zombieFinalRotation = 'procedural'
+}
+
 function getZombieVisualFactory() {
   if (zombieFactoryPromise) return zombieFactoryPromise
 
@@ -1286,28 +1339,48 @@ function getZombieVisualFactory() {
     const result = await localAssetManager.load('zombie')
     if (result.status === 'fallback') {
       console.info('[Night Breach] Zombie source: shared procedural fallback active.')
-      canvas.dataset.zombieSource = 'procedural'
-      canvas.dataset.zombieSharing = 'shared-geometry-materials'
+      markProceduralZombieSource()
       return createProceduralZombieFactory()
     }
 
     try {
       const container = result.container
       const detected = detectZombieAnimations(container.animationGroups)
-      const detectedNames = Object.keys(detected)
+      const clipNames = container.animationGroups.map((animation) => animation.name)
+      const renderableMeshes = container.meshes.filter((mesh) => mesh.getTotalVertices() > 0)
+      const skinnedMeshes = renderableMeshes.filter((mesh) => mesh.skeleton !== null)
+      const boneCount = container.skeletons.reduce(
+        (total, skeleton) => total + skeleton.bones.length,
+        0,
+      )
+      if (container.skeletons.length === 0 || skinnedMeshes.length !== renderableMeshes.length) {
+        throw new Error(
+          `Zombie GLB rig is incomplete (${container.skeletons.length} skeletons; ${skinnedMeshes.length}/${renderableMeshes.length} skinned meshes).`,
+        )
+      }
+      if (!detected.idle || !detected.walk || !detected.attack) {
+        throw new Error(
+          `Zombie GLB is missing a required authored clip (${describeZombieAnimationMapping(detected)}).`,
+        )
+      }
       console.info(
-        `[Night Breach] Zombie source: local GLB loaded once (${container.meshes.length} meshes; animations: ${detectedNames.join(', ') || 'none detected'}).`,
+        `[Night Breach] Zombie source: local GLB loaded once (${renderableMeshes.length} skinned meshes; ${container.skeletons.length} skeleton/${boneCount} bones; clips: ${clipNames.join(', ')}; mapping: ${describeZombieAnimationMapping(detected)}).`,
       )
       canvas.dataset.zombieSource = 'glb'
-      canvas.dataset.zombieSharing = 'instanced-geometry-shared-materials-textures'
+      canvas.dataset.zombieSharing = 'cloned-skeletons-shared-geometry-materials-textures'
+      canvas.dataset.zombieClipNames = clipNames.join(',')
+      canvas.dataset.zombieAnimationMapping = describeZombieAnimationMapping(detected)
+      canvas.dataset.zombieSkeletonCount = String(container.skeletons.length)
+      canvas.dataset.zombieBoneCount = String(boneCount)
+      canvas.dataset.zombieMeshCount = String(renderableMeshes.length)
+      canvas.dataset.zombieSkinnedMeshCount = String(skinnedMeshes.length)
       return createGlbZombieFactory(container)
     } catch (error) {
       logRuntimeWarning(
         'Zombie source: shared procedural fallback (local GLB unavailable).',
         error,
       )
-      canvas.dataset.zombieSource = 'procedural'
-      canvas.dataset.zombieSharing = 'shared-geometry-materials'
+      markProceduralZombieSource()
       return createProceduralZombieFactory()
     }
   })()
@@ -1329,10 +1402,12 @@ class Zombie {
   private _state: ZombieState = 'idle'
   private health = ZOMBIE_COMBAT_CONFIG.maxHealth
   private activeAnimation: AnimationGroup | null = null
+  private activeAnimationSpeed = 0
   private animationPaused = false
   private proceduralTime: number
   private proceduralBaseY: number
   private proceduralBaseRotationX: number
+  private proceduralBaseRotationZ: number
   private thinkTimeRemaining: number
   private cachedDistanceSquared = Number.POSITIVE_INFINITY
   private desiredDirectionX = 0
@@ -1381,6 +1456,7 @@ class Zombie {
     this.visual.root.position.y -= ZOMBIE_ASSET_CONFIG.height * 0.5
     this.proceduralBaseY = this.visual.root.position.y
     this.proceduralBaseRotationX = this.visual.root.rotation.x
+    this.proceduralBaseRotationZ = this.visual.root.rotation.z
     this.proceduralTime = id * 0.73
     this.thinkTimeRemaining = id * 0.045
     this.obstacleRay = new Ray(
@@ -1399,6 +1475,14 @@ class Zombie {
 
   get currentHealth() {
     return this.health
+  }
+
+  get activeAnimationName() {
+    if (this.activeAnimation) return this.activeAnimation.name
+    if (this.visual.proceduralParts) return 'procedural'
+    if (this._state === 'hit') return 'hit-root-fallback'
+    if (this._state === 'dead') return 'death-root-fallback'
+    return 'none'
   }
 
   applyHit(zone: ZombieHitZoneType) {
@@ -1770,6 +1854,35 @@ class Zombie {
         this.proceduralBaseRotationX + Math.PI * 0.48,
         this.visual.root.rotation.x + deltaSeconds * 1.6,
       )
+      this.visual.root.rotation.z = damp(
+        this.visual.root.rotation.z,
+        this.proceduralBaseRotationZ,
+        10,
+        deltaSeconds,
+      )
+    } else if (this._state === 'hit' && !this.visual.animations.hit) {
+      const hitProgress = 1 - clamp(
+        this.hitReactionRemaining / ZOMBIE_COMBAT_CONFIG.hitReactionDuration,
+        0,
+        1,
+      )
+      const hitKick = Math.sin(hitProgress * Math.PI)
+      this.visual.root.rotation.x = this.proceduralBaseRotationX - hitKick * 0.08
+      this.visual.root.rotation.z = this.proceduralBaseRotationZ
+        + hitKick * (this.id % 2 === 0 ? 0.07 : -0.07)
+    } else {
+      this.visual.root.rotation.x = damp(
+        this.visual.root.rotation.x,
+        this.proceduralBaseRotationX,
+        12,
+        deltaSeconds,
+      )
+      this.visual.root.rotation.z = damp(
+        this.visual.root.rotation.z,
+        this.proceduralBaseRotationZ,
+        12,
+        deltaSeconds,
+      )
     }
 
     const parts = this.visual.proceduralParts
@@ -1836,18 +1949,35 @@ class Zombie {
 
   private playStateAnimation() {
     const animation = this.animationForState()
-    if (animation === this.activeAnimation) return
+    const animationSpeed = animation ? this.animationSpeedForState(animation) : 0
+    if (animation === this.activeAnimation
+      && Math.abs(animationSpeed - this.activeAnimationSpeed) < 0.001) return
     this.activeAnimation?.stop()
     this.activeAnimation = animation
+    this.activeAnimationSpeed = animationSpeed
     if (!animation) return
 
     const loops = this._state === 'idle' || this._state === 'chasing'
     animation.start(
       loops,
-      ZOMBIE_ASSET_CONFIG.animationSpeed,
+      animationSpeed,
       animation.from,
       animation.to,
       false,
+    )
+  }
+
+  private animationSpeedForState(animation: AnimationGroup) {
+    if (this._state === 'chasing' && this.locomotion === 'run') {
+      return ZOMBIE_ASSET_CONFIG.animationSpeed * 1.35
+    }
+    if (this._state !== 'attacking') return ZOMBIE_ASSET_CONFIG.animationSpeed
+
+    const framesPerSecond = animation.targetedAnimations[0]?.animation.framePerSecond ?? 30
+    const clipDuration = (animation.to - animation.from) / framesPerSecond
+    return Math.max(
+      ZOMBIE_ASSET_CONFIG.animationSpeed,
+      clipDuration / ZOMBIE_COMBAT_CONFIG.attackDuration,
     )
   }
 
@@ -1919,8 +2049,7 @@ async function initializeZombies() {
       error,
     )
     factory = createProceduralZombieFactory()
-    canvas.dataset.zombieSource = 'procedural'
-    canvas.dataset.zombieSharing = 'shared-geometry-materials'
+    markProceduralZombieSource()
   }
 
   try {
@@ -1936,8 +2065,7 @@ async function initializeZombies() {
     zombies.length = 0
     factory = createProceduralZombieFactory()
     activeZombieFactory = factory
-    canvas.dataset.zombieSource = 'procedural'
-    canvas.dataset.zombieSharing = 'shared-geometry-materials'
+    markProceduralZombieSource()
     spawnZombieWave(factory)
   }
 
@@ -3340,6 +3468,14 @@ if (import.meta.env.DEV) {
           reloadElapsed,
           renderLoop: canvas.dataset.renderLoop,
           rifleReady: canvas.dataset.rifleReady,
+          zombieAnimationMapping: canvas.dataset.zombieAnimationMapping ?? 'none',
+          zombieBoneCount: Number(canvas.dataset.zombieBoneCount ?? 0),
+          zombieClipNames: canvas.dataset.zombieClipNames ?? 'none',
+          zombieFinalRotation: canvas.dataset.zombieFinalRotation ?? 'none',
+          zombieFinalScale: Number(canvas.dataset.zombieFinalScale ?? 0),
+          zombieMeshCount: Number(canvas.dataset.zombieMeshCount ?? 0),
+          zombieSkeletonCount: Number(canvas.dataset.zombieSkeletonCount ?? 0),
+          zombieSkinnedMeshCount: Number(canvas.dataset.zombieSkinnedMeshCount ?? 0),
           weaponActiveAnimation: canvas.dataset.weaponActiveAnimation,
           weaponBoneCount: Number(canvas.dataset.weaponBoneCount ?? 0),
           weaponClipNames: canvas.dataset.weaponClipNames ?? 'none',
@@ -3351,6 +3487,7 @@ if (import.meta.env.DEV) {
           weaponSource: canvas.dataset.weaponSource,
           webViewActive,
           zombies: zombies.map((zombie) => ({
+            animation: zombie.activeAnimationName,
             disposed: zombie.root.isDisposed(),
             health: zombie.currentHealth,
             position: {
@@ -3423,6 +3560,29 @@ if (import.meta.env.DEV) {
             const partName = partNames[partIndex]
             if (parts[partName].geometry !== firstParts[partName].geometry
               || parts[partName].material !== firstParts[partName].material) return false
+          }
+        }
+        return true
+      },
+      verifyZombieCloneIsolation() {
+        if (canvas.dataset.zombieSource !== 'glb' || zombies.length < 2) return false
+        const instances = zombies.map((zombie) => {
+          const meshes = zombie.visual.root.getChildMeshes(false)
+            .filter((mesh): mesh is Mesh => mesh instanceof Mesh && mesh.getTotalVertices() > 0)
+          const skeletons = [...new Set(meshes.map((mesh) => mesh.skeleton).filter(Boolean))]
+          return { meshes, skeletons }
+        })
+        if (instances.some((instance) => (
+          instance.meshes.length !== Number(canvas.dataset.zombieMeshCount)
+          || instance.skeletons.length !== Number(canvas.dataset.zombieSkeletonCount)
+        ))) return false
+        for (let index = 1; index < instances.length; index += 1) {
+          if (instances[index].skeletons[0] === instances[0].skeletons[0]) return false
+          for (let meshIndex = 0; meshIndex < instances[0].meshes.length; meshIndex += 1) {
+            const firstMesh = instances[0].meshes[meshIndex]
+            const comparedMesh = instances[index].meshes[meshIndex]
+            if (comparedMesh.geometry !== firstMesh.geometry
+              || comparedMesh.material !== firstMesh.material) return false
           }
         }
         return true
