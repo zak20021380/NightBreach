@@ -1966,10 +1966,10 @@ scene.onBeforeRenderObservable.add(() => {
 })
 
 const WEAPON_VIEW_CONFIG = {
-  fov: 85 * Math.PI / 180,
-  position: new Vector3(0.39, -0.34, 0.55),
+  fov: 78 * Math.PI / 180,
+  position: new Vector3(0.31, -0.38, 0.32),
   rotation: new Vector3(-0.02, -0.09, 0.01),
-  adsPosition: new Vector3(0, -0.18, 0.59),
+  adsPosition: new Vector3(0, -0.15, 0.35),
   adsRotation: new Vector3(-0.006, 0, 0),
   muzzlePosition: new Vector3(0, 0.155, 0.69),
 }
@@ -1995,7 +1995,7 @@ const VIEW_MODEL_RENDER_LAYER_MASK = 0x10000000
 camera.layerMask = WORLD_RENDER_LAYER_MASK
 const weaponViewCamera = new TargetCamera('weaponViewCamera', Vector3.Zero(), scene, false)
 weaponViewCamera.parent = camera
-weaponViewCamera.minZ = 0.02
+weaponViewCamera.minZ = 0.008
 weaponViewCamera.maxZ = 10
 weaponViewCamera.fov = WEAPON_VIEW_CONFIG.fov
 weaponViewCamera.layerMask = VIEW_MODEL_RENDER_LAYER_MASK

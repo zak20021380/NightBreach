@@ -9,6 +9,8 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const forceRifleFallback = process.env.NIGHTBREACH_FORCE_RIFLE_FALLBACK === '1'
 const expectedWeaponSource = forceRifleFallback ? 'procedural' : 'glb'
 const screenshotPath = process.env.NIGHTBREACH_SCREENSHOT_PATH
+const viewportWidth = Number(process.env.NIGHTBREACH_VIEWPORT_WIDTH ?? 844)
+const viewportHeight = Number(process.env.NIGHTBREACH_VIEWPORT_HEIGHT ?? 390)
 const chromeCandidates = [
   process.env.CHROME_PATH,
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -205,7 +207,7 @@ const chromeProcess = spawn(chromePath, [
   '--use-angle=swiftshader',
   `--remote-debugging-port=${debugPort}`,
   `--user-data-dir=${profilePath}`,
-  '--window-size=844,390',
+  `--window-size=${viewportWidth},${viewportHeight}`,
   'about:blank',
 ], {
   stdio: ['ignore', 'ignore', 'pipe'],
@@ -233,11 +235,11 @@ try {
   }
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     deviceScaleFactor: 2,
-    height: 390,
+    height: viewportHeight,
     mobile: true,
-    screenHeight: 390,
-    screenWidth: 844,
-    width: 844,
+    screenHeight: viewportHeight,
+    screenWidth: viewportWidth,
+    width: viewportWidth,
   })
   await cdp.send('Emulation.setTouchEmulationEnabled', {
     enabled: true,

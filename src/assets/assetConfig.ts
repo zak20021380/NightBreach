@@ -84,7 +84,7 @@ export const ASSET_CONFIG = {
         // +Z, so no bone or individual mesh corrections are needed.
         position: [0, 0.06, 0.24],
         rotation: [0, 0, 0],
-        scale: [0.025, 0.025, 0.025],
+        scale: [0.032, 0.032, 0.032],
       },
       animation: { speed: 1, autoplay: false, loop: false },
       material: {
