@@ -2463,6 +2463,11 @@ configureFirstPersonMesh(muzzleFlash)
 type WeaponAnimationName = 'idle' | 'fire' | 'reload' | 'equip' | 'ads'
 type WeaponAnimationMap = Partial<Record<WeaponAnimationName, AnimationGroup>>
 
+const PROCEDURAL_RELOAD_DURATION_SECONDS = 1.05
+const RELOAD_AMMO_PROGRESS = 0.56
+const RELOAD_COMPLETION_GRACE_SECONDS = 0.15
+const WEAPON_ANIMATION_BLEND_SPEED = 0.16
+
 let importedAnimationGroups: AnimationGroup[] = []
 let importedWeaponAnimations: WeaponAnimationMap = {}
 let activeImportedWeaponAnimation: AnimationGroup | null = null
@@ -2495,6 +2500,27 @@ function detectWeaponAnimations(groups: AnimationGroup[]) {
     }
   }
   return detected
+}
+
+function getImportedAnimationDurationSeconds(animation: AnimationGroup) {
+  let durationSeconds = 0
+  const speed = Math.max(0.001, Math.abs(RIFLE_ASSET_CONFIG.animationSpeed))
+  for (const targetedAnimation of animation.targetedAnimations) {
+    const framesPerSecond = targetedAnimation.animation.framePerSecond
+    if (!Number.isFinite(framesPerSecond) || framesPerSecond <= 0) continue
+    durationSeconds = Math.max(
+      durationSeconds,
+      Math.abs(animation.to - animation.from) / framesPerSecond / speed,
+    )
+  }
+  return durationSeconds
+}
+
+function enableImportedAnimationBlending(animation: AnimationGroup) {
+  for (const targetedAnimation of animation.targetedAnimations) {
+    targetedAnimation.animation.enableBlending = true
+    targetedAnimation.animation.blendingSpeed = WEAPON_ANIMATION_BLEND_SPEED
+  }
 }
 
 async function loadLocalRifleModel(parent: TransformNode) {
@@ -2558,8 +2584,16 @@ async function loadLocalRifleModel(parent: TransformNode) {
     }
     importedWeaponAnimations = detectWeaponAnimations(importedAnimationGroups)
     for (const animation of importedAnimationGroups) {
+      enableImportedAnimationBlending(animation)
       animation.onAnimationGroupEndObservable.add(handleImportedWeaponAnimationEnd)
     }
+    const reloadAnimation = importedWeaponAnimations.reload
+    const detectedReloadDuration = reloadAnimation
+      ? getImportedAnimationDurationSeconds(reloadAnimation)
+      : 0
+    reloadDurationSeconds = detectedReloadDuration > 0
+      ? detectedReloadDuration
+      : PROCEDURAL_RELOAD_DURATION_SECONDS
     const detectedAnimationNames = (Object.keys(importedWeaponAnimations) as WeaponAnimationName[])
     const fallbackAnimationNames = (Object.keys(weaponAnimationAliases) as WeaponAnimationName[])
       .filter((name) => !importedWeaponAnimations[name])
@@ -2595,6 +2629,7 @@ async function loadLocalRifleModel(parent: TransformNode) {
     canvas.dataset.weaponAnimations = detectedAnimationNames.join(',') || 'none'
     canvas.dataset.weaponAnimationFallbacks = fallbackAnimationNames.join(',') || 'none'
     canvas.dataset.weaponClipNames = clipNames.join(',') || 'none'
+    canvas.dataset.weaponReloadDuration = reloadDurationSeconds.toFixed(6)
     canvas.dataset.weaponSkeletonCount = String(entries.skeletons.length)
     canvas.dataset.weaponBoneCount = String(skeletonBoneCount)
     canvas.dataset.weaponHierarchyNodeCount = String(hierarchyNodes.length)
@@ -2766,6 +2801,7 @@ function playImportedWeaponAnimation(
   name: WeaponAnimationName,
   loop = false,
   reverse = false,
+  resetBeforeStart = false,
 ) {
   const animation = importedWeaponAnimations[name]
   if (!animation) return false
@@ -2773,6 +2809,9 @@ function playImportedWeaponAnimation(
   for (const group of importedAnimationGroups) {
     if (group.isStarted) group.stop(true)
   }
+  // AnimationGroup.reset() rewinds every authored track before a fresh action.
+  // This is especially important for repeat reloads after the prior group ended.
+  if (resetBeforeStart) animation.reset()
   animation.start(
     loop,
     reverse ? -RIFLE_ASSET_CONFIG.animationSpeed : RIFLE_ASSET_CONFIG.animationSpeed,
@@ -2794,11 +2833,15 @@ function handleImportedWeaponAnimationEnd(animation: AnimationGroup) {
   if (activeImportedWeaponAnimation !== animation) return
   activeImportedWeaponAnimation = null
 
+  if (animation === importedWeaponAnimations.reload) {
+    completeReload()
+    return
+  }
   if (animation === importedWeaponAnimations.ads) {
     if (!adsHeld) playImportedWeaponAnimation('idle', true)
     return
   }
-  if (animation === importedWeaponAnimations.reload || reloadElapsed >= 0) return
+  if (reloadElapsed >= 0) return
   if (animation === importedWeaponAnimations.fire
     || animation === importedWeaponAnimations.equip) {
     playImportedWeaponRestAnimation()
@@ -2815,6 +2858,7 @@ let recoilAmount = 0
 let muzzleFlashRemaining = 0
 let reloadElapsed = -1
 let reloadApplied = false
+let reloadDurationSeconds = PROCEDURAL_RELOAD_DURATION_SECONDS
 let crosshairTimer: number | undefined
 let hitMarkerTimer: number | undefined
 let headshotTimer: number | undefined
@@ -2881,7 +2925,9 @@ function beginReload() {
   reloadElapsed = 0
   reloadApplied = false
   reloadButton.disabled = true
-  playImportedWeaponAnimation('reload')
+  if (!playImportedWeaponAnimation('reload', false, false, true)) {
+    reloadDurationSeconds = PROCEDURAL_RELOAD_DURATION_SECONDS
+  }
 }
 
 function applyReloadAmmo() {
@@ -2892,6 +2938,18 @@ function applyReloadAmmo() {
   reserveAmmo -= loaded
   reloadApplied = true
   updateAmmoDisplay()
+}
+
+function completeReload() {
+  if (reloadElapsed < 0) return
+  applyReloadAmmo()
+  const reloadAnimation = importedWeaponAnimations.reload
+  if (reloadAnimation?.isStarted) reloadAnimation.stop(true)
+  reloadElapsed = -1
+  reloadButton.disabled = false
+  // Idle's authored tracks have blending enabled, so they interpolate from the
+  // last reload frame instead of leaving the rig clamped in that pose.
+  playImportedWeaponRestAnimation()
 }
 
 function hitTarget(target: TargetState) {
@@ -3273,9 +3331,8 @@ scene.onBeforeRenderObservable.add(() => {
   let reloadRotationX = 0
   let reloadRotationZ = 0
   if (reloadElapsed >= 0) {
-    const reloadDuration = 1.05
     reloadElapsed += deltaSeconds
-    const progress = clamp(reloadElapsed / reloadDuration, 0, 1)
+    const progress = clamp(reloadElapsed / reloadDurationSeconds, 0, 1)
     const arc = Math.sin(progress * Math.PI)
     if (!importedWeaponAnimations.reload) {
       reloadPositionX = 0.018 * arc
@@ -3283,12 +3340,14 @@ scene.onBeforeRenderObservable.add(() => {
       reloadRotationX = 0.075 * arc
       reloadRotationZ = 0.16 * arc
     }
-    if (progress >= 0.56) applyReloadAmmo()
-    if (progress >= 1) {
-      applyReloadAmmo()
-      reloadElapsed = -1
-      reloadButton.disabled = false
-      playImportedWeaponRestAnimation()
+    if (progress >= RELOAD_AMMO_PROGRESS) applyReloadAmmo()
+    if (!importedWeaponAnimations.reload && progress >= 1) {
+      completeReload()
+    } else if (reloadElapsed
+      >= reloadDurationSeconds + RELOAD_COMPLETION_GRACE_SECONDS) {
+      // The AnimationGroup end observable is authoritative. This duration-based
+      // watchdog prevents a suspended/malformed clip from locking reload state.
+      completeReload()
     }
   }
 
@@ -3466,6 +3525,9 @@ if (import.meta.env.DEV) {
           moveInputY,
           mapReady: canvas.dataset.mapReady === 'true',
           reloadElapsed,
+          reloadDuration: reloadDurationSeconds,
+          reloadEndObserverCount:
+            importedWeaponAnimations.reload?.onAnimationGroupEndObservable.observers.length ?? 0,
           renderLoop: canvas.dataset.renderLoop,
           rifleReady: canvas.dataset.rifleReady,
           zombieAnimationMapping: canvas.dataset.zombieAnimationMapping ?? 'none',
@@ -3483,6 +3545,16 @@ if (import.meta.env.DEV) {
           weaponMeshCount: Number(canvas.dataset.weaponMeshCount ?? 0),
           weaponSkeletonCount: Number(canvas.dataset.weaponSkeletonCount ?? 0),
           weaponSkinnedMeshCount: Number(canvas.dataset.weaponSkinnedMeshCount ?? 0),
+          viewModelPosition: {
+            x: viewModelPivot.position.x,
+            y: viewModelPivot.position.y,
+            z: viewModelPivot.position.z,
+          },
+          viewModelRotation: {
+            x: viewModelPivot.rotation.x,
+            y: viewModelPivot.rotation.y,
+            z: viewModelPivot.rotation.z,
+          },
           visibleRifleHierarchies: Number(canvas.dataset.visibleRifleHierarchies ?? 0),
           weaponSource: canvas.dataset.weaponSource,
           webViewActive,

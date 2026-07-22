@@ -418,23 +418,103 @@ try {
   const heldFire = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(heldFire.adsHeld && heldFire.automaticFireHeld, 'ADS and hold-to-fire did not remain active together.')
   assert(Number(heldFire.ammo.split('/')[0]) <= 28, 'Hold-to-fire did not fire repeatedly.')
-  await cdp.evaluate(`(() => {
-    ${pointerHelpers}
-    const ads = center('#adsButton');
-    const fire = center('#fireButton');
-    emit('#fireButton', 'pointerup', 22, fire.x, fire.y);
-    emit('#adsButton', 'pointerup', 21, ads.x, ads.y);
-    const reload = center('#reloadButton');
-    emit('#reloadButton', 'pointerdown', 23, reload.x, reload.y);
-  })()`)
-  await cdp.waitForExpression(`
-    window.__nightBreachTest.snapshot().ammo.startsWith('30/')
-      && window.__nightBreachTest.snapshot().reloadElapsed < 0
-  `, 10_000)
-  const reloaded = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
-  assert(reloaded.ammo.startsWith('30/'), 'Reload did not restore the magazine.')
-  assert(Number(reloaded.ammo.split('/')[1]) < 120, 'Reload did not consume reserve ammunition.')
-  console.log('runtime-smoke: hold-fire, ADS, and reload passed')
+  const reloadObserverCount = heldFire.reloadEndObserverCount
+  if (!forceRifleFallback) {
+    assert(reloadObserverCount === 1,
+      `Reload_Fast should have one completion observer, found ${reloadObserverCount}.`)
+    assert(Math.abs(heldFire.reloadDuration - 1.766667) < 0.02,
+      `Reload_Fast duration was not detected from the clip: ${heldFire.reloadDuration}.`)
+  }
+
+  for (let reloadCycle = 0; reloadCycle < 3; reloadCycle += 1) {
+    if (reloadCycle === 0) {
+      await cdp.evaluate(`(() => {
+        ${pointerHelpers}
+        const ads = center('#adsButton');
+        const fire = center('#fireButton');
+        emit('#fireButton', 'pointerup', 22, fire.x, fire.y);
+        emit('#adsButton', 'pointerup', 21, ads.x, ads.y);
+      })()`)
+    } else {
+      const firePointerId = 30 + reloadCycle
+      await cdp.evaluate(`(() => {
+        ${pointerHelpers}
+        const fire = center('#fireButton');
+        emit('#fireButton', 'pointerdown', ${firePointerId}, fire.x, fire.y);
+        emit('#fireButton', 'pointerup', ${firePointerId}, fire.x, fire.y);
+      })()`)
+      await cdp.waitForExpression(
+        `Number(window.__nightBreachTest.snapshot().ammo.split('/')[0]) === 29`,
+        2_000,
+      )
+    }
+
+    const beforeReload = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
+    const [magazineBeforeReload, reserveBeforeReload] = beforeReload.ammo.split('/').map(Number)
+    const reloadPointerId = 40 + reloadCycle
+    await cdp.evaluate(`(() => {
+      ${pointerHelpers}
+      const reload = center('#reloadButton');
+      emit('#reloadButton', 'pointerdown', ${reloadPointerId}, reload.x, reload.y);
+    })()`)
+    await delay(120)
+    const earlyReload = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
+    assert(earlyReload.reloadElapsed >= 0 && earlyReload.ammo === beforeReload.ammo,
+      `Reload cycle ${reloadCycle + 1} changed ammo before the magazine-swap moment.`)
+    if (!forceRifleFallback) {
+      assert(earlyReload.weaponActiveAnimation === 'Reload_Fast',
+        `Reload cycle ${reloadCycle + 1} did not start Reload_Fast: ${earlyReload.weaponActiveAnimation}.`)
+    }
+
+    // Neither a shot nor a second reload may interrupt/reset an active reload.
+    const blockedFirePointerId = 50 + reloadCycle
+    await cdp.evaluate(`(() => {
+      ${pointerHelpers}
+      const fire = center('#fireButton');
+      const reload = center('#reloadButton');
+      emit('#fireButton', 'pointerdown', ${blockedFirePointerId}, fire.x, fire.y);
+      emit('#fireButton', 'pointerup', ${blockedFirePointerId}, fire.x, fire.y);
+      emit('#reloadButton', 'pointerdown', ${reloadPointerId + 10}, reload.x, reload.y);
+    })()`)
+    await delay(100)
+    const blockedInput = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
+    assert(blockedInput.ammo === beforeReload.ammo
+      && blockedInput.reloadElapsed >= earlyReload.reloadElapsed,
+    `Reload cycle ${reloadCycle + 1} accepted fire/reload input while active.`)
+
+    await cdp.waitForExpression(`(() => {
+      const state = window.__nightBreachTest.snapshot();
+      return state.reloadElapsed >= state.reloadDuration * 0.6;
+    })()`, 5_000)
+    const magazineSwap = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
+    const expectedLoaded = Math.min(30 - magazineBeforeReload, reserveBeforeReload)
+    assert(magazineSwap.reloadElapsed >= 0
+      && magazineSwap.ammo === `${magazineBeforeReload + expectedLoaded}/${reserveBeforeReload - expectedLoaded}`,
+    `Reload cycle ${reloadCycle + 1} applied ammo at the wrong moment: ${magazineSwap.ammo}.`)
+
+    await cdp.waitForExpression(`(() => {
+      const state = window.__nightBreachTest.snapshot();
+      return state.reloadElapsed < 0
+        && ${forceRifleFallback ? 'true' : "state.weaponActiveAnimation === 'Idle'"};
+    })()`, 5_000)
+    await delay(250)
+    const reloaded = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
+    assert(reloaded.ammo.startsWith('30/'),
+      `Reload cycle ${reloadCycle + 1} did not restore the magazine.`)
+    assert(reloaded.reloadEndObserverCount === reloadObserverCount,
+      `Reload cycle ${reloadCycle + 1} accumulated completion observers.`)
+    assert(Math.abs(reloaded.viewModelPosition.x - 0.31) < 0.025
+      && Math.abs(reloaded.viewModelPosition.y + 0.38) < 0.025
+      && Math.abs(reloaded.viewModelPosition.z - 0.32) < 0.025
+      && Math.abs(reloaded.viewModelRotation.x + 0.02) < 0.025
+      && Math.abs(reloaded.viewModelRotation.y + 0.09) < 0.025
+      && Math.abs(reloaded.viewModelRotation.z - 0.01) < 0.025,
+    `Reload cycle ${reloadCycle + 1} did not restore the normal viewmodel root pose: ${JSON.stringify({
+      position: reloaded.viewModelPosition,
+      rotation: reloaded.viewModelRotation,
+    })}`)
+  }
+  console.log('runtime-smoke: hold-fire and three reload-to-idle cycles passed')
 
   const initialPositions = startup.state.zombies.map((zombie) => zombie.position)
   await delay(500)
