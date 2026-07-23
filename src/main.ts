@@ -117,6 +117,8 @@ let fireWeapon: () => void = () => undefined
 let reloadWeapon: () => void = () => undefined
 let equipWeapon: () => void = () => undefined
 let cancelMobileInput: () => void = () => undefined
+let stopZombieWaveTimers: () => void = () => undefined
+let startZombieWave: () => void = () => undefined
 let portraitInputPaused = isTouchDevice && window.innerHeight > window.innerWidth
 
 function gameplayInputEnabled() {
@@ -210,6 +212,7 @@ function deployGame() {
   canvas.focus()
   requestLandscapeSafely()
   requestPointerLockSafely()
+  startZombieWave()
   console.info(`[Night Breach][Deploy] Active with ${isTouchDevice ? 'mobile' : 'desktop'} controls.`)
 }
 
@@ -379,6 +382,7 @@ function damagePlayer(amount: number, attackerPosition: Vector3) {
   if (playerHealth > 0) return
 
   gameOver = true
+  stopZombieWaveTimers()
   cancelMobileInput()
   stopAutomaticFire()
   releaseAds()
@@ -1383,8 +1387,12 @@ const ZOMBIE_SPAWN_POSITIONS = [
   new Vector3(-4, 0, -2),
   new Vector3(14, 0, -8),
 ] as const
-const MAX_ACTIVE_ZOMBIES = 3
-canvas.dataset.zombieLimit = String(MAX_ACTIVE_ZOMBIES)
+const ZOMBIE_WAVE_CONFIG = {
+  baseZombieCount: 2,
+  zombiesAddedPerWave: 1,
+  spawnInterval: 1_000,
+  timeBetweenWaves: 3_000,
+} as const
 
 const zombieAnimationAliases: Readonly<Record<ZombieAnimationName, readonly string[]>> = {
   idle: ['idle'],
@@ -2119,6 +2127,7 @@ class Zombie {
     this.currentDirectionZ = 0
     this.root.checkCollisions = false
     this.disableHitZones()
+    onZombieDied()
     console.info(`[Night Breach] Zombie ${this.id} eliminated; hit detection disabled.`)
   }
 
@@ -2435,13 +2444,53 @@ const zombieHitZones = new Map<Mesh, ZombieHitZone>()
 const zombies: Zombie[] = []
 let activeZombieFactory: ZombieVisualFactory | null = null
 let activeZombieCount = 0
+let nextZombieId = 1
+let zombieSpawnTimer: number | undefined
+let nextWaveTimer: number | undefined
+
+type WaveStatus = 'waiting' | 'active' | 'complete'
+
+interface WaveState {
+  currentWave: number
+  scheduledZombies: number
+  spawnedZombies: number
+  aliveZombies: number
+  status: WaveStatus
+}
+
+const waveState: WaveState = {
+  currentWave: 0,
+  scheduledZombies: 0,
+  spawnedZombies: 0,
+  aliveZombies: 0,
+  status: 'waiting',
+}
+
+function updateWaveDisplay() {
+  canvas.dataset.wave = String(waveState.currentWave)
+  canvas.dataset.waveScheduledZombies = String(waveState.scheduledZombies)
+  canvas.dataset.waveSpawnedZombies = String(waveState.spawnedZombies)
+  canvas.dataset.waveAliveZombies = String(waveState.aliveZombies)
+  canvas.dataset.waveStatus = waveState.status
+}
+
+stopZombieWaveTimers = () => {
+  if (zombieSpawnTimer !== undefined) {
+    window.clearInterval(zombieSpawnTimer)
+    zombieSpawnTimer = undefined
+  }
+  if (nextWaveTimer !== undefined) {
+    window.clearTimeout(nextWaveTimer)
+    nextWaveTimer = undefined
+  }
+}
 
 function updateActiveZombieCount() {
   canvas.dataset.activeZombieCount = String(activeZombieCount)
 }
 
 function registerActiveZombie() {
-  activeZombieCount = Math.min(MAX_ACTIVE_ZOMBIES, activeZombieCount + 1)
+  activeZombieCount += 1
   updateActiveZombieCount()
 }
 
@@ -2450,19 +2499,84 @@ function unregisterActiveZombie() {
   updateActiveZombieCount()
 }
 
-function spawnZombieWave(factory: ZombieVisualFactory) {
-  const spawnCount = Math.min(MAX_ACTIVE_ZOMBIES, ZOMBIE_SPAWN_POSITIONS.length)
-  for (let index = 0; index < spawnCount; index += 1) {
-    const zombie = new Zombie(index + 1, ZOMBIE_SPAWN_POSITIONS[index], factory)
-    zombie.setPaused(!webViewActive || !deployed || gameOver)
-    zombies.push(zombie)
-    registerActiveZombie()
+function spawnNextWaveZombie() {
+  const factory = activeZombieFactory
+  if (!factory || gameOver || waveState.status !== 'active') {
+    stopZombieWaveTimers()
+    return
   }
+  if (waveState.spawnedZombies >= waveState.scheduledZombies) {
+    if (zombieSpawnTimer !== undefined) {
+      window.clearInterval(zombieSpawnTimer)
+      zombieSpawnTimer = undefined
+    }
+    return
+  }
+
+  const spawnPosition = ZOMBIE_SPAWN_POSITIONS[
+    waveState.spawnedZombies % ZOMBIE_SPAWN_POSITIONS.length
+  ]
+  const zombie = new Zombie(nextZombieId, spawnPosition, factory)
+  nextZombieId += 1
+  zombie.setPaused(!webViewActive || !deployed || gameOver)
+  zombies.push(zombie)
+  waveState.spawnedZombies += 1
+  waveState.aliveZombies += 1
+  registerActiveZombie()
   canvas.dataset.zombieCount = String(zombies.length)
-  console.info(
-    `[Night Breach][Zombies] Spawned ${spawnCount} ${factory.source} zombies (${zombies.length} active).`,
-  )
+  updateWaveDisplay()
+
+  if (waveState.spawnedZombies === waveState.scheduledZombies && zombieSpawnTimer !== undefined) {
+    window.clearInterval(zombieSpawnTimer)
+    zombieSpawnTimer = undefined
+  }
 }
+
+function completeWaveIfReady() {
+  if (gameOver || waveState.status !== 'active'
+    || waveState.spawnedZombies !== waveState.scheduledZombies
+    || waveState.aliveZombies !== 0) return
+
+  stopZombieWaveTimers()
+  waveState.status = 'complete'
+  updateWaveDisplay()
+  nextWaveTimer = window.setTimeout(() => {
+    nextWaveTimer = undefined
+    startNextZombieWave()
+  }, ZOMBIE_WAVE_CONFIG.timeBetweenWaves)
+}
+
+function onZombieDied() {
+  if (waveState.status !== 'active' || waveState.aliveZombies === 0) return
+  waveState.aliveZombies -= 1
+  updateWaveDisplay()
+  completeWaveIfReady()
+}
+
+function startNextZombieWave() {
+  if (!activeZombieFactory || gameOver || !deployed || waveState.status === 'active'
+    || nextWaveTimer !== undefined) return
+
+  stopZombieWaveTimers()
+  waveState.currentWave += 1
+  waveState.scheduledZombies = ZOMBIE_WAVE_CONFIG.baseZombieCount
+    + (waveState.currentWave - 1) * ZOMBIE_WAVE_CONFIG.zombiesAddedPerWave
+  waveState.spawnedZombies = 0
+  waveState.aliveZombies = 0
+  waveState.status = 'active'
+  updateWaveDisplay()
+  console.info(`[Night Breach][Waves] Wave ${waveState.currentWave} started with ${waveState.scheduledZombies} zombies.`)
+
+  spawnNextWaveZombie()
+  if (waveState.spawnedZombies < waveState.scheduledZombies) {
+    zombieSpawnTimer = window.setInterval(
+      spawnNextWaveZombie,
+      ZOMBIE_WAVE_CONFIG.spawnInterval,
+    )
+  }
+}
+
+startZombieWave = startNextZombieWave
 
 updateActiveZombieCount()
 
@@ -2482,7 +2596,7 @@ async function initializeZombies() {
 
   try {
     activeZombieFactory = factory
-    spawnZombieWave(factory)
+    if (deployed) startNextZombieWave()
   } catch (error) {
     if (factory.source === 'procedural') throw error
     logRuntimeWarning(
@@ -2494,7 +2608,7 @@ async function initializeZombies() {
     factory = createProceduralZombieFactory()
     activeZombieFactory = factory
     markProceduralZombieSource()
-    spawnZombieWave(factory)
+    if (deployed) startNextZombieWave()
   }
 
   console.info(
@@ -2503,11 +2617,22 @@ async function initializeZombies() {
 }
 
 function resetZombieWave() {
+  stopZombieWaveTimers()
   for (let index = 0; index < zombies.length; index += 1) zombies[index].dispose()
   zombies.length = 0
-  if (activeZombieFactory) spawnZombieWave(activeZombieFactory)
+  activeZombieCount = 0
+  nextZombieId = 1
+  waveState.currentWave = 0
+  waveState.scheduledZombies = 0
+  waveState.spawnedZombies = 0
+  waveState.aliveZombies = 0
+  waveState.status = 'waiting'
+  updateActiveZombieCount()
+  updateWaveDisplay()
 }
 
+updateWaveDisplay()
+scene.onDisposeObservable.add(stopZombieWaveTimers)
 void initializeZombies().catch((error) => {
   logRuntimeError('[Zombies] Initialization failed:', error)
 })
@@ -3705,6 +3830,7 @@ function restartPrototype() {
   bobTime = 0
 
   gameOver = false
+  startZombieWave()
   document.body.classList.remove('game-over')
   retryOverlay.setAttribute('aria-hidden', 'true')
   startCameraControls()
@@ -3984,6 +4110,7 @@ if (import.meta.env.DEV) {
           firePointerId,
           gameOver,
           health: playerHealth,
+          wave: { ...waveState },
           movementPointerId,
           moveInputX,
           moveInputY,
