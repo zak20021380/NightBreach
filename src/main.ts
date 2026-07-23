@@ -12,6 +12,7 @@ import { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator'
 import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imageProcessingConfiguration'
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial'
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial'
+import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture'
 import { Color3, Color4 } from '@babylonjs/core/Maths/math.color'
 import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector'
 import { type AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh'
@@ -19,6 +20,7 @@ import '@babylonjs/core/Meshes/instancedMesh'
 import { Mesh } from '@babylonjs/core/Meshes/mesh'
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder'
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode'
+import { ParticleSystem } from '@babylonjs/core/Particles/particleSystem'
 import { Scene } from '@babylonjs/core/scene'
 import {
   ASSET_CONFIG,
@@ -1038,11 +1040,14 @@ const ZOMBIE_COMBAT_CONFIG = {
   torsoDamage: 34,
   limbDamage: 20,
   hitReactionDuration: 0.18,
+  hitPushDistance: 0.045,
+  headHitPushMultiplier: 1.35,
   attackDamage: 14,
   attackCooldown: 1.15,
   attackDuration: 0.82,
   attackDamageMoment: 0.43,
-  removalDelay: 4.5,
+  fallbackDeathDuration: 0.95,
+  corpseHoldDuration: 3.5,
 }
 
 const zombieHitZoneMaterial = new StandardMaterial('zombieHitZoneMaterial', scene)
@@ -1050,6 +1055,126 @@ zombieHitZoneMaterial.alpha = 0
 zombieHitZoneMaterial.disableLighting = true
 zombieHitZoneMaterial.disableColorWrite = true
 zombieHitZoneMaterial.disableDepthWrite = true
+
+interface BloodBurstSnapshot {
+  activeParticles: number
+  burstCount: number
+  headshot: boolean
+  origin: Vector3
+  particleCount: number
+  poolCapacity: number
+}
+
+class BloodEffectPool {
+  private readonly systems: ParticleSystem[] = []
+  private readonly emitters: Vector3[] = []
+  private readonly lastOrigin = Vector3.Zero()
+  private readonly capacityPerSystem: number
+  private nextSystem = 0
+  private burstCount = 0
+  private lastHeadshot = false
+  private lastParticleCount = 0
+
+  constructor() {
+    const systemCount = isMobile ? 1 : 2
+    this.capacityPerSystem = isLowEndMobile ? 32 : isMobile ? 48 : 64
+    const particleTexture = new DynamicTexture(
+      'bloodParticleTexture',
+      { width: 16, height: 16 },
+      scene,
+      false,
+    )
+    const context = particleTexture.getContext()
+    context.clearRect(0, 0, 16, 16)
+    context.fillStyle = '#ffffff'
+    context.beginPath()
+    context.arc(8, 8, 7, 0, Math.PI * 2)
+    context.fill()
+    particleTexture.update(false)
+
+    for (let index = 0; index < systemCount; index += 1) {
+      const emitter = Vector3.Zero()
+      const system = new ParticleSystem(
+        `bloodBurst${index}`,
+        this.capacityPerSystem,
+        scene,
+      )
+      system.particleTexture = particleTexture
+      system.emitter = emitter
+      system.emitRate = 0
+      system.gravity.set(0, -5.8, 0)
+      system.color1 = new Color4(0.42, 0.005, 0.008, 0.96)
+      system.color2 = new Color4(0.72, 0.018, 0.012, 0.92)
+      system.colorDead = new Color4(0.12, 0, 0, 0)
+      system.blendMode = ParticleSystem.BLENDMODE_STANDARD
+      system.minAngularSpeed = -7
+      system.maxAngularSpeed = 7
+      this.emitters.push(emitter)
+      this.systems.push(system)
+    }
+  }
+
+  spawn(hitPoint: Vector3, bulletDirection: Vector3, headshot: boolean) {
+    const systemIndex = this.nextSystem
+    const system = this.systems[systemIndex]
+    const emitter = this.emitters[systemIndex]
+    this.nextSystem = (systemIndex + 1) % this.systems.length
+
+    emitter.copyFrom(hitPoint)
+    this.lastOrigin.copyFrom(hitPoint)
+    this.lastHeadshot = headshot
+    this.lastParticleCount = headshot
+      ? isLowEndMobile ? 9 : isMobile ? 11 : 14
+      : isLowEndMobile ? 4 : isMobile ? 5 : 7
+    this.burstCount += 1
+
+    const direction = bulletDirection.lengthSquared() > 0.000001
+      ? bulletDirection.normalizeToNew()
+      : Vector3.Forward()
+    const spread = headshot ? 0.62 : 0.42
+    system.direction1.set(
+      direction.x - spread,
+      direction.y - spread * 0.2,
+      direction.z - spread,
+    )
+    system.direction2.set(
+      direction.x + spread,
+      direction.y + spread * 0.85,
+      direction.z + spread,
+    )
+    system.minEmitPower = headshot ? 1.05 : 0.72
+    system.maxEmitPower = headshot ? 1.9 : 1.25
+    system.minLifeTime = headshot ? 0.28 : 0.22
+    system.maxLifeTime = headshot ? 0.52 : 0.4
+    system.minSize = headshot ? 0.045 : 0.03
+    system.maxSize = headshot ? 0.09 : 0.062
+    if (!system.isStarted()) system.start()
+    system.manualEmitCount = this.lastParticleCount
+  }
+
+  reset() {
+    for (let index = 0; index < this.systems.length; index += 1) {
+      this.systems[index].reset()
+    }
+  }
+
+  snapshot(): BloodBurstSnapshot {
+    let activeParticles = 0
+    for (let index = 0; index < this.systems.length; index += 1) {
+      activeParticles += this.systems[index].getActiveCount()
+    }
+    return {
+      activeParticles,
+      burstCount: this.burstCount,
+      headshot: this.lastHeadshot,
+      origin: this.lastOrigin,
+      particleCount: this.lastParticleCount,
+      poolCapacity: this.capacityPerSystem * this.systems.length,
+    }
+  }
+}
+
+const bloodEffectPool = new BloodEffectPool()
 
 const ZOMBIE_SPAWN_POSITIONS = [
   new Vector3(-20, 0, 6),
@@ -1419,12 +1544,17 @@ class Zombie {
   private readonly obstacleRay: Ray
   private readonly movementDelta = new Vector3()
   private readonly hitZoneMeshes: Mesh[] = []
+  private readonly upperBodyImpactRoot: TransformNode
+  private readonly upperBodyImpactBasePosition = Vector3.Zero()
+  private readonly upperBodyImpactDirection = Vector3.Forward()
+  private upperBodyImpactDistance = 0
   private resumeStateAfterHit: 'idle' | 'chasing' = 'idle'
   private hitReactionRemaining = 0
   private attackElapsed = 0
   private attackCooldownRemaining = 0
   private attackDamageApplied = false
   private deathElapsed = 0
+  private deathAnimationDuration = ZOMBIE_COMBAT_CONFIG.fallbackDeathDuration
   private disposed = false
 
   constructor(id: number, spawnPosition: Vector3, factory: ZombieVisualFactory) {
@@ -1454,6 +1584,8 @@ class Zombie {
     this.visual = factory.create(`zombie${id}`)
     this.visual.root.parent = this.root
     this.visual.root.position.y -= ZOMBIE_ASSET_CONFIG.height * 0.5
+    this.upperBodyImpactRoot = this.createUpperBodyImpactRoot()
+    this.upperBodyImpactBasePosition.copyFrom(this.upperBodyImpactRoot.position)
     this.proceduralBaseY = this.visual.root.position.y
     this.proceduralBaseRotationX = this.visual.root.rotation.x
     this.proceduralBaseRotationZ = this.visual.root.rotation.z
@@ -1485,7 +1617,18 @@ class Zombie {
     return 'none'
   }
 
-  applyHit(zone: ZombieHitZoneType) {
+  get upperBodyPushAmount() {
+    return Vector3.Distance(
+      this.upperBodyImpactRoot.position,
+      this.upperBodyImpactBasePosition,
+    )
+  }
+
+  get corpseGrounded() {
+    return this._state === 'dead' && this.deathElapsed >= this.deathAnimationDuration
+  }
+
+  applyHit(zone: ZombieHitZoneType, bulletDirection = Vector3.Forward()) {
     if (this.disposed || this._state === 'dead') return false
 
     const damage = zone === 'head'
@@ -1501,11 +1644,14 @@ class Zombie {
     }
 
     playZombieHitSound(this.id)
-    if (this._state !== 'hit') {
+    const wasAlreadyReacting = this._state === 'hit'
+    if (!wasAlreadyReacting) {
       this.resumeStateAfterHit = this._state === 'chasing' ? 'chasing' : 'idle'
     }
     this.hitReactionRemaining = ZOMBIE_COMBAT_CONFIG.hitReactionDuration
+    this.beginUpperBodyImpact(bulletDirection, zone === 'head')
     this.setState('hit')
+    if (wasAlreadyReacting) this.restartHitAnimation()
     return true
   }
 
@@ -1546,7 +1692,9 @@ class Zombie {
     if (this._state === 'dead') {
       this.deathElapsed += deltaSeconds
       this.updateProceduralAnimation(deltaSeconds)
-      if (this.deathElapsed >= ZOMBIE_COMBAT_CONFIG.removalDelay) this.dispose()
+      if (this.deathElapsed >= (
+        this.deathAnimationDuration + ZOMBIE_COMBAT_CONFIG.corpseHoldDuration
+      )) this.dispose()
       return
     }
 
@@ -1563,7 +1711,13 @@ class Zombie {
 
     if (this._state === 'hit') {
       this.hitReactionRemaining -= deltaSeconds
+      this.applyUpperBodyImpact(clamp(
+        this.hitReactionRemaining / ZOMBIE_COMBAT_CONFIG.hitReactionDuration,
+        0,
+        1,
+      ) ** 2)
       if (this.hitReactionRemaining <= 0) {
+        this.applyUpperBodyImpact(0)
         this.setState(this.resumeStateAfterHit)
         this.thinkTimeRemaining = 0
       }
@@ -1686,6 +1840,68 @@ class Zombie {
     }
   }
 
+  private createUpperBodyImpactRoot() {
+    const impactRoot = new TransformNode(`zombie${this.id}UpperBodyImpact`, scene)
+    const parts = this.visual.proceduralParts
+    if (parts) {
+      impactRoot.parent = this.visual.root
+      parts.head.parent = impactRoot
+      parts.torso.parent = impactRoot
+      parts.leftArm.parent = impactRoot
+      parts.rightArm.parent = impactRoot
+      return impactRoot
+    }
+
+    const upperSpineNode = this.visual.root.getChildTransformNodes(false).find((node) => {
+      const normalizedName = node.name.toLowerCase().replace(/[\s_.-]+/g, '')
+      return normalizedName.includes('spine03')
+    })
+    if (!upperSpineNode) {
+      // A transform above the full visual is a safe fallback for future rigs
+      // whose upper-spine node does not follow the current naming convention.
+      impactRoot.parent = this.visual.root
+      return impactRoot
+    }
+
+    impactRoot.parent = upperSpineNode.parent
+    upperSpineNode.parent = impactRoot
+    return impactRoot
+  }
+
+  private beginUpperBodyImpact(bulletDirection: Vector3, headshot: boolean) {
+    const parent = this.upperBodyImpactRoot.parent
+    const localDirection = parent
+      ? Vector3.TransformNormal(
+          bulletDirection,
+          parent.getWorldMatrix().clone().invert(),
+        )
+      : bulletDirection.clone()
+    if (localDirection.lengthSquared() <= 0.000001) localDirection.copyFromFloats(0, 0, 1)
+    localDirection.normalize()
+    this.upperBodyImpactDirection.copyFrom(localDirection)
+    this.upperBodyImpactDistance = ZOMBIE_COMBAT_CONFIG.hitPushDistance
+      * (headshot ? ZOMBIE_COMBAT_CONFIG.headHitPushMultiplier : 1)
+    this.applyUpperBodyImpact(1)
+  }
+
+  private applyUpperBodyImpact(strength: number) {
+    const distance = this.upperBodyImpactDistance * strength
+    this.upperBodyImpactRoot.position.copyFrom(this.upperBodyImpactBasePosition)
+    this.upperBodyImpactRoot.position.addInPlaceFromFloats(
+      this.upperBodyImpactDirection.x * distance,
+      this.upperBodyImpactDirection.y * distance,
+      this.upperBodyImpactDirection.z * distance,
+    )
+  }
+
+  private restartHitAnimation() {
+    if (!this.visual.animations.hit) return
+    this.activeAnimation?.stop()
+    this.activeAnimation = null
+    this.activeAnimationSpeed = 0
+    this.playStateAnimation()
+  }
+
   private die() {
     if (this._state === 'dead') return
     this.health = 0
@@ -1693,12 +1909,25 @@ class Zombie {
     this.hitReactionRemaining = 0
     this.attackDamageApplied = true
     this.attackElapsed = 0
+    this.deathAnimationDuration = this.getDeathAnimationDuration()
+    this.applyUpperBodyImpact(0)
     this.setState('dead')
     playZombieDeathSound(this.id)
     this.currentDirectionX = 0
     this.currentDirectionZ = 0
+    this.root.checkCollisions = false
     this.disableHitZones()
     console.info(`[Night Breach] Zombie ${this.id} eliminated; hit detection disabled.`)
+  }
+
+  private getDeathAnimationDuration() {
+    const animation = this.visual.animations.death
+    if (!animation) return ZOMBIE_COMBAT_CONFIG.fallbackDeathDuration
+    const framesPerSecond = animation.targetedAnimations[0]?.animation.framePerSecond ?? 30
+    const duration = (animation.to - animation.from)
+      / framesPerSecond
+      / ZOMBIE_ASSET_CONFIG.animationSpeed
+    return Math.max(ZOMBIE_COMBAT_CONFIG.fallbackDeathDuration, duration)
   }
 
   private updateAwarenessAndSteering(playerPosition: Vector3) {
@@ -1860,16 +2089,6 @@ class Zombie {
         10,
         deltaSeconds,
       )
-    } else if (this._state === 'hit' && !this.visual.animations.hit) {
-      const hitProgress = 1 - clamp(
-        this.hitReactionRemaining / ZOMBIE_COMBAT_CONFIG.hitReactionDuration,
-        0,
-        1,
-      )
-      const hitKick = Math.sin(hitProgress * Math.PI)
-      this.visual.root.rotation.x = this.proceduralBaseRotationX - hitKick * 0.08
-      this.visual.root.rotation.z = this.proceduralBaseRotationZ
-        + hitKick * (this.id % 2 === 0 ? 0.07 : -0.07)
     } else {
       this.visual.root.rotation.x = damp(
         this.visual.root.rotation.x,
@@ -1936,7 +2155,12 @@ class Zombie {
       8,
       deltaSeconds,
     )
-    this.visual.root.rotation.z = this._state === 'hit' ? idleCycle * 0.055 : 0
+    this.visual.root.rotation.z = damp(
+      this.visual.root.rotation.z,
+      this.proceduralBaseRotationZ,
+      10,
+      deltaSeconds,
+    )
     if (this._state !== 'dead') {
       this.visual.root.rotation.x = damp(
         this.visual.root.rotation.x,
@@ -2000,10 +2224,12 @@ class Zombie {
   }
 }
 
-const zombieHitZones = new Map<Mesh, {
+interface ZombieHitZone {
   zombie: Zombie
   zone: ZombieHitZoneType
-}>()
+}
+
+const zombieHitZones = new Map<Mesh, ZombieHitZone>()
 const zombies: Zombie[] = []
 let activeZombieFactory: ZombieVisualFactory | null = null
 let activeZombieCount = 0
@@ -2919,6 +3145,18 @@ function hideHeadshotIndicator() {
   headshotIndicator.classList.remove('visible')
 }
 
+function hitZombieWithBullet(
+  hitZone: ZombieHitZone,
+  hitPoint: Vector3,
+  bulletDirection: Vector3,
+) {
+  if (!hitZone.zombie.applyHit(hitZone.zone, bulletDirection)) return false
+  bloodEffectPool.spawn(hitPoint, bulletDirection, hitZone.zone === 'head')
+  showHitMarker()
+  if (hitZone.zone === 'head') showHeadshotIndicator()
+  return true
+}
+
 function beginReload() {
   if (gameOver || reloadElapsed >= 0 || magazineAmmo >= 30 || reserveAmmo <= 0) return
   stopAutomaticFire()
@@ -3005,9 +3243,11 @@ function fire() {
   if (!result?.hit || !result.pickedMesh) return
 
   const zombieHit = zombieHitZones.get(result.pickedMesh as Mesh)
-  if (zombieHit?.zombie.applyHit(zombieHit.zone)) {
-    showHitMarker()
-    if (zombieHit.zone === 'head') showHeadshotIndicator()
+  if (zombieHit && hitZombieWithBullet(
+    zombieHit,
+    result.pickedPoint ?? result.pickedMesh.getAbsolutePosition(),
+    weaponRay.direction,
+  )) {
     return
   }
 
@@ -3225,6 +3465,7 @@ function restartPrototype() {
   if (!gameOver) return
 
   resetZombieWave()
+  bloodEffectPool.reset()
   playerHealth = PLAYER_MAX_HEALTH
   updateHealthDisplay()
   magazineAmmo = 30
@@ -3503,12 +3744,25 @@ if (import.meta.env.DEV) {
     configurable: true,
     value: {
       snapshot() {
+        const blood = bloodEffectPool.snapshot()
         return {
           activeZombieCount,
           adsHeld,
           aimPointerId,
           ammo: `${magazineAmmo}/${reserveAmmo}`,
           automaticFireHeld,
+          blood: {
+            activeParticles: blood.activeParticles,
+            burstCount: blood.burstCount,
+            headshot: blood.headshot,
+            origin: {
+              x: blood.origin.x,
+              y: blood.origin.y,
+              z: blood.origin.z,
+            },
+            particleCount: blood.particleCount,
+            poolCapacity: blood.poolCapacity,
+          },
           cameraPitch: camera.rotation.x,
           cameraPosition: {
             x: camera.position.x,
@@ -3560,6 +3814,7 @@ if (import.meta.env.DEV) {
           webViewActive,
           zombies: zombies.map((zombie) => ({
             animation: zombie.activeAnimationName,
+            corpseGrounded: zombie.corpseGrounded,
             disposed: zombie.root.isDisposed(),
             health: zombie.currentHealth,
             position: {
@@ -3567,6 +3822,7 @@ if (import.meta.env.DEV) {
               z: zombie.root.position.z,
             },
             state: zombie.state,
+            upperBodyPush: zombie.upperBodyPushAmount,
           })),
         }
       },
@@ -3578,12 +3834,35 @@ if (import.meta.env.DEV) {
       hitZombie(zombieIndex: number, zone: ZombieHitZoneType) {
         const zombie = zombies[zombieIndex]
         if (!zombie) return false
-        const hit = zombie.applyHit(zone)
-        if (hit) {
-          showHitMarker()
-          if (zone === 'head') showHeadshotIndicator()
+        const direction = zombie.root.position.subtract(camera.position)
+        if (direction.lengthSquared() > 0.000001) direction.normalize()
+        else direction.copyFromFloats(0, 0, 1)
+        const zoneOffsetY = zone === 'head'
+          ? ZOMBIE_ASSET_CONFIG.height * 0.39
+          : zone === 'torso'
+            ? ZOMBIE_ASSET_CONFIG.height * 0.08
+            : -ZOMBIE_ASSET_CONFIG.height * 0.28
+        const hitPoint = zombie.root.position.add(new Vector3(0, zoneOffsetY, 0))
+        return hitZombieWithBullet({ zombie, zone }, hitPoint, direction)
+      },
+      hitZombieAtAim() {
+        camera.getForwardRayToRef(weaponRay, 100)
+        const result = scene.pickWithRay(weaponRay)
+        const hitZone = result?.pickedMesh
+          ? zombieHitZones.get(result.pickedMesh as Mesh)
+          : undefined
+        const point = result?.pickedPoint ?? null
+        const hit = Boolean(hitZone && point && hitZombieWithBullet(
+          hitZone,
+          point,
+          weaponRay.direction,
+        ))
+        return {
+          hit,
+          point: point ? { x: point.x, y: point.y, z: point.z } : null,
+          zone: hitZone?.zone ?? null,
+          zombieId: hitZone?.zombie.id ?? null,
         }
-        return hit
       },
       probeAim() {
         camera.getForwardRayToRef(weaponRay, 100)

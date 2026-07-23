@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const forceRifleFallback = process.env.NIGHTBREACH_FORCE_RIFLE_FALLBACK === '1'
 const forceZombieFallback = process.env.NIGHTBREACH_FORCE_ZOMBIE_FALLBACK === '1'
+const combatOnly = process.env.NIGHTBREACH_COMBAT_ONLY === '1'
 const expectedWeaponSource = forceRifleFallback ? 'procedural' : 'glb'
 const expectedZombieSource = forceZombieFallback ? 'procedural' : 'glb'
 const screenshotPath = process.env.NIGHTBREACH_SCREENSHOT_PATH
@@ -375,6 +376,7 @@ try {
     })
     writeFileSync(`${screenshotPath}.deployed.png`, Buffer.from(deployedScreenshot.data, 'base64'))
   }
+  if (!combatOnly) {
   await cdp.evaluate(`(() => {
     ${pointerHelpers}
     const movement = center('#movementControl');
@@ -578,6 +580,7 @@ try {
   assert(afterDamageWindow.health === firstAttack.snapshot.health,
     'One zombie swing applied damage more than once.')
   console.log('runtime-smoke: attack timing and damage window passed')
+  }
 
   await cdp.evaluate(`(() => {
     const api = window.__nightBreachTest;
@@ -596,15 +599,31 @@ try {
     })
     writeFileSync(`${screenshotPath}.zombie.png`, Buffer.from(zombieScreenshot.data, 'base64'))
   }
-  const bodyHitMarkerVisible = await cdp.evaluate(`(() => {
-    window.__nightBreachTest.hitZombie(0, 'torso');
-    return document.querySelector('#hitMarker').classList.contains('visible');
+  const bodyShot = await cdp.evaluate(`(() => {
+    const impact = window.__nightBreachTest.hitZombieAtAim();
+    return {
+      impact,
+      markerVisible: document.querySelector('#hitMarker').classList.contains('visible'),
+    };
   })()`)
-  assert(bodyHitMarkerVisible,
+  assert(bodyShot.impact.hit && bodyShot.impact.zone === 'torso',
+    `Body-shot raycast did not apply a torso hit: ${JSON.stringify(bodyShot.impact)}.`)
+  assert(bodyShot.markerVisible,
     'Body shot did not display the hit marker.')
   const bodyHit = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(bodyHit.zombies[0].health === 66 && bodyHit.zombies[0].state === 'hit',
     `Body-shot damage or hit reaction failed: ${JSON.stringify({ ammo: bodyHit.ammo, zombie: bodyHit.zombies[0] })}`)
+  assert(bodyHit.zombies[0].upperBodyPush > 0.001,
+    `Body shot did not displace the upper-body impact layer: ${bodyHit.zombies[0].upperBodyPush}.`)
+  assert(bodyHit.blood.particleCount > 0
+    && bodyHit.blood.poolCapacity > bodyHit.blood.particleCount
+    && !bodyHit.blood.headshot,
+  `Body shot did not use the pooled normal blood burst: ${JSON.stringify(bodyHit.blood)}.`)
+  assert(Math.hypot(
+    bodyHit.blood.origin.x - bodyShot.impact.point.x,
+    bodyHit.blood.origin.y - bodyShot.impact.point.y,
+    bodyHit.blood.origin.z - bodyShot.impact.point.z,
+  ) < 0.00001, 'Body blood burst did not originate exactly at the raycast hit point.')
   if (!forceZombieFallback) {
     assert(bodyHit.zombies[0].animation === 'hit-root-fallback',
       `Zombie hit did not select the parent-root fallback: ${JSON.stringify(bodyHit.zombies[0])}.`)
@@ -612,26 +631,44 @@ try {
   console.log('runtime-smoke: body shot and hit reaction passed')
 
   await delay(250)
-  const headshotIndicatorVisible = await cdp.evaluate(`(() => {
+  const headShot = await cdp.evaluate(`(() => {
     const api = window.__nightBreachTest;
     api.setZombiePosition(0, 0, -5);
     api.setCameraRotation(0.015, 0);
-    api.hitZombie(0, 'head');
-    return document.querySelector('#headshotIndicator').classList.contains('visible');
+    const impact = api.hitZombieAtAim();
+    return {
+      impact,
+      indicatorVisible: document.querySelector('#headshotIndicator').classList.contains('visible'),
+    };
   })()`)
-  assert(headshotIndicatorVisible,
+  assert(headShot.impact.hit && headShot.impact.zone === 'head',
+    `Headshot raycast did not apply a head hit: ${JSON.stringify(headShot.impact)}.`)
+  assert(headShot.indicatorVisible,
     'Headshot indicator was not shown.')
   const headHit = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(headHit.zombies[0].health === 1, 'Headshot damage failed.')
+  assert(headHit.blood.headshot
+    && headHit.blood.particleCount > bodyHit.blood.particleCount,
+  `Headshot blood burst was not stronger than a normal hit: ${JSON.stringify({
+    body: bodyHit.blood,
+    head: headHit.blood,
+  })}`)
+  assert(Math.hypot(
+    headHit.blood.origin.x - headShot.impact.point.x,
+    headHit.blood.origin.y - headShot.impact.point.y,
+    headHit.blood.origin.z - headShot.impact.point.z,
+  ) < 0.00001, 'Headshot blood burst did not originate exactly at the raycast hit point.')
   console.log('runtime-smoke: headshot passed')
 
   await delay(250)
-  await cdp.evaluate(`(() => {
+  const lethalShot = await cdp.evaluate(`(() => {
     const api = window.__nightBreachTest;
     api.setZombiePosition(0, 0, -5);
     api.setCameraRotation(0.2, 0);
-    api.hitZombie(0, 'torso');
+    return api.hitZombieAtAim();
   })()`)
+  assert(lethalShot.hit && lethalShot.zone === 'torso',
+    `Lethal torso raycast did not hit: ${JSON.stringify(lethalShot)}.`)
   const deadZombie = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(deadZombie.zombies[0].health === 0 && deadZombie.zombies[0].state === 'dead',
     'Zombie death did not follow lethal damage.')
@@ -639,6 +676,20 @@ try {
     assert(deadZombie.zombies[0].animation === 'death-root-fallback',
       `Zombie death did not select the parent-root fallback: ${JSON.stringify(deadZombie.zombies[0])}.`)
   }
+  await cdp.waitForExpression(`(() => {
+    const zombie = window.__nightBreachTest.snapshot().zombies[0];
+    return zombie.state === 'dead' && zombie.corpseGrounded && !zombie.disposed;
+  })()`, 5_000)
+  await delay(250)
+  const groundedZombie = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
+  assert(groundedZombie.zombies[0].state === 'dead'
+    && groundedZombie.zombies[0].corpseGrounded
+    && !groundedZombie.zombies[0].disposed,
+  'Zombie body was not retained on the ground after the death animation.')
+  assert(Math.hypot(
+    groundedZombie.zombies[0].position.x - deadZombie.zombies[0].position.x,
+    groundedZombie.zombies[0].position.z - deadZombie.zombies[0].position.z,
+  ) < 0.00001, 'Dead zombie continued moving after lethal damage.')
   await cdp.waitForExpression(`
     window.__nightBreachTest.snapshot().activeZombieCount === 2
       && window.__nightBreachTest.snapshot().zombies[0].disposed
@@ -648,6 +699,7 @@ try {
     'Dead zombie cleanup did not release the zombie visual and collider.')
   console.log('runtime-smoke: death and cleanup passed')
 
+  if (!combatOnly) {
   await cdp.evaluate(`window.__nightBreachTest.damagePlayer(100, 1)`)
   const playerDeath = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(playerDeath.health === 0 && playerDeath.gameOver, 'Player death state failed.')
@@ -691,6 +743,7 @@ try {
   const activeAgain = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(activeAgain.webViewActive, 'Page show did not resume the WebView lifecycle.')
   console.log('runtime-smoke: inactive WebView pause/resume passed')
+  }
 
   assert(cdp.consoleErrors.length === 0,
     `Browser console errors were reported: ${cdp.consoleErrors.join(' | ')}`)
@@ -698,13 +751,15 @@ try {
   console.log(JSON.stringify({
     browserConsoleErrors: cdp.consoleErrors.length,
     zombie: startup.source,
-    multitouch: 'joystick + swipe + ADS + hold-fire passed',
+    multitouch: combatOnly ? 'skipped by focused combat run' : 'joystick + swipe + ADS + hold-fire passed',
     performanceTier: startup.performanceTier,
     rifle: startup.weaponSource,
     startup: 'map + first frame + render loop + deploy passed',
     sharing: startup.sharing,
-    zombieCombat: 'detection, chase, avoidance, attack, hit zones, death, cleanup passed',
-    playerLoop: 'damage, death, retry, health/ammo/zombie reset passed',
+    zombieCombat: combatOnly
+      ? 'normal hit, headshot, reaction, pooled blood, corpse hold, cleanup passed'
+      : 'detection, chase, avoidance, attack, hit zones, death, cleanup passed',
+    playerLoop: combatOnly ? 'skipped by focused combat run' : 'damage, death, retry, health/ammo/zombie reset passed',
   }, null, 2))
 } catch (error) {
   if (chromeDiagnostics) console.error(chromeDiagnostics)
