@@ -1390,6 +1390,11 @@ const ZOMBIE_SPAWN_POSITIONS = [
 const ZOMBIE_WAVE_CONFIG = {
   baseZombieCount: 2,
   zombiesAddedPerWave: 1,
+  zombieHealthScalePerWave: 0.05,
+  zombieMovementSpeedScalePerWave: 0.03,
+  maximumZombieCount: 10,
+  maximumZombieHealth: 150,
+  maximumZombieMovementSpeed: 2,
   spawnInterval: 1_000,
   timeBetweenWaves: 3_000,
 } as const
@@ -1733,9 +1738,10 @@ class Zombie {
   readonly id: number
   readonly root: Mesh
   readonly visual: ZombieVisual
-  readonly maxHealth = ZOMBIE_COMBAT_CONFIG.maxHealth
+  readonly maxHealth: number
   private _state: ZombieState = 'idle'
-  private health = ZOMBIE_COMBAT_CONFIG.maxHealth
+  private health: number
+  private readonly movementSpeedMultiplier: number
   private activeAnimation: AnimationGroup | null = null
   private activeAnimationSpeed = 0
   private animationPaused = false
@@ -1767,8 +1773,17 @@ class Zombie {
   private deathAnimationDuration = ZOMBIE_COMBAT_CONFIG.fallbackDeathDuration
   private disposed = false
 
-  constructor(id: number, spawnPosition: Vector3, factory: ZombieVisualFactory) {
+  constructor(
+    id: number,
+    spawnPosition: Vector3,
+    factory: ZombieVisualFactory,
+    maxHealth: number,
+    movementSpeedMultiplier: number,
+  ) {
     this.id = id
+    this.maxHealth = maxHealth
+    this.health = maxHealth
+    this.movementSpeedMultiplier = movementSpeedMultiplier
     this.root = MeshBuilder.CreateBox(
       `zombie${id}`,
       {
@@ -2171,8 +2186,8 @@ class Zombie {
       if (this._state === 'chasing') this.playStateAnimation()
     }
     this.targetSpeed = this.locomotion === 'run'
-      ? ZOMBIE_AI_CONFIG.runSpeed
-      : ZOMBIE_AI_CONFIG.walkSpeed
+      ? ZOMBIE_AI_CONFIG.runSpeed * this.movementSpeedMultiplier
+      : ZOMBIE_AI_CONFIG.walkSpeed * this.movementSpeedMultiplier
     this.setState('chasing')
 
     this.obstacleRay.origin.set(
@@ -2458,6 +2473,11 @@ interface WaveState {
   status: WaveStatus
 }
 
+interface WaveZombieStats {
+  maxHealth: number
+  movementSpeedMultiplier: number
+}
+
 const waveState: WaveState = {
   currentWave: 0,
   scheduledZombies: 0,
@@ -2472,6 +2492,23 @@ function updateWaveDisplay() {
   canvas.dataset.waveSpawnedZombies = String(waveState.spawnedZombies)
   canvas.dataset.waveAliveZombies = String(waveState.aliveZombies)
   canvas.dataset.waveStatus = waveState.status
+}
+
+function getWaveZombieStats(wave: number): WaveZombieStats {
+  const waveProgress = Math.max(0, wave - 1)
+  const maxHealth = Math.min(
+    ZOMBIE_COMBAT_CONFIG.maxHealth * (
+      1 + waveProgress * ZOMBIE_WAVE_CONFIG.zombieHealthScalePerWave
+    ),
+    ZOMBIE_WAVE_CONFIG.maximumZombieHealth,
+  )
+  const maximumSpeedMultiplier = ZOMBIE_WAVE_CONFIG.maximumZombieMovementSpeed
+    / ZOMBIE_AI_CONFIG.runSpeed
+  const movementSpeedMultiplier = Math.min(
+    1 + waveProgress * ZOMBIE_WAVE_CONFIG.zombieMovementSpeedScalePerWave,
+    maximumSpeedMultiplier,
+  )
+  return { maxHealth, movementSpeedMultiplier }
 }
 
 stopZombieWaveTimers = () => {
@@ -2516,7 +2553,14 @@ function spawnNextWaveZombie() {
   const spawnPosition = ZOMBIE_SPAWN_POSITIONS[
     waveState.spawnedZombies % ZOMBIE_SPAWN_POSITIONS.length
   ]
-  const zombie = new Zombie(nextZombieId, spawnPosition, factory)
+  const stats = getWaveZombieStats(waveState.currentWave)
+  const zombie = new Zombie(
+    nextZombieId,
+    spawnPosition,
+    factory,
+    stats.maxHealth,
+    stats.movementSpeedMultiplier,
+  )
   nextZombieId += 1
   zombie.setPaused(!webViewActive || !deployed || gameOver)
   zombies.push(zombie)
@@ -2559,8 +2603,11 @@ function startNextZombieWave() {
 
   stopZombieWaveTimers()
   waveState.currentWave += 1
-  waveState.scheduledZombies = ZOMBIE_WAVE_CONFIG.baseZombieCount
-    + (waveState.currentWave - 1) * ZOMBIE_WAVE_CONFIG.zombiesAddedPerWave
+  waveState.scheduledZombies = Math.min(
+    ZOMBIE_WAVE_CONFIG.baseZombieCount
+      + (waveState.currentWave - 1) * ZOMBIE_WAVE_CONFIG.zombiesAddedPerWave,
+    ZOMBIE_WAVE_CONFIG.maximumZombieCount,
+  )
   waveState.spawnedZombies = 0
   waveState.aliveZombies = 0
   waveState.status = 'active'
