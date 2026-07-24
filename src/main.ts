@@ -14,6 +14,7 @@ import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial'
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial'
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture'
 import { Color3, Color4 } from '@babylonjs/core/Maths/math.color'
+import { Frustum } from '@babylonjs/core/Maths/math.frustum'
 import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector'
 import { type AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh'
 import '@babylonjs/core/Meshes/instancedMesh'
@@ -1387,14 +1388,23 @@ const ZOMBIE_SPAWN_POSITIONS = [
   new Vector3(-4, 0, -2),
   new Vector3(14, 0, -8),
 ] as const
+const ZOMBIE_SPAWN_FALLBACK_POSITIONS = [
+  new Vector3(-22, 0, -22),
+  new Vector3(22, 0, 22),
+  new Vector3(22, 0, -22),
+  new Vector3(-22, 0, 22),
+] as const
 const ZOMBIE_WAVE_CONFIG = {
-  baseZombieCount: 2,
+  baseZombieCount: 4,
   zombiesAddedPerWave: 1,
   zombieHealthScalePerWave: 0.05,
   zombieMovementSpeedScalePerWave: 0.03,
   maximumZombieCount: 10,
   maximumZombieHealth: 150,
   maximumZombieMovementSpeed: 2,
+  minimumSpawnDistanceFromPlayer: 12,
+  spawnPlacementAttempts: 6,
+  spawnClearanceRadius: 0.7,
   spawnInterval: 1_000,
   timeBetweenWaves: 3_000,
 } as const
@@ -2511,6 +2521,69 @@ function getWaveZombieStats(wave: number): WaveZombieStats {
   return { maxHealth, movementSpeedMultiplier }
 }
 
+function isSpawnPositionFarEnoughFromPlayer(position: Vector3) {
+  const distanceX = position.x - camera.position.x
+  const distanceZ = position.z - camera.position.z
+  return distanceX * distanceX + distanceZ * distanceZ
+    >= ZOMBIE_WAVE_CONFIG.minimumSpawnDistanceFromPlayer
+      * ZOMBIE_WAVE_CONFIG.minimumSpawnDistanceFromPlayer
+}
+
+function isSpawnPositionClearOfGeometry(position: Vector3) {
+  const radius = ZOMBIE_WAVE_CONFIG.spawnClearanceRadius
+  const height = ZOMBIE_ASSET_CONFIG.height
+  for (const mesh of proceduralEnvironmentMeshes) {
+    if (!mesh.checkCollisions || !mesh.isEnabled()) continue
+    const bounds = mesh.getBoundingInfo().boundingBox
+    if (
+      position.x + radius >= bounds.minimumWorld.x
+      && position.x - radius <= bounds.maximumWorld.x
+      && position.z + radius >= bounds.minimumWorld.z
+      && position.z - radius <= bounds.maximumWorld.z
+      && height >= bounds.minimumWorld.y + 0.05
+      && 0.05 <= bounds.maximumWorld.y
+    ) return false
+  }
+  return true
+}
+
+function isSpawnPositionOutsideCameraView(position: Vector3) {
+  const spawnCenter = new Vector3(
+    position.x,
+    ZOMBIE_ASSET_CONFIG.height * 0.5,
+    position.z,
+  )
+  return Frustum.GetPlanes(camera.getTransformationMatrix())
+    .some((plane) => plane.dotCoordinate(spawnCenter) < 0)
+}
+
+function isValidZombieSpawnPosition(position: Vector3) {
+  return isSpawnPositionFarEnoughFromPlayer(position)
+    && isSpawnPositionClearOfGeometry(position)
+    && isSpawnPositionOutsideCameraView(position)
+}
+
+function selectZombieSpawnPosition(spawnIndex: number) {
+  const candidateCount = ZOMBIE_SPAWN_POSITIONS.length
+  for (let attempt = 0; attempt < ZOMBIE_WAVE_CONFIG.spawnPlacementAttempts; attempt += 1) {
+    const position = ZOMBIE_SPAWN_POSITIONS[(spawnIndex + attempt) % candidateCount]
+    if (isValidZombieSpawnPosition(position)) return position
+  }
+
+  for (let index = 0; index < ZOMBIE_SPAWN_FALLBACK_POSITIONS.length; index += 1) {
+    const position = ZOMBIE_SPAWN_FALLBACK_POSITIONS[
+      (spawnIndex + index) % ZOMBIE_SPAWN_FALLBACK_POSITIONS.length
+    ]
+    if (isValidZombieSpawnPosition(position)) {
+      return position
+    }
+  }
+
+  return ZOMBIE_SPAWN_FALLBACK_POSITIONS[
+    spawnIndex % ZOMBIE_SPAWN_FALLBACK_POSITIONS.length
+  ]
+}
+
 stopZombieWaveTimers = () => {
   if (zombieSpawnTimer !== undefined) {
     window.clearInterval(zombieSpawnTimer)
@@ -2550,9 +2623,7 @@ function spawnNextWaveZombie() {
     return
   }
 
-  const spawnPosition = ZOMBIE_SPAWN_POSITIONS[
-    waveState.spawnedZombies % ZOMBIE_SPAWN_POSITIONS.length
-  ]
+  const spawnPosition = selectZombieSpawnPosition(waveState.spawnedZombies)
   const stats = getWaveZombieStats(waveState.currentWave)
   const zombie = new Zombie(
     nextZombieId,
