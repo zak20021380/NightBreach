@@ -1022,10 +1022,10 @@ const ZOMBIE_AI_CONFIG = {
   detectionRange: 28,
   loseInterestRange: 32,
   attackDistance: 1.55,
-  walkSpeed: 1.05,
-  runSpeed: 1.55,
-  runDistance: 10,
-  rotationSpeed: 4.2,
+  walkSpeed: 2.1,
+  runSpeed: 3.3,
+  runDistance: 3.5,
+  rotationSpeed: 6.5,
   steeringResponse: 8,
   obstacleProbeDistance: 1.45,
   obstacleTurnAngle: 0.72,
@@ -1403,10 +1403,10 @@ const ZOMBIE_WAVE_CONFIG = {
   baseZombieCount: 4,
   zombiesAddedPerWave: 1,
   zombieHealthScalePerWave: 0.05,
-  zombieMovementSpeedScalePerWave: 0.03,
+  zombieMovementSpeedScalePerWave: 0.1,
   maximumZombieCount: 10,
   maximumZombieHealth: 150,
-  maximumZombieMovementSpeed: 2,
+  maximumZombieMovementSpeed: 6.6,
   minimumSpawnDistanceFromPlayer: 12,
   spawnPlacementAttempts: 6,
   spawnClearanceRadius: 0.7,
@@ -1506,12 +1506,18 @@ function createGlbZombieFactory(
         if (!Number.isFinite(initialHeight) || initialHeight <= 0.001) {
           throw new Error(`Zombie clone returned an invalid height: ${initialHeight}.`)
         }
+        // Each clone is measured in whatever pose its cloned skeleton currently
+        // holds, so the hierarchy height drifts a few centimetres between
+        // instances. Normalize the parent scale to the authored height instead
+        // of throwing: a throw here aborts the spawn tick and stalls the wave.
+        let groundedMinimumY = initialBounds.min.y
         if (Math.abs(initialHeight - ZOMBIE_ASSET_CONFIG.height) > 0.03) {
-          throw new Error(
-            `Zombie parent scale no longer resolves to ${ZOMBIE_ASSET_CONFIG.height}m (measured ${initialHeight.toFixed(3)}m).`,
-          )
+          root.scaling.scaleInPlace(ZOMBIE_ASSET_CONFIG.height / initialHeight)
+          root.computeWorldMatrix(true)
+          modelMeshes.forEach((mesh) => mesh.computeWorldMatrix(true))
+          groundedMinimumY = root.getHierarchyBoundingVectors(true).min.y
         }
-        root.position.y -= initialBounds.min.y
+        root.position.y -= groundedMinimumY
         root.position.addInPlace(ZOMBIE_ASSET_CONFIG.position)
 
         const animationGroups = [...entries.animationGroups]
@@ -1866,6 +1872,10 @@ class Zombie {
 
   get corpseGrounded() {
     return this._state === 'dead' && this.deathElapsed >= this.deathAnimationDuration
+  }
+
+  get eliminated() {
+    return this.disposed || this._state === 'dead'
   }
 
   applyHit(zone: ZombieHitZoneType, bulletDirection = Vector3.Forward()) {
@@ -2619,7 +2629,12 @@ function unregisterActiveZombie() {
 function spawnNextWaveZombie() {
   const factory = activeZombieFactory
   if (!factory || gameOver || waveState.status !== 'active') {
-    stopZombieWaveTimers()
+    // Only retire the spawn interval here. Clearing every wave timer also
+    // cancels a pending next-wave timeout and stalls the loop permanently.
+    if (zombieSpawnTimer !== undefined) {
+      window.clearInterval(zombieSpawnTimer)
+      zombieSpawnTimer = undefined
+    }
     return
   }
   if (waveState.spawnedZombies >= waveState.scheduledZombies) {
@@ -2639,13 +2654,30 @@ function spawnNextWaveZombie() {
     return
   }
   const stats = getWaveZombieStats(waveState.currentWave)
-  const zombie = new Zombie(
-    nextZombieId,
-    spawnPosition,
-    factory,
-    stats.maxHealth,
-    stats.movementSpeedMultiplier,
-  )
+  let zombie: Zombie
+  try {
+    zombie = new Zombie(
+      nextZombieId,
+      spawnPosition,
+      factory,
+      stats.maxHealth,
+      stats.movementSpeedMultiplier,
+    )
+  } catch (error) {
+    // A failed instance must never escape this tick. Throwing here would abort
+    // the spawn interval setup in startNextZombieWave and stall the wave loop.
+    nextZombieId += 1
+    waveState.spawnedZombies += 1
+    updateWaveDisplay()
+    logRuntimeWarning('[Zombies] Spawn skipped after instance creation failed.', error)
+    if (waveState.spawnedZombies >= waveState.scheduledZombies
+      && zombieSpawnTimer !== undefined) {
+      window.clearInterval(zombieSpawnTimer)
+      zombieSpawnTimer = undefined
+    }
+    completeWaveIfReady()
+    return
+  }
   nextZombieId += 1
   zombie.setPaused(!webViewActive || !deployed || gameOver)
   zombies.push(zombie)
@@ -2661,9 +2693,25 @@ function spawnNextWaveZombie() {
   }
 }
 
+function countLivingWaveZombies() {
+  let living = 0
+  for (let index = 0; index < zombies.length; index += 1) {
+    if (!zombies[index].eliminated) living += 1
+  }
+  return living
+}
+
 function completeWaveIfReady() {
-  if (gameOver || waveState.status !== 'active'
-    || waveState.spawnedZombies !== waveState.scheduledZombies
+  if (gameOver || waveState.status !== 'active') return
+
+  // The zombie list is the source of truth. A drifted counter (an unreachable
+  // zombie, a failed instance) must never be able to wedge the wave loop.
+  const living = countLivingWaveZombies()
+  if (living !== waveState.aliveZombies) {
+    waveState.aliveZombies = living
+    updateWaveDisplay()
+  }
+  if (waveState.spawnedZombies !== waveState.scheduledZombies
     || waveState.aliveZombies !== 0) return
 
   stopZombieWaveTimers()
@@ -2676,8 +2724,8 @@ function completeWaveIfReady() {
 }
 
 function onZombieDied() {
-  if (waveState.status !== 'active' || waveState.aliveZombies === 0) return
-  waveState.aliveZombies -= 1
+  if (waveState.status !== 'active') return
+  waveState.aliveZombies = Math.max(0, waveState.aliveZombies - 1)
   updateWaveDisplay()
   completeWaveIfReady()
 }
@@ -2776,6 +2824,7 @@ scene.onBeforeRenderObservable.add(() => {
     zombies[index].update(deltaSeconds, pauseZombieAI, camera.position)
     if (gameOver) pauseZombieAI = true
   }
+  if (!pauseZombieAI) completeWaveIfReady()
 })
 
 const WEAPON_VIEW_CONFIG = {

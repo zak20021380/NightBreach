@@ -184,36 +184,108 @@ body {
   transform: translate(-50%, 0);
 }
 
+/* ---------------------------------------------------------------------------
+   Damage / blood feedback
+   The element still rotates by --damage-angle so the wound reads directionally.
+   ::before  = heavy arterial bleed pushing in from the attacker's screen edge.
+   ::after   = screen-locked splatter + red vignette (counter-rotated so the
+               droplets stay stuck to the glass instead of spinning).
+   --------------------------------------------------------------------------- */
+
 #damageIndicator {
   --damage-angle: 0rad;
   position: fixed;
   top: 50%;
   left: 50%;
   z-index: 13;
-  width: clamp(132px, 22vmin, 190px);
-  height: clamp(132px, 22vmin, 190px);
+  width: 200vmax;
+  height: 200vmax;
   opacity: 0;
   transform: translate(-50%, -50%) rotate(var(--damage-angle));
-  transition: opacity 240ms ease-out;
+  transition: opacity 620ms cubic-bezier(0.25, 0.1, 0.3, 1);
+  will-change: opacity;
   pointer-events: none;
 }
 
 #damageIndicator::before {
   content: "";
   position: absolute;
-  top: 0;
+  top: calc(50% - 53vh);
   left: 50%;
-  width: 38%;
-  height: 8px;
-  border-radius: 50% 50% 3px 3px;
-  background: linear-gradient(90deg, transparent, rgb(181 34 28 / 72%), transparent);
-  box-shadow: 0 -2px 8px rgb(151 19 16 / 22%);
+  width: 170vw;
+  height: 56vh;
   transform: translateX(-50%);
+  background:
+    radial-gradient(ellipse 46% 74% at 50% 0%, rgb(196 16 12 / 92%), rgb(150 8 7 / 62%) 34%, rgb(104 4 4 / 26%) 62%, transparent 82%),
+    radial-gradient(ellipse 78% 100% at 50% -8%, rgb(122 6 6 / 58%), transparent 74%);
+  filter: blur(1px);
+}
+
+#damageIndicator::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 100vw;
+  height: 100vh;
+  transform: translate(-50%, -50%) rotate(calc(-1 * var(--damage-angle)));
+  background:
+    /* thrown droplets */
+    radial-gradient(circle at 11% 17%, rgb(138 7 6 / 82%) 0 1.5%, transparent 1.9%),
+    radial-gradient(circle at 16% 26%, rgb(112 5 5 / 68%) 0 0.7%, transparent 1%),
+    radial-gradient(circle at 8% 44%, rgb(146 8 7 / 74%) 0 1.1%, transparent 1.5%),
+    radial-gradient(circle at 22% 71%, rgb(120 6 5 / 66%) 0 1.8%, transparent 2.2%),
+    radial-gradient(circle at 13% 84%, rgb(132 7 6 / 58%) 0 0.9%, transparent 1.3%),
+    radial-gradient(circle at 88% 21%, rgb(140 8 7 / 78%) 0 1.6%, transparent 2%),
+    radial-gradient(circle at 81% 33%, rgb(110 5 5 / 62%) 0 0.8%, transparent 1.1%),
+    radial-gradient(circle at 93% 58%, rgb(148 9 8 / 72%) 0 1.3%, transparent 1.7%),
+    radial-gradient(circle at 78% 79%, rgb(118 6 5 / 64%) 0 1.9%, transparent 2.3%),
+    radial-gradient(circle at 90% 88%, rgb(128 7 6 / 54%) 0 1%, transparent 1.4%),
+    radial-gradient(circle at 41% 9%, rgb(134 7 6 / 60%) 0 1.2%, transparent 1.6%),
+    radial-gradient(circle at 63% 13%, rgb(116 6 5 / 52%) 0 0.8%, transparent 1.2%),
+    radial-gradient(circle at 35% 92%, rgb(126 7 6 / 56%) 0 1.4%, transparent 1.8%),
+    radial-gradient(circle at 68% 95%, rgb(112 5 5 / 48%) 0 1%, transparent 1.4%),
+    /* smeared corners */
+    radial-gradient(ellipse 34% 44% at 0% 0%, rgb(122 6 6 / 62%), transparent 72%),
+    radial-gradient(ellipse 34% 44% at 100% 0%, rgb(122 6 6 / 58%), transparent 72%),
+    radial-gradient(ellipse 32% 40% at 0% 100%, rgb(104 5 5 / 52%), transparent 72%),
+    radial-gradient(ellipse 32% 40% at 100% 100%, rgb(104 5 5 / 52%), transparent 72%),
+    /* whole-screen wound vignette */
+    radial-gradient(ellipse 118% 104% at 50% 50%, transparent 34%, rgb(112 6 6 / 46%) 74%, rgb(62 2 2 / 82%) 100%);
 }
 
 #damageIndicator.visible {
-  opacity: 0.7;
-  transition-duration: 55ms;
+  opacity: 0.96;
+  transition-duration: 45ms;
+}
+
+/* Low-health blood haze. The pseudo-element is fixed, so it covers the whole
+   screen even though it hangs off the health HUD, which is the only node that
+   already carries the .critical state. */
+#healthHud.critical::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(ellipse 26% 58% at 0% 50%, rgb(126 7 6 / 46%), transparent 78%),
+    radial-gradient(ellipse 26% 58% at 100% 50%, rgb(126 7 6 / 46%), transparent 78%),
+    radial-gradient(ellipse 74% 26% at 50% 0%, rgb(112 6 5 / 40%), transparent 78%),
+    radial-gradient(ellipse 74% 26% at 50% 100%, rgb(112 6 5 / 40%), transparent 78%),
+    radial-gradient(ellipse 116% 100% at 50% 50%, transparent 42%, rgb(88 4 4 / 52%) 100%);
+  animation: bloodPulse 1.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes bloodPulse {
+  0%,
+  100% {
+    opacity: 0.62;
+  }
+
+  50% {
+    opacity: 1;
+  }
 }
 
 #healthHud {
@@ -480,7 +552,11 @@ body {
   display: none;
   place-items: center;
   padding: 24px;
-  background: rgb(17 21 19 / 66%);
+  background:
+    radial-gradient(ellipse 40% 60% at 0% 40%, rgb(112 6 6 / 52%), transparent 76%),
+    radial-gradient(ellipse 40% 60% at 100% 60%, rgb(112 6 6 / 52%), transparent 76%),
+    radial-gradient(ellipse 120% 100% at 50% 50%, transparent 30%, rgb(74 3 3 / 64%) 100%),
+    rgb(17 21 19 / 66%);
   backdrop-filter: blur(3px);
   pointer-events: auto;
 }
@@ -613,5 +689,12 @@ body {
 
   #reloadButton {
     right: max(96px, calc(env(safe-area-inset-right) + 25vh));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #healthHud.critical::after {
+    animation: none;
+    opacity: 0.72;
   }
 }
