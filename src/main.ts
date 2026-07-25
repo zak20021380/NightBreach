@@ -2563,13 +2563,17 @@ function isValidZombieSpawnPosition(position: Vector3) {
     && isSpawnPositionOutsideCameraView(position)
 }
 
-function selectZombieSpawnPosition(spawnIndex: number) {
+function selectZombieSpawnPosition(spawnIndex: number): Vector3 | null {
   const candidateCount = ZOMBIE_SPAWN_POSITIONS.length
   for (let attempt = 0; attempt < ZOMBIE_WAVE_CONFIG.spawnPlacementAttempts; attempt += 1) {
     const position = ZOMBIE_SPAWN_POSITIONS[(spawnIndex + attempt) % candidateCount]
     if (isValidZombieSpawnPosition(position)) return position
   }
 
+  // The fallback ring must clear the same distance, geometry, and camera-view
+  // checks as the primary candidates. Nothing is ever forced into an unsafe
+  // spot: if every fallback also fails, return null so the caller defers this
+  // zombie and retries on the next spawn tick.
   for (let index = 0; index < ZOMBIE_SPAWN_FALLBACK_POSITIONS.length; index += 1) {
     const position = ZOMBIE_SPAWN_FALLBACK_POSITIONS[
       (spawnIndex + index) % ZOMBIE_SPAWN_FALLBACK_POSITIONS.length
@@ -2579,9 +2583,7 @@ function selectZombieSpawnPosition(spawnIndex: number) {
     }
   }
 
-  return ZOMBIE_SPAWN_FALLBACK_POSITIONS[
-    spawnIndex % ZOMBIE_SPAWN_FALLBACK_POSITIONS.length
-  ]
+  return null
 }
 
 stopZombieWaveTimers = () => {
@@ -2624,6 +2626,13 @@ function spawnNextWaveZombie() {
   }
 
   const spawnPosition = selectZombieSpawnPosition(waveState.spawnedZombies)
+  if (!spawnPosition) {
+    // Every primary and fallback candidate failed the distance, geometry, or
+    // camera-view checks this tick. Leave the spawn counters unchanged so the
+    // spawn interval retries on the next tick once the player has moved or the
+    // camera has turned, rather than forcing this zombie into an unsafe spot.
+    return
+  }
   const stats = getWaveZombieStats(waveState.currentWave)
   const zombie = new Zombie(
     nextZombieId,
