@@ -1225,7 +1225,11 @@ class BloodEffectPool {
         const material = new StandardMaterial(`blood${layer}${variation}`, scene)
         material.diffuseTexture = texture
         material.diffuseColor = Color3.FromHexString(colors[layer][variation % colors[layer].length])
-        material.emissiveColor = material.diffuseColor.scale(layer === 'mist' ? 0.15 : 0.07)
+        // Lighting is disabled below, so the visible color is the emissive color
+        // alone. Scale the dark-red palette up so impacts, sprays, mist, and
+        // decals read as visibly dark red instead of near-black; mist stays the
+        // brightest layer to keep its translucent haze readable.
+        material.emissiveColor = material.diffuseColor.scale(layer === 'mist' ? 1.0 : 0.7)
         material.disableLighting = true
         material.useAlphaFromDiffuseTexture = true
         material.transparencyMode = StandardMaterial.MATERIAL_ALPHABLEND
@@ -1387,6 +1391,7 @@ const ZOMBIE_SPAWN_POSITIONS = [
   new Vector3(-20, 0, 6),
   new Vector3(-4, 0, -2),
   new Vector3(14, 0, -8),
+  new Vector3(18, 0, -14),
 ] as const
 const ZOMBIE_SPAWN_FALLBACK_POSITIONS = [
   new Vector3(-22, 0, -22),
