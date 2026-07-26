@@ -299,7 +299,19 @@ try {
 }
 scene.skipPointerMovePicking = true
 
-const camera = new UniversalCamera('playerCamera', new Vector3(0, 1.7, -18), scene)
+// The first-person eye height is taken from the zombie the player actually
+// stands in front of rather than picked by feel: once the imported model is
+// grounded it stands 1.904m to the crown with its eye line at 1.72m, so the
+// camera sits level with their faces.
+const PLAYER_EYE_HEIGHT = ASSET_CONFIG.assets.zombie.eyeHeight
+// The collision capsule spans the ground to the eye, so its half height and its
+// offset both track the eye height. That keeps the capsule's base at exactly
+// y=0 -- no sinking, no floating -- while the unchanged 0.45 radius preserves
+// every existing horizontal collision response against crates, walls, and
+// pillars.
+const PLAYER_COLLISION_RADIUS = 0.45
+const PLAYER_COLLISION_HALF_HEIGHT = PLAYER_EYE_HEIGHT / 2
+const camera = new UniversalCamera('playerCamera', new Vector3(0, PLAYER_EYE_HEIGHT, -18), scene)
 const PLAYER_START_POSITION = camera.position.clone()
 const PLAYER_START_TARGET = new Vector3(0, PLAYER_START_POSITION.y, 0)
 camera.minZ = 0.05
@@ -310,8 +322,12 @@ camera.inertia = 0.18
 camera.angularSensibility = 3400
 camera.applyGravity = true
 camera.checkCollisions = true
-camera.ellipsoid = new Vector3(0.45, 0.85, 0.45)
-camera.ellipsoidOffset = new Vector3(0, -0.85, 0)
+camera.ellipsoid = new Vector3(
+  PLAYER_COLLISION_RADIUS,
+  PLAYER_COLLISION_HALF_HEIGHT,
+  PLAYER_COLLISION_RADIUS,
+)
+camera.ellipsoidOffset = new Vector3(0, -PLAYER_COLLISION_HALF_HEIGHT, 0)
 camera.keysUp = [87]
 camera.keysDown = [83]
 camera.keysLeft = [65]
@@ -1015,6 +1031,7 @@ const ZOMBIE_ASSET_CONFIG = {
   rotation: vector3FromTuple(ZOMBIE_ASSET_DEFINITION.transform.rotation),
   scale: vector3FromTuple(ZOMBIE_ASSET_DEFINITION.transform.scale),
   height: ZOMBIE_ASSET_DEFINITION.normalizedHeight,
+  groundContactOffset: ZOMBIE_ASSET_DEFINITION.groundContactOffset,
   animationSpeed: ZOMBIE_ASSET_DEFINITION.animation.speed,
   material: ZOMBIE_ASSET_DEFINITION.material,
 }
@@ -1576,9 +1593,72 @@ function cloneSkinnedZombieInstance(container: AssetContainer, name: string) {
   )
 }
 
+interface ZombieRestPoseCalibration {
+  readonly groundOffsetY: number
+  readonly referenceHeight: number
+  readonly scale: number
+}
+
+/**
+ * Measures the imported zombie once, from the container originals, before any
+ * clone exists.
+ *
+ * The container's meshes are never parented into the scene and never animated,
+ * so they still carry the bind-pose bounding boxes the glTF loader computed
+ * with the skeleton applied. That bind pose is the silhouette `normalizedHeight`
+ * describes, and it is the only measurement that does not depend on which
+ * animation frame a clone happens to hold, so it is taken once and the result
+ * is reused for every zombie.
+ *
+ * It is deliberately NOT used to ground the model. The bind pose is a rigging
+ * pose whose feet do not sit where the character stands; the floor comes from
+ * the authored clips instead, via `groundContactOffset`.
+ */
+function calibrateZombieRestPose(container: AssetContainer): ZombieRestPoseCalibration {
+  let minimumY = Number.POSITIVE_INFINITY
+  let maximumY = Number.NEGATIVE_INFINITY
+  for (const node of container.rootNodes) node.computeWorldMatrix(true)
+  for (const mesh of container.meshes) {
+    if (mesh.getTotalVertices() === 0) continue
+    mesh.computeWorldMatrix(true)
+    const box = mesh.getBoundingInfo().boundingBox
+    minimumY = Math.min(minimumY, box.minimumWorld.y)
+    maximumY = Math.max(maximumY, box.maximumWorld.y)
+  }
+
+  const { x: authoredScale, y: authoredScaleY, z: authoredScaleZ } = ZOMBIE_ASSET_CONFIG.scale
+  if (
+    authoredScale <= 0
+    || Math.abs(authoredScale - authoredScaleY) > 0.000001
+    || Math.abs(authoredScale - authoredScaleZ) > 0.000001
+  ) {
+    throw new Error('The zombie must use one positive uniform scale.')
+  }
+
+  const referenceHeight = (maximumY - minimumY) * authoredScale
+  if (!Number.isFinite(referenceHeight) || referenceHeight <= 0.001) {
+    throw new Error(`The zombie GLB returned an invalid reference height: ${referenceHeight}.`)
+  }
+
+  // The authored scale is expected to already resolve the model to
+  // normalizedHeight. Correcting it here keeps a re-exported GLB correctly
+  // sized without editing the asset config, and the correction is a single
+  // shared value so every zombie in the pack stays identical.
+  return {
+    groundOffsetY: ZOMBIE_ASSET_CONFIG.groundContactOffset,
+    referenceHeight,
+    scale: authoredScale * (ZOMBIE_ASSET_CONFIG.height / referenceHeight),
+  }
+}
+
 function createGlbZombieFactory(
   container: AssetContainer,
 ): ZombieVisualFactory {
+  const calibration = calibrateZombieRestPose(container)
+  console.info(
+    `[Night Breach][Zombies] Reference pose measured once: ${calibration.referenceHeight.toFixed(3)}m at the authored scale; using scale ${calibration.scale.toFixed(6)} and a ${calibration.groundOffsetY.toFixed(4)}m ground offset for every clone.`,
+  )
+
   return {
     source: 'glb',
     create(name: string) {
@@ -1590,7 +1670,7 @@ function createGlbZombieFactory(
         // Presentation correction is isolated to this complete instance root.
         // Loader nodes, bones, and skinned meshes keep their authored transforms.
         root.rotation.copyFrom(ZOMBIE_ASSET_CONFIG.rotation)
-        root.scaling.copyFrom(ZOMBIE_ASSET_CONFIG.scale)
+        root.scaling.setAll(calibration.scale)
         const modelMeshes = root.getChildMeshes(false)
         const renderableMeshes = modelMeshes.filter((mesh) => mesh.getTotalVertices() > 0)
         const skinnedMeshes = renderableMeshes.filter((mesh) => mesh.skeleton !== null)
@@ -1604,26 +1684,15 @@ function createGlbZombieFactory(
         })
         applyImportedMaterialSettings(modelMeshes, ZOMBIE_ASSET_CONFIG.material)
 
+        // Every clone is sized and grounded from the one shared calibration.
+        // Re-measuring per clone used to read whichever animation frame the
+        // freshly cloned skeleton held, so the pack drifted in size, and it
+        // grounded against the bind pose, which stands higher than the
+        // character actually does and buried the soles in the floor.
+        root.position.set(0, -calibration.groundOffsetY, 0)
+        root.position.addInPlace(ZOMBIE_ASSET_CONFIG.position)
         root.computeWorldMatrix(true)
         modelMeshes.forEach((mesh) => mesh.computeWorldMatrix(true))
-        const initialBounds = root.getHierarchyBoundingVectors(true)
-        const initialHeight = initialBounds.max.y - initialBounds.min.y
-        if (!Number.isFinite(initialHeight) || initialHeight <= 0.001) {
-          throw new Error(`Zombie clone returned an invalid height: ${initialHeight}.`)
-        }
-        // Each clone is measured in whatever pose its cloned skeleton currently
-        // holds, so the hierarchy height drifts a few centimetres between
-        // instances. Normalize the parent scale to the authored height instead
-        // of throwing: a throw here aborts the spawn tick and stalls the wave.
-        let groundedMinimumY = initialBounds.min.y
-        if (Math.abs(initialHeight - ZOMBIE_ASSET_CONFIG.height) > 0.03) {
-          root.scaling.scaleInPlace(ZOMBIE_ASSET_CONFIG.height / initialHeight)
-          root.computeWorldMatrix(true)
-          modelMeshes.forEach((mesh) => mesh.computeWorldMatrix(true))
-          groundedMinimumY = root.getHierarchyBoundingVectors(true).min.y
-        }
-        root.position.y -= groundedMinimumY
-        root.position.addInPlace(ZOMBIE_ASSET_CONFIG.position)
 
         const animationGroups = [...entries.animationGroups]
         for (const group of animationGroups) {
