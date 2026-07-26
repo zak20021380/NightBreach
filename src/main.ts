@@ -8,12 +8,10 @@ import { Ray } from '@babylonjs/core/Culling/ray'
 import { Engine } from '@babylonjs/core/Engines/engine'
 import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight'
 import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight'
-import { PointLight } from '@babylonjs/core/Lights/pointLight'
 import { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator'
 import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imageProcessingConfiguration'
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial'
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial'
-import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture'
 import { Color3, Color4 } from '@babylonjs/core/Maths/math.color'
 import { Frustum } from '@babylonjs/core/Maths/math.frustum'
 import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector'
@@ -23,43 +21,62 @@ import { Mesh } from '@babylonjs/core/Meshes/mesh'
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder'
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode'
 import { Scene } from '@babylonjs/core/scene'
-import {
-  ASSET_CONFIG,
-  type AssetMaterialSettings,
-  type Vector3Tuple,
-} from './assets/assetConfig'
+import { ASSET_CONFIG } from './assets/assetConfig'
 import {
   type AssetProgressSnapshot,
   LocalAssetManager,
 } from './assets/localAssetManager'
+import {
+  clamp,
+  damp,
+  logRuntimeError,
+  logRuntimeWarning,
+  signedAngleDifference,
+  vector3FromTuple,
+} from './game/utils'
+import {
+  hardwareThreadCount,
+  isDesktop,
+  isLowEndMobile,
+  isMobile,
+  isTouchDevice,
+  TOUCH_CONFIG,
+} from './game/device'
+import {
+  adsButton,
+  ammoDisplay,
+  assetLoading,
+  assetLoadingLabel,
+  assetLoadingProgress,
+  canvas,
+  crosshair,
+  damageIndicator,
+  fireButton,
+  headshotIndicator,
+  healthFill,
+  healthHud,
+  healthValue,
+  hitMarker,
+  instructions,
+  joystickKnob,
+  lookArea,
+  movementControl,
+  reloadButton,
+  retryButton,
+  retryOverlay,
+} from './game/dom'
+import {
+  applyImportedMaterialSettings,
+  createMaterial as createSurfaceMaterial,
+  setMaterialColor,
+  type SurfaceMaterial,
+} from './game/materials'
+import { BloodEffectPool } from './game/effects/blood'
+import {
+  MUZZLE_FLASH_DURATION,
+  WeaponFireEffects,
+} from './game/effects/weaponEffects'
 
-function getElement<T extends Element>(selector: string): T {
-  const element = document.querySelector<T>(selector)
-  if (!element) throw new Error(`Missing required element: ${selector}`)
-  return element
-}
-
-const canvas = getElement<HTMLCanvasElement>('#renderCanvas')
-const assetLoading = getElement<HTMLDivElement>('#assetLoading')
-const assetLoadingLabel = getElement<HTMLSpanElement>('#assetLoadingLabel')
-const assetLoadingProgress = getElement<HTMLProgressElement>('#assetLoadingProgress')
-const ammoDisplay = getElement<HTMLDivElement>('#ammo')
-const instructions = getElement<HTMLButtonElement>('#instructions')
-const crosshair = getElement<HTMLDivElement>('#crosshair')
-const hitMarker = getElement<HTMLDivElement>('#hitMarker')
-const headshotIndicator = getElement<HTMLDivElement>('#headshotIndicator')
-const damageIndicator = getElement<HTMLDivElement>('#damageIndicator')
-const healthHud = getElement<HTMLDivElement>('#healthHud')
-const healthValue = getElement<HTMLSpanElement>('#healthValue')
-const healthFill = getElement<HTMLDivElement>('#healthFill')
-const retryOverlay = getElement<HTMLDivElement>('#retryOverlay')
-const retryButton = getElement<HTMLButtonElement>('#retryButton')
-const lookArea = getElement<HTMLDivElement>('#lookArea')
-const movementControl = getElement<HTMLDivElement>('#movementControl')
-const joystickKnob = getElement<HTMLDivElement>('#joystickKnob')
-const fireButton = getElement<HTMLButtonElement>('#fireButton')
-const adsButton = getElement<HTMLButtonElement>('#adsButton')
-const reloadButton = getElement<HTMLButtonElement>('#reloadButton')
 const assetLoadingStartedAt = performance.now()
 let assetLoadingHideTimer: number | undefined
 
@@ -79,30 +96,10 @@ function updateAssetLoadingIndicator(snapshot: AssetProgressSnapshot) {
     }, 200)
   }, minimumDisplayTime)
 }
-const isTouchDevice = navigator.maxTouchPoints > 0
-  || window.matchMedia('(pointer: coarse)').matches
-const isMobile = isTouchDevice || window.innerWidth < 768
-const isDesktop = !isTouchDevice
-  && window.matchMedia('(hover: hover) and (pointer: fine)').matches
-const hardwareThreadCount = navigator.hardwareConcurrency || 4
-const deviceMemoryGb = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 4
-const isLowEndMobile = isMobile && (hardwareThreadCount <= 4 || deviceMemoryGb <= 4)
-
 document.body.classList.toggle('touch-device', isTouchDevice)
 canvas.dataset.performanceTier = isLowEndMobile ? 'mobile-low' : isMobile ? 'mobile' : 'desktop'
 if (isTouchDevice) {
   instructions.innerHTML = 'Tap to deploy<br /><span>Left stick to move &middot; swipe to aim</span>'
-}
-
-const TOUCH_CONFIG = {
-  lookSensitivity: 0.00215,
-  adsLookSensitivityMultiplier: 0.72,
-  joystickDeadZone: 0.08,
-  automaticFireInterval: 0.1,
-  hipFov: 72 * Math.PI / 180,
-  adsFov: 56 * Math.PI / 180,
-  hipSpread: 0.0035,
-  adsSpread: 0.00075,
 }
 
 let gameReady = false
@@ -164,24 +161,6 @@ document.addEventListener('dblclick', (event) => {
 document.addEventListener('gesturestart', (event) => {
   if (isTouchDevice) event.preventDefault()
 }, { passive: false })
-
-function describeRuntimeError(error: unknown) {
-  if (error instanceof Error) return error.stack ?? `${error.name}: ${error.message}`
-  if (typeof error === 'string') return error
-  try {
-    return JSON.stringify(error)
-  } catch {
-    return String(error)
-  }
-}
-
-function logRuntimeError(context: string, error: unknown) {
-  console.error(`[Night Breach] ${context}\n${describeRuntimeError(error)}`, error)
-}
-
-function logRuntimeWarning(context: string, error: unknown) {
-  console.warn(`[Night Breach] ${context}\n${describeRuntimeError(error)}`, error)
-}
 
 function requestPointerLockSafely() {
   if (!isDesktop || document.pointerLockElement === canvas) return
@@ -443,98 +422,14 @@ if (enableSoftShadows) {
   }
 }
 
-type SurfaceMaterial = PBRMaterial | StandardMaterial
-const NO_EMISSIVE_COLOR = Color3.Black()
-
-function createMaterial(
+// Scene-bound convenience wrapper so existing call sites stay unchanged while
+// the reusable implementation lives in ./game/materials.
+const createMaterial = (
   name: string,
   color: Color3,
   roughness: number,
   metallic = 0,
-): SurfaceMaterial {
-  try {
-    const material = new PBRMaterial(name, scene)
-    material.albedoColor = color.clone()
-    material.roughness = roughness
-    material.metallic = metallic
-    material.environmentIntensity = 0.45
-    return material
-  } catch (error) {
-    logRuntimeWarning(`PBR material "${name}" failed; using a standard fallback.`, error)
-    const fallback = new StandardMaterial(`${name}Fallback`, scene)
-    fallback.diffuseColor = color.clone()
-    fallback.specularColor = metallic > 0.5
-      ? new Color3(0.28, 0.28, 0.26)
-      : new Color3(0.04, 0.04, 0.04)
-    return fallback
-  }
-}
-
-function setMaterialColor(
-  material: SurfaceMaterial,
-  color: Color3,
-  emissive = NO_EMISSIVE_COLOR,
-) {
-  if (material instanceof PBRMaterial) {
-    material.albedoColor.copyFrom(color)
-  } else {
-    material.diffuseColor.copyFrom(color)
-  }
-  material.emissiveColor.copyFrom(emissive)
-}
-
-function vector3FromTuple(value: Vector3Tuple) {
-  return new Vector3(value[0], value[1], value[2])
-}
-
-function applyImportedMaterialSettings(
-  meshes: readonly AbstractMesh[],
-  settings: AssetMaterialSettings,
-) {
-  const materials = new Set(meshes.map((mesh) => mesh.material).filter((material) => material !== null))
-  for (const material of materials) {
-    if (settings.mode === 'source') {
-      if (material instanceof PBRMaterial) {
-        const isTransparentDetail = material.alpha < 0.999
-          || /glass|lens|optic|scope/i.test(material.name)
-        if (!isTransparentDetail && settings.minimumRoughness !== undefined) {
-          material.roughness = Math.max(
-            material.roughness ?? settings.minimumRoughness,
-            settings.minimumRoughness,
-          )
-        }
-        if (settings.maximumEnvironmentIntensity !== undefined) {
-          material.environmentIntensity = Math.min(
-            material.environmentIntensity,
-            settings.maximumEnvironmentIntensity,
-          )
-        }
-      }
-      continue
-    }
-
-    if (settings.alpha !== undefined) material.alpha = settings.alpha
-    if (settings.backFaceCulling !== undefined) {
-      material.backFaceCulling = settings.backFaceCulling
-    }
-
-    if (material instanceof PBRMaterial) {
-      if (settings.albedoColor) material.albedoColor = Color3.FromHexString(settings.albedoColor)
-      if (settings.emissiveColor) material.emissiveColor = Color3.FromHexString(settings.emissiveColor)
-      if (settings.roughness !== undefined) material.roughness = settings.roughness
-      if (settings.metallic !== undefined) material.metallic = settings.metallic
-      if (settings.environmentIntensity !== undefined) {
-        material.environmentIntensity = settings.environmentIntensity
-      }
-    } else if (material instanceof StandardMaterial) {
-      if (settings.albedoColor) material.diffuseColor = Color3.FromHexString(settings.albedoColor)
-      if (settings.emissiveColor) material.emissiveColor = Color3.FromHexString(settings.emissiveColor)
-      if (settings.roughness !== undefined) {
-        material.specularPower = Math.max(1, (1 - settings.roughness) * 128)
-      }
-    }
-  }
-}
+): SurfaceMaterial => createSurfaceMaterial(scene, name, color, roughness, metallic)
 
 const concreteMaterial = createMaterial(
   'roughConcrete',
@@ -1108,11 +1003,6 @@ function getApproachSlotAngle(slotIndex: number) {
   return (slotIndex / ZOMBIE_SWARM_CONFIG.approachSlotCount) * Math.PI * 2
 }
 
-function signedAngleDifference(from: number, to: number) {
-  const difference = to - from
-  return Math.atan2(Math.sin(difference), Math.cos(difference))
-}
-
 /**
  * Picks the cheapest lane for a zombie arriving on the given bearing: closest
  * free sector wins, and occupancy is a cost rather than a hard block so a wave
@@ -1165,332 +1055,7 @@ zombieHitZoneMaterial.disableLighting = true
 zombieHitZoneMaterial.disableColorWrite = true
 zombieHitZoneMaterial.disableDepthWrite = true
 
-interface BloodBurstSnapshot {
-  activeParticles: number
-  burstCount: number
-  decalLimit: number
-  activeDecals: number
-  headshot: boolean
-  origin: Vector3
-  particleCount: number
-  poolCapacity: number
-}
-
-type BloodLayer = 'splash' | 'spray' | 'mist'
-
-interface BloodParticle {
-  active: boolean
-  age: number
-  lifetime: number
-  rotationSpeed: number
-  startSize: number
-  endSize: number
-  drag: number
-  gravity: number
-  mesh: Mesh
-  velocity: Vector3
-}
-
-interface BloodDecal {
-  active: boolean
-  age: number
-  lifetime: number
-  mesh: Mesh
-}
-
-class BloodEffectPool {
-  private readonly particleMaterials: Record<BloodLayer, StandardMaterial[]>
-  private readonly particles: BloodParticle[] = []
-  private readonly decals: BloodDecal[] = []
-  private readonly lastOrigin = Vector3.Zero()
-  private readonly decalRay = new Ray(Vector3.Zero(), Vector3.Forward(), 8)
-  private readonly decalNormal = Vector3.Forward()
-  private readonly decalRotation = Quaternion.Identity()
-  private readonly direction = Vector3.Forward()
-  private readonly perpendicular = Vector3.Right()
-  private readonly secondaryPerpendicular = Vector3.Up()
-  private readonly decalCapacity: number
-  private readonly particleCapacity: number
-  private nextParticle = 0
-  private nextDecal = 0
-  private burstCount = 0
-  private lastHeadshot = false
-  private lastParticleCount = 0
-
-  constructor() {
-    this.particleCapacity = isLowEndMobile ? 96 : isMobile ? 128 : 192
-    this.decalCapacity = isLowEndMobile ? 12 : isMobile ? 16 : 24
-    this.particleMaterials = this.createMaterials()
-
-    for (let index = 0; index < this.particleCapacity; index += 1) {
-      const mesh = MeshBuilder.CreatePlane(`bloodParticle${index}`, { size: 1 }, scene)
-      mesh.billboardMode = Mesh.BILLBOARDMODE_ALL
-      mesh.isPickable = false
-      mesh.receiveShadows = false
-      mesh.renderingGroupId = 0
-      mesh.visibility = 0
-      this.particles.push({
-        active: false,
-        age: 0,
-        lifetime: 0,
-        rotationSpeed: 0,
-        startSize: 0,
-        endSize: 0,
-        drag: 0,
-        gravity: 0,
-        mesh,
-        velocity: Vector3.Zero(),
-      })
-    }
-
-    for (let index = 0; index < this.decalCapacity; index += 1) {
-      const mesh = MeshBuilder.CreatePlane(`bloodDecal${index}`, { size: 1 }, scene)
-      mesh.isPickable = false
-      mesh.receiveShadows = false
-      mesh.renderingGroupId = 0
-      mesh.rotationQuaternion = Quaternion.Identity()
-      mesh.visibility = 0
-      this.decals.push({ active: false, age: 0, lifetime: 0, mesh })
-    }
-
-    scene.onBeforeRenderObservable.add(() => this.update(Math.min(engine.getDeltaTime() / 1000, 0.05)))
-  }
-
-  spawn(hitPoint: Vector3, bulletDirection: Vector3, headshot: boolean) {
-    this.lastOrigin.copyFrom(hitPoint)
-    this.lastHeadshot = headshot
-    this.burstCount += 1
-    this.direction.copyFrom(bulletDirection)
-    if (this.direction.lengthSquared() <= 0.000001) this.direction.copyFromFloats(0, 0, 1)
-    this.direction.normalize()
-    Vector3.CrossToRef(this.direction, Vector3.Up(), this.perpendicular)
-    if (this.perpendicular.lengthSquared() < 0.001) this.perpendicular.copyFromFloats(1, 0, 0)
-    else this.perpendicular.normalize()
-    Vector3.CrossToRef(this.perpendicular, this.direction, this.secondaryPerpendicular)
-
-    const countMultiplier = headshot ? 1.6 : 1
-    const splashCount = Math.round(2 * countMultiplier)
-    const sprayCount = Math.round(10 * countMultiplier)
-    const mistCount = Math.round(5 * countMultiplier)
-    this.lastParticleCount = splashCount + sprayCount + mistCount
-    const splashScale = headshot ? 1.4 : 1
-    for (let index = 0; index < splashCount; index += 1) {
-      this.spawnParticle('splash', hitPoint, 0.10 * splashScale, 0.35 * splashScale, 0.12, 0.20,
-        0, 0, 0, 0, 0)
-    }
-    for (let index = 0; index < sprayCount; index += 1) {
-      const lateral = (Math.random() - 0.5) * 0.34
-      const vertical = (Math.random() - 0.5) * 0.26
-      const power = (headshot ? 3.8 : 2.65) + Math.random() * (headshot ? 2.2 : 1.65)
-      this.spawnParticle('spray', hitPoint, 0.06, 0.13, 0.35, 0.70,
-        this.direction.x * power + this.perpendicular.x * lateral + this.secondaryPerpendicular.x * vertical,
-        this.direction.y * power + this.perpendicular.y * lateral + this.secondaryPerpendicular.y * vertical,
-        this.direction.z * power + this.perpendicular.z * lateral + this.secondaryPerpendicular.z * vertical,
-        5.7, 2.6)
-    }
-    for (let index = 0; index < mistCount; index += 1) {
-      this.spawnParticle('mist', hitPoint, 0.18 * splashScale, 0.52 * splashScale, 0.15, 0.30,
-        this.direction.x * 0.22, this.direction.y * 0.22, this.direction.z * 0.22, 0, 0.6)
-    }
-    this.spawnDecal(hitPoint)
-  }
-
-  reset() {
-    for (let index = 0; index < this.particles.length; index += 1) this.deactivateParticle(this.particles[index])
-    for (let index = 0; index < this.decals.length; index += 1) this.deactivateDecal(this.decals[index])
-  }
-
-  snapshot(): BloodBurstSnapshot {
-    let activeParticles = 0
-    let activeDecals = 0
-    for (let index = 0; index < this.particles.length; index += 1) if (this.particles[index].active) activeParticles += 1
-    for (let index = 0; index < this.decals.length; index += 1) if (this.decals[index].active) activeDecals += 1
-    return {
-      activeParticles,
-      activeDecals,
-      burstCount: this.burstCount,
-      decalLimit: this.decalCapacity,
-      headshot: this.lastHeadshot,
-      origin: this.lastOrigin,
-      particleCount: this.lastParticleCount,
-      poolCapacity: this.particleCapacity,
-    }
-  }
-
-  private createMaterials(): Record<BloodLayer, StandardMaterial[]> {
-    const colors: Record<BloodLayer, readonly string[]> = {
-      splash: ['#5c0508', '#7d0710', '#280103'],
-      spray: ['#65050a', '#8d0812', '#320104'],
-      mist: ['#4b0307', '#67060c', '#210102'],
-    }
-    const materials = { splash: [] as StandardMaterial[], spray: [] as StandardMaterial[], mist: [] as StandardMaterial[] }
-    for (let variation = 0; variation < 5; variation += 1) {
-      const texture = this.createBloodTexture(variation)
-      for (const layer of ['splash', 'spray', 'mist'] as const) {
-        const material = new StandardMaterial(`blood${layer}${variation}`, scene)
-        material.diffuseTexture = texture
-        material.diffuseColor = Color3.FromHexString(colors[layer][variation % colors[layer].length])
-        // Lighting is disabled below, so the visible color is the emissive color
-        // alone. Scale the dark-red palette up so impacts, sprays, mist, and
-        // decals read as visibly dark red instead of near-black; mist stays the
-        // brightest layer to keep its translucent haze readable.
-        material.emissiveColor = material.diffuseColor.scale(layer === 'mist' ? 1.0 : 0.7)
-        material.disableLighting = true
-        material.useAlphaFromDiffuseTexture = true
-        material.transparencyMode = StandardMaterial.MATERIAL_ALPHABLEND
-        material.alpha = layer === 'mist' ? 0.38 : layer === 'splash' ? 0.96 : 0.9
-        material.backFaceCulling = false
-        material.disableDepthWrite = true
-        materials[layer].push(material)
-      }
-    }
-    return materials
-  }
-
-  private createBloodTexture(variation: number) {
-    const texture = new DynamicTexture(`bloodShape${variation}`, { width: 64, height: 64 }, scene, false)
-    const context = texture.getContext()
-    const center = 32
-    const seed = variation * 19 + 7
-    context.clearRect(0, 0, 64, 64)
-    context.fillStyle = '#ffffff'
-    context.beginPath()
-    for (let point = 0; point < 14; point += 1) {
-      const angle = point / 14 * Math.PI * 2
-      const radius = 20 + ((seed + point * 11) % 15) - (point % 4 === 0 ? 7 : 0)
-      const x = center + Math.cos(angle) * radius
-      const y = center + Math.sin(angle) * radius * (0.72 + ((seed + point) % 4) * 0.08)
-      if (point === 0) context.moveTo(x, y)
-      else context.lineTo(x, y)
-    }
-    context.closePath()
-    context.fill()
-    for (let speck = 0; speck < 4; speck += 1) {
-      const angle = (seed + speck * 83) * Math.PI / 180
-      const distance = 20 + speck * 5
-      context.beginPath()
-      context.arc(
-        center + Math.cos(angle) * distance,
-        center + Math.sin(angle) * distance,
-        2 + speck % 2,
-        0,
-        Math.PI * 2,
-      )
-      context.fill()
-    }
-    texture.update(false)
-    return texture
-  }
-
-  private spawnParticle(
-    layer: BloodLayer, origin: Vector3, startSize: number, endSize: number,
-    minimumLifetime: number, maximumLifetime: number, velocityX: number, velocityY: number,
-    velocityZ: number, gravity: number, drag: number,
-  ) {
-    const particle = this.acquireParticle()
-    particle.active = true
-    particle.age = 0
-    particle.lifetime = minimumLifetime + Math.random() * (maximumLifetime - minimumLifetime)
-    particle.startSize = startSize * (0.82 + Math.random() * 0.32)
-    particle.endSize = endSize * (0.86 + Math.random() * 0.28)
-    particle.rotationSpeed = (Math.random() - 0.5) * 13
-    particle.gravity = gravity
-    particle.drag = drag
-    particle.velocity.set(velocityX, velocityY, velocityZ)
-    particle.mesh.position.copyFrom(origin)
-    particle.mesh.rotation.z = Math.random() * Math.PI * 2
-    particle.mesh.scaling.set(particle.startSize, particle.startSize * (layer === 'spray' ? 1.35 : 1), 1)
-    particle.mesh.material = this.particleMaterials[layer][Math.floor(Math.random() * 5)]
-    particle.mesh.visibility = 1
-  }
-
-  private spawnDecal(hitPoint: Vector3) {
-    this.decalRay.origin.copyFrom(hitPoint).addInPlace(this.direction.scale(0.12))
-    this.decalRay.direction.copyFrom(this.direction)
-    let hit = scene.pickWithRay(this.decalRay, (mesh) => proceduralEnvironmentMeshes.includes(mesh), true)
-    if (!hit?.hit || !hit.pickedPoint) {
-      this.decalRay.origin.copyFrom(hitPoint)
-      this.decalRay.direction.copyFromFloats(0, -1, 0)
-      hit = scene.pickWithRay(this.decalRay, (mesh) => proceduralEnvironmentMeshes.includes(mesh), true)
-    }
-    if (!hit?.hit || !hit.pickedPoint) return
-    const decal = this.acquireDecal()
-    this.decalNormal.copyFrom(hit.getNormal(true) ?? this.direction)
-    if (!hit.getNormal(true)) this.decalNormal.scaleInPlace(-1)
-    if (this.decalNormal.lengthSquared() < 0.001) return
-    this.decalNormal.normalize()
-    Quaternion.FromUnitVectorsToRef(Vector3.Forward(), this.decalNormal, this.decalRotation)
-    decal.active = true
-    decal.age = 0
-    decal.lifetime = 6 + Math.random() * 4
-    decal.mesh.position.copyFrom(hit.pickedPoint)
-    decal.mesh.position.x += this.decalNormal.x * 0.012
-    decal.mesh.position.y += this.decalNormal.y * 0.012
-    decal.mesh.position.z += this.decalNormal.z * 0.012
-    decal.mesh.rotationQuaternion?.copyFrom(this.decalRotation)
-    decal.mesh.rotation.z = Math.random() * Math.PI * 2
-    const size = 0.24 + Math.random() * 0.18
-    decal.mesh.scaling.set(size, size * (0.72 + Math.random() * 0.32), 1)
-    decal.mesh.material = this.particleMaterials.splash[Math.floor(Math.random() * 5)]
-    decal.mesh.visibility = 0.86
-  }
-
-  private acquireParticle() {
-    const particle = this.particles[this.nextParticle]
-    this.nextParticle = (this.nextParticle + 1) % this.particleCapacity
-    return particle
-  }
-
-  private acquireDecal() {
-    const decal = this.decals[this.nextDecal]
-    this.nextDecal = (this.nextDecal + 1) % this.decalCapacity
-    return decal
-  }
-
-  private update(deltaSeconds: number) {
-    for (let index = 0; index < this.particles.length; index += 1) {
-      const particle = this.particles[index]
-      if (!particle.active) continue
-      particle.age += deltaSeconds
-      const progress = particle.age / particle.lifetime
-      if (progress >= 1) {
-        this.deactivateParticle(particle)
-        continue
-      }
-      const drag = Math.max(0, 1 - particle.drag * deltaSeconds)
-      particle.velocity.scaleInPlace(drag)
-      particle.velocity.y -= particle.gravity * deltaSeconds
-      particle.mesh.position.x += particle.velocity.x * deltaSeconds
-      particle.mesh.position.y += particle.velocity.y * deltaSeconds
-      particle.mesh.position.z += particle.velocity.z * deltaSeconds
-      particle.mesh.rotation.z += particle.rotationSpeed * deltaSeconds
-      const size = particle.startSize + (particle.endSize - particle.startSize) * progress
-      particle.mesh.scaling.x = size
-      particle.mesh.scaling.y = size * (particle.gravity > 0 ? 1.35 : 1)
-      particle.mesh.visibility = 1 - progress
-    }
-    for (let index = 0; index < this.decals.length; index += 1) {
-      const decal = this.decals[index]
-      if (!decal.active) continue
-      decal.age += deltaSeconds
-      const progress = decal.age / decal.lifetime
-      if (progress >= 1) this.deactivateDecal(decal)
-      else decal.mesh.visibility = Math.min(0.86, (1 - progress) * 1.6)
-    }
-  }
-
-  private deactivateParticle(particle: BloodParticle) {
-    particle.active = false
-    particle.mesh.visibility = 0
-  }
-
-  private deactivateDecal(decal: BloodDecal) {
-    decal.active = false
-    decal.mesh.visibility = 0
-  }
-}
-
-const bloodEffectPool = new BloodEffectPool()
+const bloodEffectPool = new BloodEffectPool(scene, engine, proceduralEnvironmentMeshes)
 
 const ZOMBIE_SPAWN_POSITIONS = [
   new Vector3(-20, 0, 6),
@@ -3525,498 +3090,15 @@ function ensureProceduralRifle() {
 ensureProceduralRifle()
 console.info('[Night Breach][Rifle] Local GLB loading started with procedural fallback active.')
 
-// ---------------------------------------------------------------------------
-// Weapon fire effects
-//
-// The previous flash was one flat 11 cm plane toggled on for 45 ms. This
-// replaces it with a layered, pooled muzzle effect: a white-hot core, a
-// randomly rotated star burst, a forward muzzle jet, barrel smoke, ejected
-// brass, a real point light that briefly illuminates the weapon and the world,
-// and a short exposure pop. Every mesh, material, and texture is built once at
-// startup, so sustained automatic fire only re-poses existing objects and never
-// allocates. The point light is created enabled at zero intensity so its shader
-// permutation compiles during load instead of hitching on the first shot.
-// ---------------------------------------------------------------------------
-
-const MUZZLE_FLASH_DURATION = 0.058
-const MUZZLE_SMOKE_LIFETIME = 0.78
-const SHELL_CASING_LIFETIME = 1.3
-
-type Canvas2dContext = ReturnType<DynamicTexture['getContext']>
-
-function paintRadialFalloff(
-  context: Canvas2dContext,
-  centerX: number,
-  centerY: number,
-  radius: number,
-  steps: number,
-  colors: readonly string[],
-  peakAlpha: number,
-) {
-  for (let step = steps; step >= 1; step -= 1) {
-    const progress = step / steps
-    context.globalAlpha = ((1 - progress) ** 1.5) * peakAlpha + 0.02
-    context.fillStyle = colors[Math.min(
-      colors.length - 1,
-      Math.floor(progress * colors.length),
-    )]
-    context.beginPath()
-    context.arc(centerX, centerY, Math.max(0.5, radius * progress), 0, Math.PI * 2)
-    context.fill()
-  }
-  context.globalAlpha = 1
-}
-
-function createMuzzleCoreTexture() {
-  const texture = new DynamicTexture(
-    'muzzleFlashCoreTexture',
-    { width: 128, height: 128 },
-    scene,
-    false,
-  )
-  const context = texture.getContext()
-  context.clearRect(0, 0, 128, 128)
-  paintRadialFalloff(context, 64, 64, 62, 30, [
-    '#ffffff',
-    '#fff8e2',
-    '#ffe3a2',
-    '#ffb851',
-    '#f0791a',
-    '#b53c06',
-  ], 0.96)
-  texture.update(false)
-  texture.hasAlpha = true
-  return texture
-}
-
-function createMuzzleStarTexture() {
-  const texture = new DynamicTexture(
-    'muzzleFlashStarTexture',
-    { width: 128, height: 128 },
-    scene,
-    false,
-  )
-  const context = texture.getContext()
-  context.clearRect(0, 0, 128, 128)
-  const petalCount = 7
-  for (let petal = 0; petal < petalCount; petal += 1) {
-    const angle = petal / petalCount * Math.PI * 2
-    const isMajor = petal % 2 === 0
-    const length = isMajor ? 61 : 41
-    const spread = isMajor ? 0.17 : 0.1
-    context.globalAlpha = isMajor ? 0.88 : 0.58
-    context.fillStyle = isMajor ? '#ffd989' : '#ffb347'
-    context.beginPath()
-    context.moveTo(64 + Math.cos(angle) * length, 64 + Math.sin(angle) * length)
-    context.lineTo(64 + Math.cos(angle + spread) * 15, 64 + Math.sin(angle + spread) * 15)
-    context.lineTo(64 + Math.cos(angle - spread) * 15, 64 + Math.sin(angle - spread) * 15)
-    context.closePath()
-    context.fill()
-  }
-  context.globalAlpha = 1
-  paintRadialFalloff(context, 64, 64, 27, 16, [
-    '#ffffff',
-    '#fff4cd',
-    '#ffc768',
-    '#f4841f',
-  ], 0.94)
-  texture.update(false)
-  texture.hasAlpha = true
-  return texture
-}
-
-function createMuzzleSmokeTexture() {
-  const texture = new DynamicTexture(
-    'muzzleSmokeTexture',
-    { width: 64, height: 64 },
-    scene,
-    false,
-  )
-  const context = texture.getContext()
-  context.clearRect(0, 0, 64, 64)
-  paintRadialFalloff(context, 32, 32, 31, 18, [
-    '#d8d4cb',
-    '#b3afa6',
-    '#8b8880',
-    '#5f5d57',
-  ], 0.52)
-  texture.update(false)
-  texture.hasAlpha = true
-  return texture
-}
-
-interface MuzzleSmokePuff {
-  active: boolean
-  age: number
-  lifetime: number
-  spin: number
-  startSize: number
-  endSize: number
-  mesh: Mesh
-  drift: Vector3
-}
-
-interface EjectedShell {
-  active: boolean
-  age: number
-  mesh: Mesh
-  velocity: Vector3
-  spin: Vector3
-}
-
-class WeaponFireEffects {
-  private readonly core: Mesh
-  private readonly star: Mesh
-  private readonly jet: Mesh
-  private readonly coreMaterial: StandardMaterial
-  private readonly starMaterial: StandardMaterial
-  private readonly jetMaterial: StandardMaterial
-  private readonly smokeMaterial: StandardMaterial
-  private readonly light: PointLight
-  private readonly smokePuffs: MuzzleSmokePuff[] = []
-  private readonly shells: EjectedShell[] = []
-  private readonly baseExposure: number
-  private readonly muzzleWorldPosition = Vector3.Zero()
-  private readonly ejectForward = Vector3.Zero()
-  private readonly ejectRight = Vector3.Zero()
-  private readonly ejectUp = Vector3.Zero()
-  private readonly smokeCapacity: number
-  private readonly shellCapacity: number
-  private flashRemaining = 0
-  private flashStrength = 1
-  private flashSpin = 0
-  private exposureBoost = 0
-  private nextSmokePuff = 0
-  private nextShell = 0
-
-  constructor() {
-    this.smokeCapacity = isLowEndMobile ? 4 : isMobile ? 6 : 8
-    this.shellCapacity = isLowEndMobile ? 4 : isMobile ? 6 : 10
-    this.baseExposure = scene.imageProcessingConfiguration.exposure
-
-    const coreTexture = createMuzzleCoreTexture()
-    const starTexture = createMuzzleStarTexture()
-    const smokeTexture = createMuzzleSmokeTexture()
-
-    this.coreMaterial = this.createAdditiveMaterial('muzzleFlashCoreMaterial', coreTexture)
-    this.starMaterial = this.createAdditiveMaterial('muzzleFlashStarMaterial', starTexture)
-    this.jetMaterial = this.createAdditiveMaterial('muzzleFlashJetMaterial', coreTexture)
-    this.smokeMaterial = this.createAdditiveMaterial('muzzleSmokeMaterial', smokeTexture)
-    this.smokeMaterial.emissiveColor = new Color3(0.3, 0.29, 0.27)
-
-    const muzzle = WEAPON_VIEW_CONFIG.muzzlePosition
-
-    this.star = MeshBuilder.CreatePlane('muzzleFlashStar', { size: 0.34 }, scene)
-    this.star.parent = viewModelPivot
-    this.star.position.copyFrom(muzzle)
-    this.star.material = this.starMaterial
-    this.star.isVisible = false
-    configureFirstPersonMesh(this.star)
-
-    this.core = MeshBuilder.CreatePlane('muzzleFlashCore', { size: 0.19 }, scene)
-    this.core.parent = viewModelPivot
-    this.core.position.copyFrom(muzzle)
-    this.core.position.z += 0.006
-    this.core.material = this.coreMaterial
-    this.core.isVisible = false
-    configureFirstPersonMesh(this.core)
-
-    // A tapered cone shooting down the barrel line gives the flash real depth
-    // instead of reading as a sticker pinned to the screen.
-    this.jet = MeshBuilder.CreateCylinder('muzzleFlashJet', {
-      height: 0.26,
-      diameterBottom: 0.062,
-      diameterTop: 0.011,
-      tessellation: 10,
-    }, scene)
-    this.jet.parent = viewModelPivot
-    this.jet.rotation.x = Math.PI / 2
-    this.jet.position.copyFrom(muzzle)
-    this.jet.position.z += 0.13
-    this.jet.material = this.jetMaterial
-    this.jet.isVisible = false
-    configureFirstPersonMesh(this.jet)
-
-    for (let index = 0; index < this.smokeCapacity; index += 1) {
-      const mesh = MeshBuilder.CreatePlane(`muzzleSmoke${index}`, { size: 1 }, scene)
-      mesh.parent = viewModelPivot
-      mesh.material = this.smokeMaterial
-      mesh.isVisible = false
-      configureFirstPersonMesh(mesh)
-      this.smokePuffs.push({
-        active: false,
-        age: 0,
-        lifetime: MUZZLE_SMOKE_LIFETIME,
-        spin: 0,
-        startSize: 0.05,
-        endSize: 0.24,
-        mesh,
-        drift: Vector3.Zero(),
-      })
-    }
-
-    const brassMaterial = createMaterial(
-      'shellCasingBrass',
-      Color3.FromHexString('#c8a231'),
-      0.3,
-      0.88,
-    )
-    for (let index = 0; index < this.shellCapacity; index += 1) {
-      const mesh = MeshBuilder.CreateBox(`shellCasing${index}`, {
-        width: 0.011,
-        height: 0.011,
-        depth: 0.03,
-      }, scene)
-      mesh.material = brassMaterial
-      mesh.isPickable = false
-      mesh.checkCollisions = false
-      mesh.receiveShadows = false
-      mesh.isVisible = false
-      this.shells.push({
-        active: false,
-        age: 0,
-        mesh,
-        velocity: Vector3.Zero(),
-        spin: Vector3.Zero(),
-      })
-    }
-
-    this.light = new PointLight('muzzleFlashLight', Vector3.Zero(), scene)
-    this.light.parent = viewModelPivot
-    this.light.position.copyFrom(muzzle)
-    this.light.position.z += 0.2
-    this.light.diffuse = new Color3(1, 0.78, 0.42)
-    this.light.specular = new Color3(1, 0.86, 0.6)
-    this.light.range = 16
-    this.light.intensity = 0
-    this.light.shadowEnabled = false
-
-    scene.onBeforeRenderObservable.add(() => {
-      this.update(Math.min(engine.getDeltaTime() / 1000, 0.05))
-    })
-  }
-
-  trigger(strength: number) {
-    this.flashStrength = clamp(strength, 0.55, 1.25)
-    this.flashRemaining = MUZZLE_FLASH_DURATION
-    this.flashSpin = Math.random() * Math.PI * 2
-    this.exposureBoost = Math.max(this.exposureBoost, 0.2 * this.flashStrength)
-
-    // A short, mostly vertical kick. Deliberately small on the horizontal axis
-    // so sustained fire climbs instead of wandering off target.
-    camera.cameraRotation.x -= 0.0082 * this.flashStrength
-    camera.cameraRotation.y += (Math.random() - 0.5) * 0.0056 * this.flashStrength
-
-    this.spawnSmokePuff()
-    this.ejectShell()
-  }
-
-  reset() {
-    this.flashRemaining = 0
-    this.exposureBoost = 0
-    this.light.intensity = 0
-    this.core.isVisible = false
-    this.star.isVisible = false
-    this.jet.isVisible = false
-    for (let index = 0; index < this.smokePuffs.length; index += 1) {
-      const puff = this.smokePuffs[index]
-      puff.active = false
-      puff.mesh.isVisible = false
-    }
-    for (let index = 0; index < this.shells.length; index += 1) {
-      const shell = this.shells[index]
-      shell.active = false
-      shell.mesh.isVisible = false
-    }
-    scene.imageProcessingConfiguration.exposure = this.baseExposure
-  }
-
-  private createAdditiveMaterial(name: string, texture: DynamicTexture) {
-    const material = new StandardMaterial(name, scene)
-    material.diffuseTexture = texture
-    material.emissiveColor = new Color3(1, 0.82, 0.5)
-    material.diffuseColor = Color3.Black()
-    material.specularColor = Color3.Black()
-    material.disableLighting = true
-    material.useAlphaFromDiffuseTexture = true
-    material.transparencyMode = StandardMaterial.MATERIAL_ALPHABLEND
-    material.backFaceCulling = false
-    material.disableDepthWrite = true
-    material.alpha = 1
-    return material
-  }
-
-  private spawnSmokePuff() {
-    const puff = this.smokePuffs[this.nextSmokePuff]
-    this.nextSmokePuff = (this.nextSmokePuff + 1) % this.smokeCapacity
-    const muzzle = WEAPON_VIEW_CONFIG.muzzlePosition
-    puff.active = true
-    puff.age = 0
-    puff.lifetime = MUZZLE_SMOKE_LIFETIME * (0.78 + Math.random() * 0.42)
-    puff.spin = (Math.random() - 0.5) * 2.4
-    puff.startSize = 0.045 + Math.random() * 0.02
-    puff.endSize = 0.2 + Math.random() * 0.12
-    puff.drift.set(
-      (Math.random() - 0.5) * 0.07,
-      0.11 + Math.random() * 0.07,
-      0.2 + Math.random() * 0.1,
-    )
-    puff.mesh.position.copyFrom(muzzle)
-    puff.mesh.position.z += 0.03
-    puff.mesh.rotation.z = Math.random() * Math.PI * 2
-    puff.mesh.scaling.setAll(puff.startSize)
-    puff.mesh.isVisible = true
-  }
-
-  private ejectShell() {
-    const shell = this.shells[this.nextShell]
-    this.nextShell = (this.nextShell + 1) % this.shellCapacity
-
-    // Derive the ejection port from the camera basis rather than the view-model
-    // world matrix: the pivot is animated every frame by recoil, sway, and bob,
-    // so its matrix can be a frame stale at the moment of the shot.
-    camera.getDirectionToRef(Vector3.Forward(), this.ejectForward)
-    camera.getDirectionToRef(Vector3.Right(), this.ejectRight)
-    camera.getDirectionToRef(Vector3.Up(), this.ejectUp)
-    this.muzzleWorldPosition.copyFrom(camera.position)
-    this.muzzleWorldPosition.addInPlaceFromFloats(
-      this.ejectForward.x * 0.34 + this.ejectRight.x * 0.2 + this.ejectUp.x * -0.12,
-      this.ejectForward.y * 0.34 + this.ejectRight.y * 0.2 + this.ejectUp.y * -0.12,
-      this.ejectForward.z * 0.34 + this.ejectRight.z * 0.2 + this.ejectUp.z * -0.12,
-    )
-
-    const rightPower = 1.9 + Math.random() * 0.8
-    const upPower = 1.5 + Math.random() * 0.6
-    const forwardPower = 0.25 + Math.random() * 0.3
-    shell.active = true
-    shell.age = 0
-    shell.velocity.set(
-      this.ejectRight.x * rightPower + this.ejectUp.x * upPower + this.ejectForward.x * forwardPower,
-      this.ejectRight.y * rightPower + this.ejectUp.y * upPower + this.ejectForward.y * forwardPower,
-      this.ejectRight.z * rightPower + this.ejectUp.z * upPower + this.ejectForward.z * forwardPower,
-    )
-    shell.spin.set(
-      (Math.random() - 0.5) * 26,
-      (Math.random() - 0.5) * 20,
-      (Math.random() - 0.5) * 30,
-    )
-    shell.mesh.position.copyFrom(this.muzzleWorldPosition)
-    shell.mesh.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3)
-    shell.mesh.visibility = 1
-    shell.mesh.isVisible = true
-  }
-
-  private update(deltaSeconds: number) {
-    this.updateFlash(deltaSeconds)
-    this.updateSmoke(deltaSeconds)
-    this.updateShells(deltaSeconds)
-
-    if (this.exposureBoost > 0.0008) {
-      this.exposureBoost = damp(this.exposureBoost, 0, 17, deltaSeconds)
-      scene.imageProcessingConfiguration.exposure = this.baseExposure + this.exposureBoost
-    } else if (this.exposureBoost !== 0) {
-      this.exposureBoost = 0
-      scene.imageProcessingConfiguration.exposure = this.baseExposure
-    }
-  }
-
-  private updateFlash(deltaSeconds: number) {
-    if (this.flashRemaining <= 0) {
-      if (this.light.intensity !== 0) {
-        this.light.intensity = 0
-        this.core.isVisible = false
-        this.star.isVisible = false
-        this.jet.isVisible = false
-      }
-      return
-    }
-
-    this.flashRemaining = Math.max(0, this.flashRemaining - deltaSeconds)
-    const progress = 1 - this.flashRemaining / MUZZLE_FLASH_DURATION
-    // Instant attack, sharp decay. A linear fade reads as a soft glow; this
-    // curve reads as a detonation.
-    const intensity = (1 - progress) ** 1.8
-    const visible = this.flashRemaining > 0
-
-    this.core.isVisible = visible
-    this.star.isVisible = visible
-    this.jet.isVisible = visible
-    if (!visible) {
-      this.light.intensity = 0
-      return
-    }
-
-    // The burst expands as it dies, which is what sells the pressure wave.
-    const coreScale = this.flashStrength * (0.72 + progress * 0.7)
-    const starScale = this.flashStrength * (0.6 + progress * 1.15)
-    this.core.scaling.set(coreScale, coreScale, 1)
-    this.star.scaling.set(starScale, starScale, 1)
-    this.core.rotation.z = this.flashSpin * 1.7
-    this.star.rotation.z = this.flashSpin
-    this.jet.scaling.set(
-      this.flashStrength * (0.85 + progress * 0.3),
-      this.flashStrength * (1.05 - progress * 0.45),
-      this.flashStrength * (0.85 + progress * 0.3),
-    )
-
-    this.coreMaterial.alpha = intensity
-    this.starMaterial.alpha = intensity * 0.92
-    this.jetMaterial.alpha = intensity * 0.66
-    this.light.intensity = 26 * intensity * this.flashStrength
-  }
-
-  private updateSmoke(deltaSeconds: number) {
-    for (let index = 0; index < this.smokePuffs.length; index += 1) {
-      const puff = this.smokePuffs[index]
-      if (!puff.active) continue
-      puff.age += deltaSeconds
-      const progress = puff.age / puff.lifetime
-      if (progress >= 1) {
-        puff.active = false
-        puff.mesh.isVisible = false
-        continue
-      }
-      puff.mesh.position.addInPlaceFromFloats(
-        puff.drift.x * deltaSeconds,
-        puff.drift.y * deltaSeconds,
-        puff.drift.z * deltaSeconds,
-      )
-      puff.mesh.rotation.z += puff.spin * deltaSeconds
-      const size = puff.startSize + (puff.endSize - puff.startSize) * progress
-      puff.mesh.scaling.set(size, size, 1)
-      puff.mesh.visibility = Math.sin((1 - progress) * Math.PI * 0.5) * 0.34
-    }
-  }
-
-  private updateShells(deltaSeconds: number) {
-    for (let index = 0; index < this.shells.length; index += 1) {
-      const shell = this.shells[index]
-      if (!shell.active) continue
-      shell.age += deltaSeconds
-      if (shell.age >= SHELL_CASING_LIFETIME) {
-        shell.active = false
-        shell.mesh.isVisible = false
-        continue
-      }
-      shell.velocity.y -= 9.4 * deltaSeconds
-      shell.velocity.scaleInPlace(Math.max(0, 1 - 0.9 * deltaSeconds))
-      shell.mesh.position.addInPlaceFromFloats(
-        shell.velocity.x * deltaSeconds,
-        shell.velocity.y * deltaSeconds,
-        shell.velocity.z * deltaSeconds,
-      )
-      shell.mesh.rotation.addInPlaceFromFloats(
-        shell.spin.x * deltaSeconds,
-        shell.spin.y * deltaSeconds,
-        shell.spin.z * deltaSeconds,
-      )
-      const fade = (SHELL_CASING_LIFETIME - shell.age) / 0.4
-      shell.mesh.visibility = clamp(fade, 0, 1)
-    }
-  }
-}
-
-const weaponFireEffects = new WeaponFireEffects()
+const weaponFireEffects = new WeaponFireEffects({
+  scene,
+  engine,
+  camera,
+  viewModelPivot,
+  muzzlePosition: WEAPON_VIEW_CONFIG.muzzlePosition,
+  createMaterial,
+  configureFirstPersonMesh,
+})
 
 type WeaponAnimationName = 'idle' | 'fire' | 'reload' | 'equip' | 'ads'
 type WeaponAnimationMap = Partial<Record<WeaponAnimationName, AnimationGroup>>
@@ -4794,14 +3876,6 @@ let swayX = 0
 let swayY = 0
 let bobBlend = 0
 let bobTime = 0
-
-function damp(current: number, target: number, speed: number, deltaSeconds: number) {
-  return current + (target - current) * (1 - Math.exp(-speed * deltaSeconds))
-}
-
-function clamp(value: number, minimum: number, maximum: number) {
-  return Math.min(maximum, Math.max(minimum, value))
-}
 
 function restartPrototype() {
   if (!gameOver) return
