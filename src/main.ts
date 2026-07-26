@@ -1023,6 +1023,17 @@ const ZOMBIE_AI_CONFIG = {
   detectionRange: 28,
   loseInterestRange: 32,
   attackDistance: 1.55,
+  // The mover must stop INSIDE its own reach. Parking at exactly attackDistance
+  // left every zombie balanced on the knife-edge of its own hit test, so any
+  // sub-centimetre drift during the swing turned a contact hit into a miss.
+  attackStopDistance: 1.3,
+  // Melee reach at the damage frame. The grace over attackDistance covers the
+  // player's 0.45 collision ellipsoid plus the small amount of sliding a player
+  // can do along a zombie's side during the 0.82s attack animation.
+  attackReachDistance: 2.05,
+  // Vertical band around the zombie's centre. Melee is a horizontal check, but
+  // a player on a crate overhead should still be out of reach.
+  attackReachHeight: 2.1,
   walkSpeed: 2.1,
   runSpeed: 3.3,
   runDistance: 3.5,
@@ -1780,6 +1791,10 @@ class Zombie {
   private targetSpeed = 0
   private locomotion: 'walk' | 'run' = 'walk'
   private readonly obstacleRay: Ray
+  // Reused per swing so the melee line-of-sight probe allocates nothing.
+  private readonly meleeProbeRay = new Ray(Vector3.Zero(), Vector3.Forward(), 1)
+  private readonly meleeProbeOrigin = Vector3.Zero()
+  private readonly meleeProbeDirection = Vector3.Forward()
   private readonly movementDelta = new Vector3()
   private readonly hitZoneMeshes: Mesh[] = []
   private readonly upperBodyImpactRoot: TransformNode
@@ -2265,7 +2280,7 @@ class Zombie {
     const playerDistance = Math.hypot(playerOffsetX, playerOffsetZ)
     const availableDistance = Math.max(
       0,
-      playerDistance - ZOMBIE_AI_CONFIG.attackDistance,
+      playerDistance - ZOMBIE_AI_CONFIG.attackStopDistance,
     )
     const movementDistance = Math.min(
       this.targetSpeed * deltaSeconds,
@@ -2279,6 +2294,62 @@ class Zombie {
       this.currentDirectionZ * movementDistance,
     )
     this.root.moveWithCollisions(this.movementDelta)
+  }
+
+  /**
+   * Melee reach test. Deliberately omnidirectional: a bite connects on contact
+   * regardless of where the player happens to be looking, so this measures only
+   * the zombie's own relationship to the player.
+   *
+   * Horizontal distance is used so camera pitch (looking up or down) can never
+   * change melee validity, with a separate vertical band so a player standing
+   * on top of geometry is still safely out of reach.
+   */
+  private isPlayerWithinMeleeReach(playerPosition: Vector3) {
+    const toPlayerX = playerPosition.x - this.root.position.x
+    const toPlayerZ = playerPosition.z - this.root.position.z
+    const horizontalDistanceSquared = toPlayerX * toPlayerX + toPlayerZ * toPlayerZ
+    if (
+      horizontalDistanceSquared
+      > ZOMBIE_AI_CONFIG.attackReachDistance * ZOMBIE_AI_CONFIG.attackReachDistance
+    ) return false
+
+    const verticalDistance = Math.abs(playerPosition.y - this.root.position.y)
+    if (verticalDistance > ZOMBIE_AI_CONFIG.attackReachHeight) return false
+
+    return this.hasLineOfSightToPlayer(playerPosition, horizontalDistanceSquared)
+  }
+
+  /**
+   * Blocks damage through walls. The probe runs between chest heights so a low
+   * kerb or debris never shields the player, while a real wall always does.
+   */
+  private hasLineOfSightToPlayer(playerPosition: Vector3, horizontalDistanceSquared: number) {
+    const chestHeight = ZOMBIE_ASSET_CONFIG.height * 0.25
+    this.meleeProbeOrigin.set(
+      this.root.position.x,
+      this.root.position.y + chestHeight,
+      this.root.position.z,
+    )
+    this.meleeProbeDirection.set(
+      playerPosition.x - this.meleeProbeOrigin.x,
+      playerPosition.y - this.meleeProbeOrigin.y,
+      playerPosition.z - this.meleeProbeOrigin.z,
+    )
+    const probeLength = this.meleeProbeDirection.length()
+    if (probeLength < 0.001) return true
+    this.meleeProbeDirection.scaleInPlace(1 / probeLength)
+
+    this.meleeProbeRay.origin.copyFrom(this.meleeProbeOrigin)
+    this.meleeProbeRay.direction.copyFrom(this.meleeProbeDirection)
+    // Stop just short of the player so their own collider is never the blocker.
+    this.meleeProbeRay.length = Math.max(
+      0.05,
+      Math.min(probeLength, Math.sqrt(horizontalDistanceSquared)) - 0.15,
+    )
+
+    const blocker = scene.pickWithRay(this.meleeProbeRay, isZombieObstacle, true)
+    return !blocker?.hit
   }
 
   private beginAttack() {
@@ -2300,7 +2371,10 @@ class Zombie {
     this.attackElapsed += deltaSeconds
     const toPlayerX = playerPosition.x - this.root.position.x
     const toPlayerZ = playerPosition.z - this.root.position.z
-    const distanceSquared = toPlayerX * toPlayerX + toPlayerZ * toPlayerZ
+
+    // Keep turning toward the player for the whole swing. A player circling to
+    // the flank is tracked instead of being swung at in the old direction, which
+    // is what makes a side approach read naturally rather than looking blind.
     const desiredYaw = Math.atan2(toPlayerX, toPlayerZ)
     const yawDifference = Math.atan2(
       Math.sin(desiredYaw - this.root.rotation.y),
@@ -2315,15 +2389,17 @@ class Zombie {
     ) {
       // Consume the damage window even on a miss so one swing can never hit twice.
       this.attackDamageApplied = true
-      if (
-        distanceSquared
-        <= ZOMBIE_AI_CONFIG.attackDistance * ZOMBIE_AI_CONFIG.attackDistance
-      ) {
+      // Range is judged only at the hit frame, from the zombie's own position.
+      // Whether the player is facing the zombie is irrelevant to contact.
+      if (this.isPlayerWithinMeleeReach(playerPosition)) {
         damagePlayer(ZOMBIE_COMBAT_CONFIG.attackDamage, this.root.position)
       }
     }
 
     if (this.attackElapsed >= ZOMBIE_COMBAT_CONFIG.attackDuration) {
+      // Always leave the attack state when the animation ends, hit or miss, so a
+      // whiffed swing can never leave the zombie parked in 'attacking'. Clearing
+      // the think timer makes it re-evaluate (chase or swing again) immediately.
       this.setState('idle')
       this.thinkTimeRemaining = 0
     }
