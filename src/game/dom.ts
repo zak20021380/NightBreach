@@ -1,0 +1,25 @@
+import { getElement } from './utils'
+
+// Required DOM references, resolved once at module load. The module script is
+// deferred and lives at the end of <body>, so every element already exists.
+export const canvas = getElement<HTMLCanvasElement>('#renderCanvas')
+export const assetLoading = getElement<HTMLDivElement>('#assetLoading')
+export const assetLoadingLabel = getElement<HTMLSpanElement>('#assetLoadingLabel')
+export const assetLoadingProgress = getElement<HTMLProgressElement>('#assetLoadingProgress')
+export const ammoDisplay = getElement<HTMLDivElement>('#ammo')
+export const instructions = getElement<HTMLButtonElement>('#instructions')
+export const crosshair = getElement<HTMLDivElement>('#crosshair')
+export const hitMarker = getElement<HTMLDivElement>('#hitMarker')
+export const headshotIndicator = getElement<HTMLDivElement>('#headshotIndicator')
+export const damageIndicator = getElement<HTMLDivElement>('#damageIndicator')
+export const healthHud = getElement<HTMLDivElement>('#healthHud')
+export const healthValue = getElement<HTMLSpanElement>('#healthValue')
+export const healthFill = getElement<HTMLDivElement>('#healthFill')
+export const retryOverlay = getElement<HTMLDivElement>('#retryOverlay')
+export const retryButton = getElement<HTMLButtonElement>('#retryButton')
+export const lookArea = getElement<HTMLDivElement>('#lookArea')
+export const movementControl = getElement<HTMLDivElement>('#movementControl')
+export const joystickKnob = getElement<HTMLDivElement>('#joystickKnob')
+export const fireButton = getElement<HTMLButtonElement>('#fireButton')
+export const adsButton = getElement<HTMLButtonElement>('#adsButton')
+export const reloadButton = getElement<HTMLButtonElement>('#reloadButton')
