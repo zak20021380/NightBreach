@@ -1,4 +1,4 @@
-export type LocalAssetKey = 'rifle' | 'zombie' | 'environment'
+export type LocalAssetKey = 'rifle' | 'shotgun' | 'zombie' | 'environment'
 
 export type LocalGlbPath = `/assets/${string}.glb`
 export type LocalTexturePath = `/assets/${string}/`
@@ -47,6 +47,8 @@ interface LocalGlbAssetDefinition<TKey extends LocalAssetKey> {
 
 export interface RifleAssetDefinition extends LocalGlbAssetDefinition<'rifle'> {}
 
+export interface ShotgunAssetDefinition extends LocalGlbAssetDefinition<'shotgun'> {}
+
 export interface ZombieAssetDefinition extends LocalGlbAssetDefinition<'zombie'> {
   readonly normalizedHeight: number
   // Where the animated character actually stands, in metres relative to the
@@ -67,6 +69,7 @@ export interface EnvironmentAssetDefinition extends LocalGlbAssetDefinition<'env
 
 export interface LocalAssetDefinitions {
   readonly rifle: RifleAssetDefinition
+  readonly shotgun: ShotgunAssetDefinition
   readonly zombie: ZombieAssetDefinition
   readonly environment: EnvironmentAssetDefinition
 }
@@ -93,6 +96,35 @@ export const ASSET_CONFIG = {
         position: [0, 0.06, 0.24],
         rotation: [0, 0, 0],
         scale: [0.032, 0.032, 0.032],
+      },
+      animation: { speed: 1, autoplay: false, loop: false },
+      material: {
+        mode: 'source',
+        minimumRoughness: 0.32,
+        maximumEnvironmentIntensity: 0.75,
+      },
+    },
+    shotgun: {
+      key: 'shotgun',
+      label: 'Shotgun',
+      path: '/assets/weapons/shotgun/remington_shotgun.glb',
+      transform: {
+        // Applied once to the complete animated hierarchy beneath the shared
+        // viewModelPivot, exactly like the rifle. The authored Sketchfab
+        // wrappers already resolve the barrel to +Z once Babylon converts the
+        // glTF to its left-handed scene, so no yaw/pitch correction is needed.
+        //
+        // Measured off the GLB itself: the recentred hierarchy is
+        // 0.454 x 0.339 x 1.282 m around (0.088, 0.045, 0.451), the barrel
+        // muzzle sits at +Z 1.092 and the authored Head_Cam eye bone at
+        // (0, 0.216, 0). This offset lands the receiver and the muzzle on the
+        // same screen position the rifle already occupies, so the shared hip,
+        // ADS, sway and bob motion stays framed identically for both weapons.
+        position: [0.086, 0.063, 0.213],
+        rotation: [0, 0, 0],
+        // The authored rig is modelled in metres (1.208 m of shotgun), which
+        // matches the rifle's 1.207 m rendered length at its 0.032 scale.
+        scale: [1, 1, 1],
       },
       animation: { speed: 1, autoplay: false, loop: false },
       material: {

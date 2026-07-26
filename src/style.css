@@ -523,6 +523,17 @@ body {
   height: clamp(50px, 12vh, 68px);
 }
 
+/* Compact weapon toggle, stacked directly above reload in the right-hand
+   thumb cluster so it never crowds the joystick or the aim swipe area. */
+#weaponSwitchButton {
+  right: max(112px, calc(env(safe-area-inset-right) + 25vh));
+  bottom: max(80px, calc(env(safe-area-inset-bottom) + 22vh));
+  width: clamp(44px, 10.5vh, 58px);
+  height: clamp(44px, 10.5vh, 58px);
+  font-size: clamp(10px, 2.2vh, 14px);
+  letter-spacing: 0.04em;
+}
+
 #orientationNotice {
   position: fixed;
   inset: 0;
@@ -689,6 +700,13 @@ body {
 
   #reloadButton {
     right: max(96px, calc(env(safe-area-inset-right) + 25vh));
+  }
+
+  #weaponSwitchButton {
+    right: max(96px, calc(env(safe-area-inset-right) + 25vh));
+    bottom: max(80px, calc(env(safe-area-inset-bottom) + 21vh));
+    width: clamp(42px, 11vh, 52px);
+    height: clamp(42px, 11vh, 52px);
   }
 }
 

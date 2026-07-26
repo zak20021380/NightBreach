@@ -60,6 +60,7 @@ const joystickKnob = getElement<HTMLDivElement>('#joystickKnob')
 const fireButton = getElement<HTMLButtonElement>('#fireButton')
 const adsButton = getElement<HTMLButtonElement>('#adsButton')
 const reloadButton = getElement<HTMLButtonElement>('#reloadButton')
+const weaponSwitchButton = getElement<HTMLButtonElement>('#weaponSwitchButton')
 const assetLoadingStartedAt = performance.now()
 let assetLoadingHideTimer: number | undefined
 
@@ -118,6 +119,7 @@ let stopCameraControls: () => void = () => undefined
 let fireWeapon: () => void = () => undefined
 let reloadWeapon: () => void = () => undefined
 let equipWeapon: () => void = () => undefined
+let switchWeaponSlot: (weaponId: 'rifle' | 'shotgun') => boolean = () => false
 let cancelMobileInput: () => void = () => undefined
 let stopZombieWaveTimers: () => void = () => undefined
 let startZombieWave: () => void = () => undefined
@@ -239,8 +241,12 @@ window.addEventListener('keydown', (event) => {
   const isDevToolsShortcut = event.key === 'F12'
     || (event.ctrlKey && event.shiftKey && (event.code === 'KeyI' || event.code === 'KeyJ'))
   if (isDevToolsShortcut) return
+  // gameplayInputEnabled() already excludes the game-over state, so a downed
+  // player can neither reload nor swap weapons.
   if (!isDesktop || !gameplayInputEnabled()) return
   if (event.code === 'KeyR' && !event.repeat) reloadWeapon()
+  if (event.code === 'Digit1' && !event.repeat) switchWeaponSlot('rifle')
+  if (event.code === 'Digit2' && !event.repeat) switchWeaponSlot('shotgun')
   if (event.code === 'KeyR' || event.code.startsWith('Key')) event.preventDefault()
 })
 
@@ -3270,6 +3276,39 @@ const RIFLE_ASSET_CONFIG = {
   material: RIFLE_ASSET_DEFINITION.material,
 }
 
+const SHOTGUN_ASSET_DEFINITION = ASSET_CONFIG.assets.shotgun
+const SHOTGUN_ASSET_CONFIG = {
+  position: vector3FromTuple(SHOTGUN_ASSET_DEFINITION.transform.position),
+  rotation: vector3FromTuple(SHOTGUN_ASSET_DEFINITION.transform.rotation),
+  scaling: vector3FromTuple(SHOTGUN_ASSET_DEFINITION.transform.scale),
+  animationSpeed: SHOTGUN_ASSET_DEFINITION.animation.speed,
+  material: SHOTGUN_ASSET_DEFINITION.material,
+}
+
+// The rifle is the only weapon the player starts with, and it stays the
+// authority for shooting, ammo, ADS, reload and recoil. The shotgun is a
+// presentation-only view model for now: selecting it never routes into any of
+// the rifle's combat code.
+type WeaponId = 'rifle' | 'shotgun'
+const WEAPON_LABELS: Readonly<Record<WeaponId, string>> = {
+  rifle: 'AK',
+  shotgun: 'SG',
+}
+let activeWeaponId: WeaponId = 'rifle'
+let weaponSwitchCount = 0
+canvas.dataset.activeWeapon = activeWeaponId
+canvas.dataset.weaponSwitchCount = '0'
+canvas.dataset.shotgunReady = 'loading'
+
+// Declared up front so the shared "one visible weapon" invariant can be checked
+// from the rifle's own load and fallback paths before the shotgun has landed.
+let shotgunRoot: TransformNode | null = null
+let shotgunMeshes: AbstractMesh[] = []
+let shotgunAnimationGroups: AnimationGroup[] = []
+let shotgunRestAnimation: AnimationGroup | null = null
+let shotgunReady = false
+let weaponSwitchFeedbackTimer: number | undefined
+
 try {
   scene.setRenderingAutoClearDepthStencil(1, true, true, false)
 } catch (error) {
@@ -3306,7 +3345,7 @@ function configureFirstPersonMesh(mesh: AbstractMesh) {
   mesh.alwaysSelectAsActiveMesh = true
 }
 
-function optimizeImportedRifle(meshes: readonly AbstractMesh[]) {
+function optimizeImportedWeapon(meshes: readonly AbstractMesh[]) {
   const materials = new Set(meshes.map((mesh) => mesh.material).filter((material) => material !== null))
   const anisotropy = isLowEndMobile ? 2 : isMobile ? 4 : 8
   for (const material of materials) {
@@ -3323,7 +3362,11 @@ function optimizeImportedRifle(meshes: readonly AbstractMesh[]) {
   }
 }
 
-function inspectImportedRifleBounds(
+// Shared by every first-person weapon import. The measured authored bounds are
+// the only input used to recentre a GLB, so no transform is ever guessed.
+function inspectImportedWeaponBounds(
+  weaponName: string,
+  logTag: string,
   hierarchyRoot: TransformNode,
   meshes: readonly AbstractMesh[],
 ) {
@@ -3339,36 +3382,39 @@ function inspectImportedRifleBounds(
   ]
 
   if (values.some((value) => !Number.isFinite(value) || Math.abs(value) > 1_000)) {
-    throw new Error('The rifle GLB returned invalid authored bounds.')
+    throw new Error(`The ${weaponName} GLB returned invalid authored bounds.`)
   }
   if (size.x <= 0 || size.y <= 0 || size.z <= 0) {
-    throw new Error('The rifle GLB returned empty authored bounds.')
+    throw new Error(`The ${weaponName} GLB returned empty authored bounds.`)
   }
   const dominantAxis = size.x >= size.y && size.x >= size.z
     ? '+X'
     : size.y >= size.z ? '+Y' : '+Z'
   if (dominantAxis !== '+Z') {
     throw new Error(
-      `The rifle GLB barrel must resolve to +Z after its authored wrappers; measured dominant axis ${dominantAxis}.`,
+      `The ${weaponName} GLB barrel must resolve to +Z after its authored wrappers; measured dominant axis ${dominantAxis}.`,
     )
   }
 
   console.info(
-    `[Night Breach][Rifle] Complete authored bounds ${size.x.toFixed(3)} x ${size.y.toFixed(3)} x ${size.z.toFixed(3)} centered at (${center.x.toFixed(3)}, ${center.y.toFixed(3)}, ${center.z.toFixed(3)}); dominant/barrel axis ${dominantAxis}.`,
+    `[Night Breach][${logTag}] Complete authored bounds ${size.x.toFixed(3)} x ${size.y.toFixed(3)} x ${size.z.toFixed(3)} centered at (${center.x.toFixed(3)}, ${center.y.toFixed(3)}, ${center.z.toFixed(3)}); dominant/barrel axis ${dominantAxis}.`,
   )
 
   return { center, max, min, size }
 }
 
-function getUniformRifleScale() {
-  const { x, y, z } = RIFLE_ASSET_CONFIG.scaling
+function getUniformWeaponScale(weaponName: string, scaling: Vector3) {
+  const { x, y, z } = scaling
   if (Math.abs(x - y) > 0.000001 || Math.abs(x - z) > 0.000001 || x <= 0) {
-    throw new Error('The first-person rifle must use one positive uniform scale.')
+    throw new Error(`The first-person ${weaponName} must use one positive uniform scale.`)
   }
   return x
 }
 
-async function validateImportedRifleRendering(meshes: readonly AbstractMesh[]) {
+async function validateImportedWeaponRendering(
+  weaponName: string,
+  meshes: readonly AbstractMesh[],
+) {
   const compilationTasks: Promise<void>[] = []
   for (const mesh of meshes) {
     if (!mesh.material) continue
@@ -3383,7 +3429,7 @@ async function validateImportedRifleRendering(meshes: readonly AbstractMesh[]) {
       Promise.all(compilationTasks),
       new Promise<never>((_resolve, reject) => {
         timeoutId = window.setTimeout(() => {
-          reject(new Error('Rifle material validation timed out.'))
+          reject(new Error(`${weaponName} material validation timed out.`))
         }, isMobile ? 30_000 : 15_000)
       }),
     ])
@@ -3572,8 +3618,10 @@ function createEmergencyRifle(parent: TransformNode) {
 let proceduralRifle: TransformNode | null = null
 
 function ensureProceduralRifle() {
+  // The rifle standby is only ever shown while the rifle is the selected
+  // weapon, so a fallback can never put two view models on screen at once.
   if (proceduralRifle && !proceduralRifle.isDisposed()) {
-    proceduralRifle.setEnabled(true)
+    proceduralRifle.setEnabled(activeWeaponId === 'rifle')
     return proceduralRifle
   }
 
@@ -3586,6 +3634,7 @@ function ensureProceduralRifle() {
     proceduralRifle = createEmergencyRifle(viewModelPivot)
     console.info('[Night Breach][Rifle] Emergency procedural fallback ready.')
   }
+  proceduralRifle.setEnabled(activeWeaponId === 'rifle')
   canvas.dataset.weaponSource = 'procedural'
   canvas.dataset.rifleReady = 'procedural'
   canvas.dataset.weaponActiveAnimation = 'procedural'
@@ -3594,7 +3643,7 @@ function ensureProceduralRifle() {
   canvas.dataset.weaponBoneCount = '0'
   canvas.dataset.weaponSkinnedMeshCount = '0'
   canvas.dataset.proceduralRifle = 'active'
-  canvas.dataset.visibleRifleHierarchies = '1'
+  canvas.dataset.visibleRifleHierarchies = String(activeWeaponId === 'rifle' ? 1 : 0)
   return proceduralRifle
 }
 
@@ -4192,7 +4241,12 @@ async function loadLocalRifleModel(parent: TransformNode) {
       (mesh) => mesh.getTotalVertices() > 0 && mesh.skeleton !== null,
     ).length
 
-    const authoredBounds = inspectImportedRifleBounds(boundsOffsetRoot, modelMeshes)
+    const authoredBounds = inspectImportedWeaponBounds(
+      'rifle',
+      'Rifle',
+      boundsOffsetRoot,
+      modelMeshes,
+    )
     // Recenter only this wrapper. Every loader-created node, bone, skin, mesh,
     // and animation target keeps its exact authored local transform.
     boundsOffsetRoot.position.copyFrom(authoredBounds.center).scaleInPlace(-1)
@@ -4204,13 +4258,13 @@ async function loadLocalRifleModel(parent: TransformNode) {
       RIFLE_ASSET_CONFIG.rotation.y,
       RIFLE_ASSET_CONFIG.rotation.z,
     )
-    modelRoot.scaling.setAll(getUniformRifleScale())
+    modelRoot.scaling.setAll(getUniformWeaponScale('rifle', RIFLE_ASSET_CONFIG.scaling))
     modelRoot.parent = parent
 
     modelMeshes.forEach(configureFirstPersonMesh)
     applyImportedMaterialSettings(modelMeshes, RIFLE_ASSET_CONFIG.material)
-    optimizeImportedRifle(modelMeshes)
-    await validateImportedRifleRendering(modelMeshes)
+    optimizeImportedWeapon(modelMeshes)
+    await validateImportedWeaponRendering('Rifle', modelMeshes)
 
     importedAnimationGroups = [...entries.animationGroups]
     for (const animation of importedAnimationGroups) {
@@ -4274,10 +4328,12 @@ async function loadLocalRifleModel(parent: TransformNode) {
       // The equip clip returns to the appropriate idle/ADS state on completion.
     } else playImportedWeaponAnimation('idle', true)
     // Swap atomically before the next render: the procedural standby and GLB
-    // are never submitted in the same frame.
+    // are never submitted in the same frame. If the shotgun happened to be
+    // selected while the rifle was still importing, the rifle stays hidden
+    // until it is selected again.
     proceduralRifle?.setEnabled(false)
-    activatedRoot.setEnabled(true)
-    assertSingleVisibleRifleHierarchy()
+    activatedRoot.setEnabled(activeWeaponId === 'rifle')
+    assertSingleVisibleWeaponHierarchy()
 
     const visibleControlMesh = modelMeshes.reduce((largest, mesh) => (
       mesh.getTotalVertices() > largest.getTotalVertices() ? mesh : largest
@@ -4343,20 +4399,28 @@ function activateProceduralRifleFallback(context: string, error: unknown) {
   canvas.dataset.rifleReady = 'procedural'
   canvas.dataset.weaponAnimations = 'none'
   canvas.dataset.weaponAnimationFallbacks = 'idle,fire,reload,equip,ads'
-  assertSingleVisibleRifleHierarchy()
+  assertSingleVisibleWeaponHierarchy()
   logRuntimeWarning(`[Rifle] ${context}; procedural fallback restored.`, error)
 }
 
-function assertSingleVisibleRifleHierarchy() {
-  const visibleRoots: string[] = []
+// Exactly one first-person hierarchy may ever be enabled, across both weapons
+// and the rifle's procedural standby. That is what keeps a weapon switch from
+// showing two guns, or two pairs of arms, in the same frame.
+function assertSingleVisibleWeaponHierarchy() {
+  const visibleRifleRoots: string[] = []
   if (proceduralRifle?.isEnabled() && !proceduralRifle.isDisposed()) {
-    visibleRoots.push(proceduralRifle.name)
+    visibleRifleRoots.push(proceduralRifle.name)
   }
-  if (importedRifleRoot?.isEnabled()) visibleRoots.push(importedRifleRoot.name)
-  canvas.dataset.visibleRifleHierarchies = String(visibleRoots.length)
+  if (importedRifleRoot?.isEnabled()) visibleRifleRoots.push(importedRifleRoot.name)
+  const visibleRoots = [...visibleRifleRoots]
+  if (shotgunRoot?.isEnabled() && !shotgunRoot.isDisposed()) {
+    visibleRoots.push(shotgunRoot.name)
+  }
+  canvas.dataset.visibleRifleHierarchies = String(visibleRifleRoots.length)
+  canvas.dataset.visibleWeaponHierarchies = String(visibleRoots.length)
   if (visibleRoots.length !== 1) {
     throw new Error(
-      `Expected exactly one visible rifle hierarchy; found ${visibleRoots.length} (${visibleRoots.join(', ') || 'none'}).`,
+      `Expected exactly one visible weapon hierarchy; found ${visibleRoots.length} (${visibleRoots.join(', ') || 'none'}).`,
     )
   }
   return visibleRoots[0]
@@ -4424,7 +4488,7 @@ function logFinalImportedRiflePresentation() {
   if (!activeRoot || !screenBounds) return
   const activeRootRotation = activeRoot.rotationQuaternion?.toEulerAngles()
     ?? activeRoot.rotation
-  const visibleRoot = assertSingleVisibleRifleHierarchy()
+  const visibleRoot = assertSingleVisibleWeaponHierarchy()
   canvas.dataset.rifleScreenWidth = screenBounds.widthPercent.toFixed(1)
   console.info(
     `[Night Breach][Rifle] Final active rifle root=${activeRoot.name}; GLB roots=${importedHierarchyRootNames.join(', ')}; root position=${formatTransformVector(activeRoot.position)} rotation=${formatTransformVector(activeRootRotation)} scale=${formatTransformVector(activeRoot.scaling)}; controller=${viewModelPivot.name} position=${formatTransformVector(viewModelPivot.position)} rotation=${formatTransformVector(viewModelPivot.rotation)} scale=${formatTransformVector(viewModelPivot.scaling)}; screen bounds=(${screenBounds.x.toFixed(1)}, ${screenBounds.y.toFixed(1)}, ${screenBounds.width.toFixed(1)}, ${screenBounds.height.toFixed(1)}) ${screenBounds.widthPercent.toFixed(1)}% width; visible hierarchy=${visibleRoot}.`,
@@ -4437,6 +4501,9 @@ function playImportedWeaponAnimation(
   reverse = false,
   resetBeforeStart = false,
 ) {
+  // Every rifle action funnels through here, so this single guard keeps the
+  // rifle's clips from being driven while a different weapon is selected.
+  if (activeWeaponId !== 'rifle') return false
   const animation = importedWeaponAnimations[name]
   if (!animation) return false
 
@@ -4484,6 +4551,338 @@ function handleImportedWeaponAnimationEnd(animation: AnimationGroup) {
 
 equipWeapon = () => {
   if (!playImportedWeaponAnimation('equip')) playImportedWeaponRestAnimation()
+}
+
+// ---------------------------------------------------------------------------
+// Shotgun view model
+//
+// Presentation only for this step: the shotgun is imported through the same
+// local asset manager, wrapped in the same recentre/offset pair, and parented to
+// the same viewModelPivot the rifle uses, so hip/ADS blending, sway, bob and the
+// future recoil channel apply to it unchanged. It has no fire, ammo, reload,
+// pump or HUD behaviour, and it deliberately shares none of the rifle's
+// combat-facing animation map.
+// ---------------------------------------------------------------------------
+
+let disposeShotgunResources: (() => void) | null = null
+
+function stopShotgunAnimations() {
+  for (const animation of shotgunAnimationGroups) {
+    if (animation.isStarted) animation.stop(true)
+  }
+}
+
+// Idle is the authored loop the artist shipped for the held pose; equip is the
+// documented fallback. With neither, every clip is stopped and reset so the rig
+// rests in its stable authored reference pose instead of a half-played frame.
+function playShotgunRestAnimation() {
+  stopShotgunAnimations()
+  const animation = shotgunRestAnimation
+  if (!animation) {
+    for (const group of shotgunAnimationGroups) group.reset()
+    canvas.dataset.shotgunActiveAnimation = 'reference-pose'
+    return false
+  }
+  animation.start(
+    true,
+    SHOTGUN_ASSET_CONFIG.animationSpeed,
+    animation.from,
+    animation.to,
+    false,
+  )
+  canvas.dataset.shotgunActiveAnimation = animation.name
+  return true
+}
+
+function setShotgunViewModelEnabled(enabled: boolean) {
+  if (!shotgunRoot || shotgunRoot.isDisposed()) return
+  shotgunRoot.setEnabled(enabled)
+  if (enabled) playShotgunRestAnimation()
+  else {
+    stopShotgunAnimations()
+    canvas.dataset.shotgunActiveAnimation = 'stopped'
+  }
+}
+
+// Retires the shotgun for the rest of the session and, if it was the weapon in
+// the player's hands, puts the rifle straight back so no frame is ever rendered
+// without a view model.
+function discardShotgunViewModel(context: string, error: unknown) {
+  const wasSelected = activeWeaponId === 'shotgun'
+  stopShotgunAnimations()
+  shotgunRoot?.setEnabled(false)
+  try {
+    disposeShotgunResources?.()
+  } catch (disposeError) {
+    logRuntimeWarning('[Shotgun] Partial cleanup was skipped.', disposeError)
+  }
+  disposeShotgunResources = null
+  shotgunRoot = null
+  shotgunMeshes = []
+  shotgunAnimationGroups = []
+  shotgunRestAnimation = null
+  shotgunReady = false
+  canvas.dataset.shotgunReady = 'unavailable'
+  canvas.dataset.shotgunActiveAnimation = 'none'
+
+  if (wasSelected) {
+    activeWeaponId = 'rifle'
+    canvas.dataset.activeWeapon = activeWeaponId
+    setRifleViewModelEnabled(true)
+    equipWeapon()
+  }
+  updateWeaponSwitchControl()
+  logRuntimeWarning(
+    `[Shotgun] ${context}; the rifle ${wasSelected ? 'is back in hand' : 'stays selected'}.`,
+    error,
+  )
+}
+
+async function loadLocalShotgunModel(parent: TransformNode) {
+  const result = await localAssetManager.load('shotgun')
+  if (result.status === 'fallback') {
+    canvas.dataset.shotgunReady = 'unavailable'
+    console.info('[Night Breach][Shotgun] Local GLB unavailable; the rifle remains the only selectable weapon.')
+    return null
+  }
+
+  let entries: ReturnType<AssetContainer['instantiateModelsToScene']> | null = null
+  let modelRoot: TransformNode | null = null
+  try {
+    entries = result.container.instantiateModelsToScene(
+      (sourceName) => sourceName,
+      false,
+      { doNotInstantiate: false },
+    )
+
+    modelRoot = new TransformNode('localShotgunModelRoot', scene)
+    // The shotgun is imported while the rifle is on screen, so it is never
+    // enabled until the player actually selects it.
+    modelRoot.setEnabled(false)
+    const boundsOffsetRoot = new TransformNode('localShotgunBoundsOffset', scene)
+    boundsOffsetRoot.parent = modelRoot
+
+    for (const rootNode of entries.rootNodes) rootNode.parent = boundsOffsetRoot
+    const modelMeshes = boundsOffsetRoot.getChildMeshes(false)
+    if (modelMeshes.length === 0) {
+      throw new Error('The shotgun GLB did not instantiate any renderable meshes.')
+    }
+    const renderableMeshCount = modelMeshes.filter((mesh) => mesh.getTotalVertices() > 0).length
+    const skinnedMeshCount = modelMeshes.filter(
+      (mesh) => mesh.getTotalVertices() > 0 && mesh.skeleton !== null,
+    ).length
+
+    const authoredBounds = inspectImportedWeaponBounds(
+      'shotgun',
+      'Shotgun',
+      boundsOffsetRoot,
+      modelMeshes,
+    )
+    // Recentre only this wrapper, exactly like the rifle. Every loader node,
+    // bone, skin and animation target keeps its authored local transform.
+    boundsOffsetRoot.position.copyFrom(authoredBounds.center).scaleInPlace(-1)
+    modelRoot.position.copyFrom(SHOTGUN_ASSET_CONFIG.position)
+    modelRoot.rotationQuaternion = Quaternion.FromEulerAngles(
+      SHOTGUN_ASSET_CONFIG.rotation.x,
+      SHOTGUN_ASSET_CONFIG.rotation.y,
+      SHOTGUN_ASSET_CONFIG.rotation.z,
+    )
+    modelRoot.scaling.setAll(getUniformWeaponScale('shotgun', SHOTGUN_ASSET_CONFIG.scaling))
+    modelRoot.parent = parent
+
+    modelMeshes.forEach(configureFirstPersonMesh)
+    applyImportedMaterialSettings(modelMeshes, SHOTGUN_ASSET_CONFIG.material)
+    optimizeImportedWeapon(modelMeshes)
+    await validateImportedWeaponRendering('Shotgun', modelMeshes)
+
+    const animationGroups = [...entries.animationGroups]
+    for (const animation of animationGroups) {
+      animation.speedRatio = SHOTGUN_ASSET_CONFIG.animationSpeed
+      enableImportedAnimationBlending(animation)
+    }
+    // Detection only: the shotgun's fire/reload clips are catalogued for the
+    // later combat step but are never started, and no end-observer is attached,
+    // so nothing here can reach the rifle's reload or fire completion handlers.
+    const detectedAnimations = detectWeaponAnimations(animationGroups)
+    const restAnimation = detectedAnimations.idle ?? detectedAnimations.equip ?? null
+    const clipNames = animationGroups.map((animation) => animation.name)
+    const skeletonBoneCount = entries.skeletons.reduce(
+      (totalBones, skeleton) => totalBones + skeleton.bones.length,
+      0,
+    )
+    if (entries.skeletons.length > 0 && skinnedMeshCount !== renderableMeshCount) {
+      throw new Error(
+        `The animated shotgun rig detached from its meshes (${skinnedMeshCount}/${renderableMeshCount} skinned).`,
+      )
+    }
+    const hierarchyNodes = entries.rootNodes.flatMap((rootNode) => [
+      rootNode,
+      ...rootNode.getDescendants(false),
+    ])
+    if (entries.rootNodes.some((rootNode) => rootNode.parent !== boundsOffsetRoot)) {
+      throw new Error('The imported shotgun hierarchy was not preserved beneath its viewmodel root.')
+    }
+
+    const activatedEntries = entries
+    const activatedRoot = modelRoot
+    shotgunRoot = activatedRoot
+    shotgunMeshes = [...modelMeshes]
+    shotgunAnimationGroups = animationGroups
+    shotgunRestAnimation = restAnimation
+    disposeShotgunResources = () => {
+      activatedEntries.dispose()
+      if (!activatedRoot.isDisposed()) activatedRoot.dispose()
+    }
+    shotgunReady = true
+    stopShotgunAnimations()
+
+    canvas.dataset.shotgunReady = 'glb'
+    canvas.dataset.shotgunActiveAnimation = 'stopped'
+    canvas.dataset.shotgunRestAnimation = restAnimation?.name ?? 'reference-pose'
+    canvas.dataset.shotgunClipNames = clipNames.join(',') || 'none'
+    canvas.dataset.shotgunAnimations =
+      (Object.keys(detectedAnimations) as WeaponAnimationName[]).join(',') || 'none'
+    canvas.dataset.shotgunSkeletonCount = String(entries.skeletons.length)
+    canvas.dataset.shotgunBoneCount = String(skeletonBoneCount)
+    canvas.dataset.shotgunHierarchyNodeCount = String(hierarchyNodes.length)
+    canvas.dataset.shotgunMeshCount = String(renderableMeshCount)
+    canvas.dataset.shotgunSkinnedMeshCount = String(skinnedMeshCount)
+    updateWeaponSwitchControl()
+
+    console.info(
+      `[Night Breach][Shotgun] Complete imported hierarchy:\n${hierarchyNodes.map((node) => `  ${node.name} <- ${node.parent?.name ?? '(scene)'}`).join('\n')}`,
+    )
+    console.info(
+      `[Night Breach][Shotgun] GLB validated (${renderableMeshCount} renderable/${skinnedMeshCount} skinned meshes; ${entries.skeletons.length} skeletons/${skeletonBoneCount} bones; clips: ${clipNames.join(', ')}; held pose: ${restAnimation?.name ?? 'authored reference pose'}); root position=${formatTransformVector(activatedRoot.position)} rotation=${formatTransformVector(SHOTGUN_ASSET_CONFIG.rotation)} scale=${formatTransformVector(activatedRoot.scaling)}; controller=${viewModelPivot.name}.`,
+    )
+    return modelRoot
+  } catch (error) {
+    try {
+      entries?.dispose()
+      modelRoot?.dispose()
+    } catch (disposeError) {
+      logRuntimeWarning('[Shotgun] Partial GLB cleanup was skipped.', disposeError)
+    }
+    if (shotgunRoot === modelRoot) {
+      shotgunRoot = null
+      shotgunMeshes = []
+      shotgunAnimationGroups = []
+      shotgunRestAnimation = null
+      disposeShotgunResources = null
+    }
+    shotgunReady = false
+    canvas.dataset.shotgunReady = 'unavailable'
+    logRuntimeWarning('[Shotgun] GLB setup failed; the rifle stays selected.', error)
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Weapon selection
+// ---------------------------------------------------------------------------
+
+function setRifleViewModelEnabled(enabled: boolean) {
+  if (importedRifleRoot && !importedRifleRoot.isDisposed()) {
+    importedRifleRoot.setEnabled(enabled)
+    proceduralRifle?.setEnabled(false)
+  } else if (proceduralRifle && !proceduralRifle.isDisposed()) {
+    proceduralRifle.setEnabled(enabled)
+  }
+  if (enabled) return
+  for (const animation of importedAnimationGroups) {
+    if (animation.isStarted) animation.stop(true)
+  }
+  activeImportedWeaponAnimation = null
+  canvas.dataset.weaponActiveAnimation = 'stopped'
+}
+
+function canSelectWeapon(weaponId: WeaponId) {
+  if (gameOver) return false
+  if (weaponId === 'shotgun') return shotgunReady && shotgunRoot !== null
+  return true
+}
+
+function selectWeapon(weaponId: WeaponId) {
+  if (!canSelectWeapon(weaponId) || weaponId === activeWeaponId) return false
+
+  const previousWeaponId = activeWeaponId
+  activeWeaponId = weaponId
+
+  if (previousWeaponId === 'rifle') {
+    // A weapon swap cancels an in-flight rifle reload rather than leaving its
+    // timer and animation running behind a hidden weapon.
+    cancelRifleReload()
+    stopAutomaticFire()
+    setRifleViewModelEnabled(false)
+  } else {
+    setShotgunViewModelEnabled(false)
+  }
+
+  if (weaponId === 'rifle') {
+    setRifleViewModelEnabled(true)
+    equipWeapon()
+  } else {
+    setShotgunViewModelEnabled(true)
+  }
+
+  canvas.dataset.activeWeapon = weaponId
+  weaponSwitchCount += 1
+  canvas.dataset.weaponSwitchCount = String(weaponSwitchCount)
+  updateWeaponSwitchControl()
+  assertSingleVisibleWeaponHierarchy()
+  console.info(`[Night Breach][Weapons] Selected ${weaponId} (${WEAPON_LABELS[weaponId]}).`)
+  return true
+}
+
+function requestWeaponSelection(weaponId: WeaponId) {
+  if (!gameplayInputEnabled()) return false
+  if (weaponId === 'shotgun' && !shotgunReady) {
+    console.info('[Night Breach][Weapons] The shotgun view model is not available; keeping the rifle selected.')
+    return false
+  }
+  return selectWeapon(weaponId)
+}
+
+function toggleWeaponSelection() {
+  return requestWeaponSelection(activeWeaponId === 'rifle' ? 'shotgun' : 'rifle')
+}
+
+function updateWeaponSwitchControl() {
+  weaponSwitchButton.textContent = WEAPON_LABELS[activeWeaponId]
+  weaponSwitchButton.disabled = !shotgunReady
+  weaponSwitchButton.setAttribute(
+    'aria-label',
+    shotgunReady
+      ? `Switch weapon, currently ${activeWeaponId === 'rifle' ? 'AK rifle' : 'shotgun'}`
+      : 'Switch weapon, unavailable',
+  )
+}
+
+updateWeaponSwitchControl()
+// The rifle stays the deployed weapon while this resolves, and it stays the
+// deployed weapon permanently if the import fails.
+void loadLocalShotgunModel(viewModelPivot).catch((error) => {
+  discardShotgunViewModel('Unexpected load failure', error)
+})
+
+switchWeaponSlot = requestWeaponSelection
+
+weaponSwitchButton.addEventListener('pointerdown', (event) => {
+  if (!isTouchDevice || !gameplayInputEnabled() || weaponSwitchButton.disabled) return
+  event.preventDefault()
+  event.stopPropagation()
+  weaponSwitchButton.classList.add('active')
+  toggleWeaponSelection()
+  // One reused handle, so repeated taps can never stack press-feedback timers.
+  if (weaponSwitchFeedbackTimer !== undefined) {
+    window.clearTimeout(weaponSwitchFeedbackTimer)
+  }
+  weaponSwitchFeedbackTimer = window.setTimeout(deactivateWeaponSwitchButton, 90)
+}, { passive: false })
+
+function deactivateWeaponSwitchButton() {
+  weaponSwitchFeedbackTimer = undefined
+  weaponSwitchButton.classList.remove('active')
 }
 
 let magazineAmmo = 30
@@ -4571,7 +4970,10 @@ function hitZombieWithBullet(
   return true
 }
 
+// Reload belongs to the rifle. The shotgun has no ammo or reload behaviour yet,
+// so selecting it must never reach this path.
 function beginReload() {
+  if (activeWeaponId !== 'rifle') return
   if (gameOver || reloadElapsed >= 0 || magazineAmmo >= 30 || reserveAmmo <= 0) return
   stopAutomaticFire()
   reloadElapsed = 0
@@ -4590,6 +4992,18 @@ function applyReloadAmmo() {
   reserveAmmo -= loaded
   reloadApplied = true
   updateAmmoDisplay()
+}
+
+// Swapping away from the rifle abandons its reload instead of letting the timer
+// and the authored clip keep running against a hidden view model. Any rounds the
+// reload already committed stay in the magazine.
+function cancelRifleReload() {
+  if (reloadElapsed < 0) return
+  const reloadAnimation = importedWeaponAnimations.reload
+  if (reloadAnimation?.isStarted) reloadAnimation.stop(true)
+  reloadElapsed = -1
+  reloadApplied = false
+  reloadButton.disabled = false
 }
 
 function completeReload() {
@@ -4632,6 +5046,9 @@ function disposeTrainingTarget(target: TargetState) {
 }
 
 function fire() {
+  // The shotgun does not shoot yet. Pressing fire while it is selected must do
+  // nothing at all rather than fall through to the rifle's shot.
+  if (activeWeaponId !== 'rifle') return
   if (gameOver || magazineAmmo <= 0 || reloadElapsed >= 0) return
 
   magazineAmmo -= 1
@@ -4895,6 +5312,10 @@ function restartPrototype() {
   weaponFireEffects.reset()
   reloadButton.disabled = false
   updateAmmoDisplay()
+  // Cleared here rather than further down so the retry can put the default
+  // loadout back in the player's hands before the equip clip is started.
+  gameOver = false
+  selectWeapon('rifle')
   if (!playImportedWeaponAnimation('equip')) playImportedWeaponRestAnimation()
 
   if (damageIndicatorTimer !== undefined) window.clearTimeout(damageIndicatorTimer)
@@ -4914,7 +5335,6 @@ function restartPrototype() {
   bobBlend = 0
   bobTime = 0
 
-  gameOver = false
   startZombieWave()
   document.body.classList.remove('game-over')
   retryOverlay.setAttribute('aria-hidden', 'true')
@@ -5051,19 +5471,26 @@ function renderFrame() {
       canvas.dataset.firstFrameRendered = 'true'
       console.info('[Night Breach][Render] First scene frame rendered successfully.')
     }
-    if (pendingImportedRifleFirstFrame) {
+    // Only a frame that actually submitted the imported rifle proves it renders,
+    // so a shotgun-selected frame leaves the validation pending.
+    if (pendingImportedRifleFirstFrame && importedRifleRoot?.isEnabled()) {
       pendingImportedRifleFirstFrame = false
       canvas.dataset.weaponSource = 'glb'
       canvas.dataset.rifleReady = 'glb'
       proceduralRifle?.dispose()
       proceduralRifle = null
       canvas.dataset.proceduralRifle = 'disposed'
-      assertSingleVisibleRifleHierarchy()
+      assertSingleVisibleWeaponHierarchy()
       logFinalImportedRiflePresentation()
       console.info('[Night Breach][Rifle] First GLB frame succeeded; procedural rifle removed from the scene.')
     }
   } catch (error) {
     renderFailureCount += 1
+    // Retire whichever weapon was actually on screen for the failed frame.
+    if (activeWeaponId === 'shotgun' && shotgunRoot) {
+      discardShotgunViewModel('The imported GLB caused a render failure', error)
+      return
+    }
     if (importedRifleRoot) {
       activateProceduralRifleFallback('Imported GLB caused a render failure', error)
       return
@@ -5110,8 +5537,10 @@ function setWebViewActive(active: boolean) {
       zombies[index].setPaused(true)
     }
     pausedWeaponAnimations.length = 0
-    for (let index = 0; index < importedAnimationGroups.length; index += 1) {
-      const animation = importedAnimationGroups[index]
+    // Both weapons' clips are covered; only the selected one is ever playing.
+    const lifecycleAnimations = [...importedAnimationGroups, ...shotgunAnimationGroups]
+    for (let index = 0; index < lifecycleAnimations.length; index += 1) {
+      const animation = lifecycleAnimations[index]
       if (!animation.isPlaying) continue
       animation.pause()
       pausedWeaponAnimations.push(animation)
@@ -5164,6 +5593,7 @@ if (import.meta.env.DEV) {
       snapshot() {
         const blood = bloodEffectPool.snapshot()
         return {
+          activeWeapon: activeWeaponId,
           activeZombieCount,
           adsHeld,
           aimPointerId,
@@ -5205,6 +5635,24 @@ if (import.meta.env.DEV) {
             importedWeaponAnimations.reload?.onAnimationGroupEndObservable.observers.length ?? 0,
           renderLoop: canvas.dataset.renderLoop,
           rifleReady: canvas.dataset.rifleReady,
+          // Scene-wide totals, so repeated weapon switching can be proven not to
+          // leak meshes, transform nodes, skeletons or animation groups.
+          sceneAnimationGroupCount: scene.animationGroups.length,
+          sceneMeshCount: scene.meshes.length,
+          sceneSkeletonCount: scene.skeletons.length,
+          sceneTransformNodeCount: scene.transformNodes.length,
+          shotgunActiveAnimation: canvas.dataset.shotgunActiveAnimation ?? 'none',
+          shotgunAnimationGroupCount: shotgunAnimationGroups.length,
+          shotgunBoneCount: Number(canvas.dataset.shotgunBoneCount ?? 0),
+          shotgunClipNames: canvas.dataset.shotgunClipNames ?? 'none',
+          shotgunEnabled: Boolean(shotgunRoot?.isEnabled()),
+          shotgunHierarchyNodeCount: Number(canvas.dataset.shotgunHierarchyNodeCount ?? 0),
+          shotgunMeshCount: Number(canvas.dataset.shotgunMeshCount ?? 0),
+          shotgunReady: canvas.dataset.shotgunReady,
+          shotgunRestAnimation: canvas.dataset.shotgunRestAnimation ?? 'none',
+          shotgunSceneMeshCount: shotgunMeshes.length,
+          shotgunSkeletonCount: Number(canvas.dataset.shotgunSkeletonCount ?? 0),
+          weaponSwitchCount,
           zombieAnimationMapping: canvas.dataset.zombieAnimationMapping ?? 'none',
           zombieBoneCount: Number(canvas.dataset.zombieBoneCount ?? 0),
           zombieClipNames: canvas.dataset.zombieClipNames ?? 'none',
@@ -5231,6 +5679,7 @@ if (import.meta.env.DEV) {
             z: viewModelPivot.rotation.z,
           },
           visibleRifleHierarchies: Number(canvas.dataset.visibleRifleHierarchies ?? 0),
+          visibleWeaponHierarchies: Number(canvas.dataset.visibleWeaponHierarchies ?? 0),
           weaponSource: canvas.dataset.weaponSource,
           webViewActive,
           zombies: zombies.map((zombie) => ({
@@ -5303,6 +5752,12 @@ if (import.meta.env.DEV) {
         }
       },
       restart: restartPrototype,
+      selectWeapon(weaponId: WeaponId) {
+        return requestWeaponSelection(weaponId)
+      },
+      toggleWeapon() {
+        return toggleWeaponSelection()
+      },
       setCameraRotation(pitch: number, yaw: number) {
         camera.rotation.set(pitch, yaw, 0)
         camera.cameraRotation.set(0, 0)
