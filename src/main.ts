@@ -337,10 +337,6 @@ scene.activeCamera = camera
 console.info(
   `[Night Breach][Camera] Ready at (${camera.position.x.toFixed(1)}, ${camera.position.y.toFixed(1)}, ${camera.position.z.toFixed(1)}), facing the map center.`,
 )
-// TEMPORARY HEIGHT DEBUG -- remove with the zombie height debug helpers.
-console.info(
-  `[Night Breach][Camera][HeightDebug] playerEyeHeight=${camera.position.y.toFixed(3)}m ellipsoid=(${camera.ellipsoid.x}, ${camera.ellipsoid.y}, ${camera.ellipsoid.z}) ellipsoidOffset=(${camera.ellipsoidOffset.x}, ${camera.ellipsoidOffset.y}, ${camera.ellipsoidOffset.z}) capsuleFootY=${(camera.position.y + camera.ellipsoidOffset.y - camera.ellipsoid.y).toFixed(3)} capsuleTopY=${(camera.position.y + camera.ellipsoidOffset.y + camera.ellipsoid.y).toFixed(3)}.`,
-)
 startCameraControls = () => {
   if (!isDesktop) {
     canvas.dataset.controlsAttached = 'mobile'
@@ -1586,50 +1582,6 @@ function configureZombieVisualMesh(mesh: AbstractMesh, allowShadows: boolean) {
   if (allowShadows) shadowGenerator?.addShadowCaster(mesh)
 }
 
-/**
- * TEMPORARY HEIGHT DEBUG -- remove once the player/zombie proportion fix has
- * been signed off in a build.
- *
- * Measures the world-space vertical extent of a skinned hierarchy in its
- * current animated pose.
- *
- * A skinned mesh's stored bounding box is the bind-pose box, so it never
- * follows the animation. Refreshing with `applySkeleton` re-derives it from the
- * posed vertices, but `refreshBoundingInfo` reconstructs the BoundingInfo
- * instance in place -- and clones produced by `instantiateModelsToScene` share
- * that instance with their source. Measuring destructively therefore rewrites
- * the bind-pose box every other clone is grounded against, so the original
- * extents are restored before returning.
- */
-function measureSkinnedWorldYExtent(root: TransformNode) {
-  const meshes = root.getChildMeshes(false)
-    .filter((mesh): mesh is Mesh => mesh instanceof Mesh && mesh.getTotalVertices() > 0)
-  let min = Number.POSITIVE_INFINITY
-  let max = Number.NEGATIVE_INFINITY
-  root.computeWorldMatrix(true)
-  for (const mesh of meshes) {
-    mesh.computeWorldMatrix(true)
-    const boundingInfo = mesh.getBoundingInfo()
-    const restoredMinimum = boundingInfo.minimum.clone()
-    const restoredMaximum = boundingInfo.maximum.clone()
-    try {
-      mesh.refreshBoundingInfo({ applySkeleton: mesh.skeleton !== null })
-      const box = mesh.getBoundingInfo().boundingBox
-      min = Math.min(min, box.minimumWorld.y)
-      max = Math.max(max, box.maximumWorld.y)
-    } catch (error) {
-      logRuntimeWarning('Posed bounds refresh was unavailable; using bind-pose bounds.', error)
-      const box = boundingInfo.boundingBox
-      min = Math.min(min, box.minimumWorld.y)
-      max = Math.max(max, box.maximumWorld.y)
-    } finally {
-      mesh.getBoundingInfo().reConstruct(restoredMinimum, restoredMaximum)
-      mesh._updateBoundingInfo()
-    }
-  }
-  return { height: max - min, maxY: max, minY: min }
-}
-
 function cloneSkinnedZombieInstance(container: AssetContainer, name: string) {
   // Babylon's equivalent of Three.js SkeletonUtils.clone(): skinned meshes,
   // skeletons, linked bone nodes, and animation groups are cloned together,
@@ -1752,12 +1704,6 @@ function createGlbZombieFactory(
             `Zombie animation clone lost a required clip (${describeZombieAnimationMapping(animations)}).`,
           )
         }
-
-        // TEMPORARY HEIGHT DEBUG -- remove with measureSkinnedWorldYExtent().
-        const posedBounds = measureSkinnedWorldYExtent(root)
-        console.info(
-          `[Night Breach][Zombie][HeightDebug] ${name} import: referenceHeight=${calibration.referenceHeight.toFixed(4)}m posedBounds=${posedBounds.height.toFixed(4)}m (foot ${posedBounds.minY.toFixed(4)}, top ${posedBounds.maxY.toFixed(4)}) finalScale=${root.scaling.x.toFixed(6)} groundOffset=${calibration.groundOffsetY.toFixed(4)}.`,
-        )
 
         canvas.dataset.zombieFinalScale = root.scaling.x.toFixed(6)
         canvas.dataset.zombieFinalRotation = [root.rotation.x, root.rotation.y, root.rotation.z]
@@ -2951,29 +2897,6 @@ interface ZombieHitZone {
 
 const zombieHitZones = new Map<Mesh, ZombieHitZone>()
 const zombies: Zombie[] = []
-
-/**
- * TEMPORARY HEIGHT DEBUG -- remove together with measureSkinnedWorldYExtent()
- * once the player/zombie proportion fix has been signed off in a build.
- *
- * Reports the numbers the proportion fix is measured against: the zombie's real
- * world-space height with the skeleton posed, where its feet and head actually
- * sit relative to the ground plane at y=0, and the player's eye height.
- */
-function describeZombieHeightDebug(zombie: Zombie, reason: string) {
-  const bounds = measureSkinnedWorldYExtent(zombie.visual.root)
-  const eyeHeight = camera.position.y
-  const groundOffset = camera.ellipsoidOffset.y - camera.ellipsoid.y
-  return `[Night Breach][Zombie][HeightDebug] ${reason} zombie${zombie.id} (${zombie.activeAnimationName}): worldHeight=${bounds.height.toFixed(3)}m footY=${bounds.minY.toFixed(3)} headTopY=${bounds.maxY.toFixed(3)} colliderY=${zombie.root.position.y.toFixed(3)} | playerEyeHeight=${eyeHeight.toFixed(3)}m footY=${(eyeHeight + groundOffset).toFixed(3)} eyeAboveZombieHead=${(eyeHeight - bounds.maxY).toFixed(3)}m`
-}
-
-function logZombieHeightDebug(zombie: Zombie, reason: string) {
-  try {
-    console.info(describeZombieHeightDebug(zombie, reason))
-  } catch (error) {
-    logRuntimeWarning('Height debug logging was skipped.', error)
-  }
-}
 let activeZombieFactory: ZombieVisualFactory | null = null
 let activeZombieCount = 0
 let nextZombieId = 1
@@ -3173,7 +3096,6 @@ function spawnNextWaveZombie() {
   nextZombieId += 1
   zombie.setPaused(!webViewActive || !deployed || gameOver)
   zombies.push(zombie)
-  logZombieHeightDebug(zombie, 'spawn')
   waveState.spawnedZombies += 1
   waveState.aliveZombies += 1
   registerActiveZombie()
@@ -5317,30 +5239,6 @@ if (import.meta.env.DEV) {
             upperBodyPush: zombie.upperBodyPushAmount,
           })),
         }
-      },
-      // TEMPORARY HEIGHT DEBUG -- remove with the zombie height debug helpers.
-      heightDebug() {
-        const groundOffset = camera.ellipsoidOffset.y - camera.ellipsoid.y
-        return {
-          playerEyeHeight: camera.position.y,
-          playerFootY: camera.position.y + groundOffset,
-          playerCapsuleTopY: camera.position.y + camera.ellipsoidOffset.y + camera.ellipsoid.y,
-          zombies: zombies.map((zombie) => {
-            const bounds = measureSkinnedWorldYExtent(zombie.visual.root)
-            return {
-              animation: zombie.activeAnimationName,
-              colliderY: zombie.root.position.y,
-              footY: bounds.minY,
-              headTopY: bounds.maxY,
-              id: zombie.id,
-              state: zombie.state,
-              worldHeight: bounds.height,
-            }
-          }),
-        }
-      },
-      logHeightDebug(reason = 'probe') {
-        for (const zombie of zombies) logZombieHeightDebug(zombie, reason)
       },
       damagePlayer(amount: number, zombieIndex = 0) {
         const attacker = zombies[zombieIndex]
