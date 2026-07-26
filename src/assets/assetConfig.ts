@@ -49,6 +49,14 @@ export interface RifleAssetDefinition extends LocalGlbAssetDefinition<'rifle'> {
 
 export interface ZombieAssetDefinition extends LocalGlbAssetDefinition<'zombie'> {
   readonly normalizedHeight: number
+  // Where the animated character actually stands, in metres relative to the
+  // model origin, once the import has normalized it to `normalizedHeight`.
+  // Negative means the soles sit below the origin, so the model has to be
+  // lifted by this much for its feet to rest on the floor.
+  readonly groundContactOffset: number
+  // The character's eye line above the floor once it is grounded. This is the
+  // first-person eye height, so the player stands face to face with the pack.
+  readonly eyeHeight: number
 }
 
 export interface EnvironmentAssetDefinition extends LocalGlbAssetDefinition<'environment'> {
@@ -106,7 +114,21 @@ export const ASSET_CONFIG = {
       },
       animation: { speed: 0.95, autoplay: false, loop: false },
       material: { mode: 'source' },
+      // The bind-pose silhouette the import normalizes to. It also drives the
+      // gameplay collider and the combat hit zones, so it is left as authored.
       normalizedHeight: 1.82,
+      // Measured off the authored clips, each of which plants its support foot
+      // at a constant height relative to the model origin: Idle -0.0659m,
+      // Walk1 -0.0535m at the deepest point of the stride, Attack1.001
+      // -0.0336m. The bind pose the import used to ground against instead sits
+      // 0.0176m ABOVE the origin -- its legs are not the standing stance -- so
+      // grounding on it drove the soles up to 8.4cm through the floor. Idle is
+      // the deepest of the three, so grounding on it stands the neutral pose
+      // exactly on the ground and leaves no clip able to penetrate it.
+      groundContactOffset: -0.0659,
+      // With that lift applied the standing silhouette measures 1.904m to the
+      // crown and the two eye meshes centre on 1.720m.
+      eyeHeight: 1.72,
     },
     environment: {
       key: 'environment',
