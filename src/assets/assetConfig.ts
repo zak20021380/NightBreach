@@ -36,6 +36,31 @@ export type AssetMaterialSettings =
       readonly backFaceCulling?: boolean
     }
 
+// Each first-person weapon ships its own authored arms, so the same player can
+// end up with two different pairs of hands. This retunes one weapon's arm
+// materials onto the reference weapon's without touching meshes, skeletons,
+// bone weights, animations or the texture files themselves: the authored albedo
+// texture stays bound and is only scaled by a linear tint, exactly the way
+// Babylon multiplies `albedoColor` into the sampled albedo.
+export interface ArmMaterialMatchSettings {
+  // Authored mesh names that carry the arms. Nothing outside this list is ever
+  // touched, which is what keeps the weapon body and its shells untouched.
+  readonly meshNames: readonly string[]
+  // The authored material names those meshes are expected to use. A mismatch
+  // means the GLB was re-exported, so the retune is skipped instead of guessed.
+  readonly materialNames: readonly string[]
+  // Human-readable note on which reference material the numbers came from.
+  readonly reference: string
+  // Linear multiplier applied on top of the authored albedo texture.
+  readonly albedoColor: HexColor
+  readonly roughness: number
+  readonly metallic: number
+  // The reference arms are authored with flat reflectivity factors and no
+  // metallic/roughness map. Dropping this weapon's map is what makes the two
+  // pairs of gloves catch the light the same way.
+  readonly dropMetallicRoughnessTexture: boolean
+}
+
 interface LocalGlbAssetDefinition<TKey extends LocalAssetKey> {
   readonly key: TKey
   readonly label: string
@@ -47,7 +72,9 @@ interface LocalGlbAssetDefinition<TKey extends LocalAssetKey> {
 
 export interface RifleAssetDefinition extends LocalGlbAssetDefinition<'rifle'> {}
 
-export interface ShotgunAssetDefinition extends LocalGlbAssetDefinition<'shotgun'> {}
+export interface ShotgunAssetDefinition extends LocalGlbAssetDefinition<'shotgun'> {
+  readonly arms: ArmMaterialMatchSettings
+}
 
 export interface ZombieAssetDefinition extends LocalGlbAssetDefinition<'zombie'> {
   readonly normalizedHeight: number
@@ -120,6 +147,14 @@ export const ASSET_CONFIG = {
         // (0, 0.216, 0). This offset lands the receiver and the muzzle on the
         // same screen position the rifle already occupies, so the shared hip,
         // ADS, sway and bob motion stays framed identically for both weapons.
+        //
+        // Re-measured against the rifle when the arms were matched: projected
+        // into the 1280x720 view-model camera, the support wrist lands at
+        // (818, 520) here and at (815, 516) on the AK, and both forearms still
+        // run off the bottom of the frame. The same amount of wrist and forearm
+        // is already on screen for both weapons, so this offset is left exactly
+        // as measured rather than nudged, which also keeps the barrel on the
+        // crosshair.
         position: [0.086, 0.063, 0.213],
         rotation: [0, 0, 0],
         // The authored rig is modelled in metres (1.208 m of shotgun), which
@@ -131,6 +166,41 @@ export const ASSET_CONFIG = {
         mode: 'source',
         minimumRoughness: 0.32,
         maximumEnvironmentIntensity: 0.75,
+      },
+      // The shotgun ships its own arms, and out of the box they read as a
+      // different person from the AK's: cool blue-grey denim and slate gloves
+      // against the AK's near-black warm leather. Every number below is measured
+      // off the two GLBs rather than eyeballed. Sampling each authored albedo
+      // texture through its own UVs, weighted by 3D surface area:
+      //
+      //   AK gloves   (`organic`, non-skin texels) linear 0.00303/0.00258/0.00252
+      //   AK sleeves  (`sleeve-diff.tif`)          linear 0.00439/0.00439/0.00530
+      //   AK combined, weighted by arm area        linear 0.00368/0.00345/0.00385
+      //   Shotgun gloves + sleeves (`material`)    linear 0.02456/0.02800/0.02812
+      //
+      // The shotgun's cloth is therefore ~7x too bright and tinted towards blue.
+      // 0.00368/0.02456, 0.00345/0.02800 and 0.00385/0.02812 give the linear
+      // multiplier 0.1498/0.1231/0.1370, which is #261f23 once Babylon reads the
+      // hex straight into `albedoColor` (it applies no gamma of its own). That
+      // lands the gloves on 0.0024 against the AK's 0.0030 and the sleeves on
+      // 0.0045 against the AK's 0.0044, so both regions match at once. Being a
+      // multiplier it scales the authored albedo rather than replacing it, so
+      // every stitch, fold and wear pattern in the texture survives.
+      arms: {
+        meshNames: ['Object_90'],
+        materialNames: ['material'],
+        reference: 'AK-74M arms: `organic` gloves/skin + `sleeve-diff.tif` sleeves (metallic 0, roughness 0.5, no metallic/roughness map)',
+        albedoColor: '#261f23',
+        // The AK's three arm materials are all authored at exactly these
+        // factors, and 0.5 still clears the shared 0.32 roughness floor above.
+        roughness: 0.5,
+        metallic: 0,
+        // The shotgun's arms are the only first-person arms carrying a
+        // metallic/roughness map (roughness ~0.65 varying, metallic 0.053). The
+        // AK's arms have none, so the map is dropped to make the two pairs of
+        // gloves respond to the sun and sky light identically. The normal map
+        // stays bound, so the leather and denim relief is unchanged.
+        dropMetallicRoughnessTexture: true,
       },
     },
     zombie: {
