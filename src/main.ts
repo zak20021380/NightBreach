@@ -301,14 +301,21 @@ scene.skipPointerMovePicking = true
 
 // The first-person eye height is taken from the zombie the player actually
 // stands in front of rather than picked by feel: once the imported model is
-// grounded it stands 1.904m to the crown with its eye line at 1.72m, so the
-// camera sits level with their faces.
+// grounded its idle stance measures 1.904m to the crown with its eye line at
+// 1.72m, so the camera sits level with their faces.
 const PLAYER_EYE_HEIGHT = ASSET_CONFIG.assets.zombie.eyeHeight
-// The collision capsule spans the ground to the eye, so its half height and its
-// offset both track the eye height. That keeps the capsule's base at exactly
-// y=0 -- no sinking, no floating -- while the unchanged 0.45 radius preserves
-// every existing horizontal collision response against crates, walls, and
-// pillars.
+// A camera positions its collision ellipsoid at
+//   position - (0, ellipsoid.y, 0) + ellipsoidOffset
+// so the half height alone already stands the capsule on the floor: the camera
+// rides its top and the base lands at position.y - 2 * ellipsoid.y. The offset
+// is therefore left at zero. Adding a second -half-height there sank the lower
+// half of the capsule through the ground, and the collision response lifted the
+// camera a little further out of the floor on every step, so the eye height
+// crept upward the whole time the player moved.
+//
+// Meshes use the opposite convention (absolutePosition + ellipsoidOffset),
+// which is why the zombie collider pairs a half-height radius with a zero
+// offset around a body-centred origin.
 const PLAYER_COLLISION_RADIUS = 0.45
 const PLAYER_COLLISION_HALF_HEIGHT = PLAYER_EYE_HEIGHT / 2
 const camera = new UniversalCamera('playerCamera', new Vector3(0, PLAYER_EYE_HEIGHT, -18), scene)
@@ -327,7 +334,7 @@ camera.ellipsoid = new Vector3(
   PLAYER_COLLISION_HALF_HEIGHT,
   PLAYER_COLLISION_RADIUS,
 )
-camera.ellipsoidOffset = new Vector3(0, -PLAYER_COLLISION_HALF_HEIGHT, 0)
+camera.ellipsoidOffset = Vector3.Zero()
 camera.keysUp = [87]
 camera.keysDown = [83]
 camera.keysLeft = [65]
