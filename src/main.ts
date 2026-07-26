@@ -1048,6 +1048,99 @@ const ZOMBIE_AI_CONFIG = {
   midThinkDistance: 24,
 }
 
+/**
+ * Swarm shaping for the chase. Kept separate from ZOMBIE_AI_CONFIG so the way a
+ * group spreads out can be tuned without touching speeds, melee, or waves.
+ *
+ * Every zombie used to seek the player's exact centre, so a pack solved for one
+ * identical goal point and their paths converged by construction. Nothing pushed
+ * them apart until their colliders actually touched, which is a contact response
+ * rather than steering: the leader then blocked the follower and the group
+ * resolved into a single-file line. These constants add the two missing terms --
+ * a stable per-zombie approach lane, and lateral separation that runs for the
+ * whole chase instead of only at melee range.
+ */
+const ZOMBIE_SWARM_CONFIG = {
+  // Sectors around the player. Eight is coarse enough that claiming a lane costs
+  // a small course correction rather than a lap, while still reading as a
+  // surround once several zombies have arrived.
+  approachSlotCount: 8,
+  // How far off the player's centre a lane anchor sits. This is the standoff the
+  // pack fans out to on the way in; it is faded back out again before melee.
+  approachRingRadius: 1.5,
+  // The lane offset is at full strength beyond this distance from the player...
+  approachBlendFarDistance: 7,
+  // ...and gone entirely inside this one, where the zombie aims at the real
+  // player. Must stay above attackDistance (1.55) so a swing is never aimed at
+  // an offset point and the existing melee system sees an unchanged approach.
+  approachBlendNearDistance: 2.3,
+  // An already-claimed lane costs this much extra angular error, so a latecomer
+  // arriving on the same bearing is pushed into a neighbouring sector instead of
+  // doubling up. Waves can exceed the ring size, so lanes are never forbidden.
+  approachSlotOccupancyPenalty: Math.PI * 0.55,
+  // Neighbour radius for separation. Bodies are 0.72 wide, so reacting at 2.3
+  // starts the spread well before contact instead of after the collider has
+  // already blocked the path.
+  separationRadius: 2.3,
+  separationStrength: 1.15,
+  // Hard cap on the separation vector. The seek direction is unit length, so
+  // 0.85 bounds any deviation to ~40 degrees: enough to unstack a pack, never
+  // enough to turn the chase into a sidestep or an orbit.
+  separationMaxPush: 0.85,
+  // Separation is never switched off in melee -- that is where stacking is worst
+  // -- but it is eased so zombies cannot shove each other out of their own reach.
+  separationMeleeScale: 0.45,
+  // Converts a neighbour blocking the path head-on into a sidestep. Without it a
+  // follower's push points almost straight backwards, cancels against its own
+  // forward motion, and the pair stays nose-to-tail: the single-file case.
+  lineBreakGain: 0.9,
+} as const
+
+/**
+ * Approach lane ledger. Each living zombie holds one sector for its whole life,
+ * so the group commits to different sides of the player instead of converging on
+ * one point. Claims happen once, on the first chase tick, and are never re-rolled
+ * per frame -- re-picking a lane every tick is what makes swarms jitter.
+ */
+const zombieApproachSlotUsage = new Uint8Array(ZOMBIE_SWARM_CONFIG.approachSlotCount)
+
+function getApproachSlotAngle(slotIndex: number) {
+  return (slotIndex / ZOMBIE_SWARM_CONFIG.approachSlotCount) * Math.PI * 2
+}
+
+function signedAngleDifference(from: number, to: number) {
+  const difference = to - from
+  return Math.atan2(Math.sin(difference), Math.cos(difference))
+}
+
+/**
+ * Picks the cheapest lane for a zombie arriving on the given bearing: closest
+ * free sector wins, and occupancy is a cost rather than a hard block so a wave
+ * larger than the ring still spreads evenly instead of failing to place.
+ */
+function claimApproachSlot(bearing: number) {
+  let bestSlot = 0
+  let bestCost = Number.POSITIVE_INFINITY
+  for (let slotIndex = 0; slotIndex < ZOMBIE_SWARM_CONFIG.approachSlotCount; slotIndex += 1) {
+    const angularError = Math.abs(
+      signedAngleDifference(bearing, getApproachSlotAngle(slotIndex)),
+    )
+    const cost = angularError
+      + zombieApproachSlotUsage[slotIndex] * ZOMBIE_SWARM_CONFIG.approachSlotOccupancyPenalty
+    if (cost < bestCost) {
+      bestCost = cost
+      bestSlot = slotIndex
+    }
+  }
+  zombieApproachSlotUsage[bestSlot] += 1
+  return bestSlot
+}
+
+function releaseApproachSlot(slotIndex: number) {
+  if (slotIndex < 0 || slotIndex >= zombieApproachSlotUsage.length) return
+  if (zombieApproachSlotUsage[slotIndex] > 0) zombieApproachSlotUsage[slotIndex] -= 1
+}
+
 type ZombieHitZoneType = 'head' | 'torso' | 'limbs'
 
 const ZOMBIE_COMBAT_CONFIG = {
@@ -1788,6 +1881,9 @@ class Zombie {
   private desiredDirectionZ = 0
   private currentDirectionX = 0
   private currentDirectionZ = 0
+  // Approach lane around the player, claimed once on the first chase tick and
+  // held until death. -1 means "not yet claimed".
+  private approachSlot = -1
   private targetSpeed = 0
   private locomotion: 'walk' | 'run' = 'walk'
   private readonly obstacleRay: Ray
@@ -1796,6 +1892,8 @@ class Zombie {
   private readonly meleeProbeOrigin = Vector3.Zero()
   private readonly meleeProbeDirection = Vector3.Forward()
   private readonly movementDelta = new Vector3()
+  // Reused every steering tick so separation allocates nothing per frame.
+  private readonly separationResult = { x: 0, z: 0 }
   private readonly hitZoneMeshes: Mesh[] = []
   private readonly upperBodyImpactRoot: TransformNode
   private readonly upperBodyImpactBasePosition = Vector3.Zero()
@@ -2013,6 +2111,9 @@ class Zombie {
   dispose() {
     if (this.disposed) return
     this.disposed = true
+    // Covers zombies removed without dying (wave reset, teardown); die() has
+    // already released, and the guard makes a second call a no-op.
+    this.releaseApproachSlotIfHeld()
     this.activeAnimation?.stop()
     this.disableHitZones()
     this.visual.dispose()
@@ -2179,6 +2280,9 @@ class Zombie {
     this.applyUpperBodyImpact(0)
     this.setState('dead')
     playZombieDeathSound(this.id)
+    // Free the lane immediately so the rest of the wave can redistribute into
+    // the gap instead of the sector staying reserved by a corpse.
+    this.releaseApproachSlotIfHeld()
     this.currentDirectionX = 0
     this.currentDirectionZ = 0
     this.root.checkCollisions = false
@@ -2195,6 +2299,172 @@ class Zombie {
       / framesPerSecond
       / ZOMBIE_ASSET_CONFIG.animationSpeed
     return Math.max(ZOMBIE_COMBAT_CONFIG.fallbackDeathDuration, duration)
+  }
+
+  /** Idempotent: releasing twice (die then dispose) must not corrupt the ledger. */
+  private releaseApproachSlotIfHeld() {
+    if (this.approachSlot < 0) return
+    releaseApproachSlot(this.approachSlot)
+    this.approachSlot = -1
+  }
+
+  /**
+   * Builds the chase direction from three parts: the seek toward the player's
+   * approach ring, a stable per-zombie lane offset, and separation from nearby
+   * zombies. All three run for the entire chase, which is what makes the pack
+   * fan out on the way in rather than untangling itself on arrival.
+   *
+   * Horizontal only (X/Z) -- the vertical axis never participates in steering.
+   */
+  private updateChaseDirection(
+    playerPosition: Vector3,
+    toPlayerX: number,
+    toPlayerZ: number,
+    distance: number,
+  ) {
+    // Bearing of this zombie as seen from the player. Claimed once so the group
+    // keeps its shape; re-picking a lane every tick is what causes jitter.
+    if (this.approachSlot < 0) {
+      this.approachSlot = claimApproachSlot(Math.atan2(-toPlayerX, -toPlayerZ))
+    }
+
+    // Full lane offset out at range, fading to zero before melee so the final
+    // steps and the swing itself are aimed at the real player position.
+    const approachWeight = clamp(
+      (distance - ZOMBIE_SWARM_CONFIG.approachBlendNearDistance)
+        / (ZOMBIE_SWARM_CONFIG.approachBlendFarDistance
+          - ZOMBIE_SWARM_CONFIG.approachBlendNearDistance),
+      0,
+      1,
+    )
+
+    let goalX = playerPosition.x
+    let goalZ = playerPosition.z
+    if (approachWeight > 0) {
+      const slotAngle = getApproachSlotAngle(this.approachSlot)
+      const ringOffset = ZOMBIE_SWARM_CONFIG.approachRingRadius * approachWeight
+      goalX += Math.sin(slotAngle) * ringOffset
+      goalZ += Math.cos(slotAngle) * ringOffset
+    }
+
+    let directionX = goalX - this.root.position.x
+    let directionZ = goalZ - this.root.position.z
+    const goalDistance = Math.hypot(directionX, directionZ)
+    if (goalDistance > 0.001) {
+      directionX /= goalDistance
+      directionZ /= goalDistance
+    } else {
+      // Standing on the lane anchor: fall back to the true player bearing so the
+      // zombie always has a valid heading and never stalls on its own offset.
+      directionX = toPlayerX / distance
+      directionZ = toPlayerZ / distance
+    }
+
+    // Separation is eased rather than disabled in melee: stacking is worst at
+    // the player's feet, but a full-strength push there would shove attackers
+    // out of their own reach.
+    const separationScale = distance <= ZOMBIE_AI_CONFIG.attackReachDistance
+      ? ZOMBIE_SWARM_CONFIG.separationMeleeScale
+      : 1
+    const separation = this.computeSeparation(directionX, directionZ, separationScale)
+
+    directionX += separation.x
+    directionZ += separation.z
+    const steeredLength = Math.hypot(directionX, directionZ)
+    if (steeredLength > 0.001) {
+      this.desiredDirectionX = directionX / steeredLength
+      this.desiredDirectionZ = directionZ / steeredLength
+      return
+    }
+
+    // Separation exactly cancelled the seek. Keep chasing rather than freeze.
+    this.desiredDirectionX = toPlayerX / distance
+    this.desiredDirectionZ = toPlayerZ / distance
+  }
+
+  /**
+   * Inverse-distance-weighted push away from nearby living zombies, plus a
+   * tangential nudge for neighbours sitting directly ahead.
+   *
+   * The tangential term is the part that actually breaks a conga line. A pure
+   * radial push from a zombie straight ahead points straight back, cancels
+   * against this zombie's own forward motion, and leaves the pair nose-to-tail
+   * at walking pace. Converting that head-on case into a sidestep makes the
+   * follower step around rather than brake.
+   *
+   * Cost is O(living zombies) against a cap of ten, evaluated on the existing
+   * think schedule (~0.14-0.52s) rather than per frame, and allocates nothing.
+   * No scene queries and no navmesh, so it stays cheap inside a mobile WebView.
+   */
+  private computeSeparation(seekX: number, seekZ: number, scale: number) {
+    const result = this.separationResult
+    result.x = 0
+    result.z = 0
+    if (scale <= 0) return result
+
+    const radius = ZOMBIE_SWARM_CONFIG.separationRadius
+    const radiusSquared = radius * radius
+    let pushX = 0
+    let pushZ = 0
+
+    for (let index = 0; index < zombies.length; index += 1) {
+      const other = zombies[index]
+      // Dead and disposed zombies are ignored: corpses must not steer the pack.
+      if (other === this || other.eliminated || !other.root.isEnabled()) continue
+
+      const offsetX = this.root.position.x - other.root.position.x
+      const offsetZ = this.root.position.z - other.root.position.z
+      const distanceSquared = offsetX * offsetX + offsetZ * offsetZ
+      if (distanceSquared >= radiusSquared) continue
+
+      if (distanceSquared < 0.0001) {
+        // Exactly co-located (a spawn overlap). Derive a deterministic direction
+        // from the id pair so the two never mirror each other into a standoff.
+        const tieAngle = (this.id - other.id) * 1.7
+        pushX += Math.sin(tieAngle)
+        pushZ += Math.cos(tieAngle)
+        continue
+      }
+
+      const distance = Math.sqrt(distanceSquared)
+      // Linear falloff: full strength on contact, nothing at the radius edge.
+      const falloff = (radius - distance) / radius
+      const normalX = offsetX / distance
+      const normalZ = offsetZ / distance
+      pushX += normalX * falloff
+      pushZ += normalZ * falloff
+
+      // Neighbour ahead of us and roughly on our line? Add a sideways component
+      // so we go around instead of queueing behind them.
+      const alignment = -(normalX * seekX + normalZ * seekZ)
+      if (alignment > 0.35) {
+        // Perpendicular to the seek direction, signed so each zombie of a pair
+        // consistently peels to its own side and they do not swap every tick.
+        const sideSign = (normalZ * seekX - normalX * seekZ) >= 0 ? 1 : -1
+        const lineBreak = alignment * falloff * ZOMBIE_SWARM_CONFIG.lineBreakGain * sideSign
+        pushX += -seekZ * lineBreak
+        pushZ += seekX * lineBreak
+      }
+    }
+
+    if (pushX === 0 && pushZ === 0) return result
+
+    pushX *= ZOMBIE_SWARM_CONFIG.separationStrength * scale
+    pushZ *= ZOMBIE_SWARM_CONFIG.separationStrength * scale
+
+    // Clamping the magnitude (rather than each axis) keeps the push direction
+    // intact and bounds how far the chase can ever be bent off course.
+    const pushLength = Math.hypot(pushX, pushZ)
+    const maximumPush = ZOMBIE_SWARM_CONFIG.separationMaxPush * scale
+    if (pushLength > maximumPush) {
+      const limit = maximumPush / pushLength
+      pushX *= limit
+      pushZ *= limit
+    }
+
+    result.x = pushX
+    result.z = pushZ
+    return result
   }
 
   private updateAwarenessAndSteering(playerPosition: Vector3) {
@@ -2218,8 +2488,7 @@ class Zombie {
     }
 
     const distance = Math.sqrt(this.cachedDistanceSquared)
-    this.desiredDirectionX = toPlayerX / distance
-    this.desiredDirectionZ = toPlayerZ / distance
+    this.updateChaseDirection(playerPosition, toPlayerX, toPlayerZ, distance)
 
     const nextLocomotion = distance >= ZOMBIE_AI_CONFIG.runDistance ? 'run' : 'walk'
     if (nextLocomotion !== this.locomotion) {
@@ -2877,6 +3146,9 @@ function resetZombieWave() {
   stopZombieWaveTimers()
   for (let index = 0; index < zombies.length; index += 1) zombies[index].dispose()
   zombies.length = 0
+  // Disposal already releases each lane; zeroing here guarantees a restart can
+  // never inherit a stale count and skew the first wave's spread.
+  zombieApproachSlotUsage.fill(0)
   activeZombieCount = 0
   nextZombieId = 1
   waveState.currentWave = 0
