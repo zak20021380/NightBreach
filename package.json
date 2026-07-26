@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test:runtime": "node scripts/runtime-smoke.mjs"
+    "test:runtime": "node scripts/runtime-smoke.mjs",
+    "test:shotgun": "node scripts/shotgun-smoke.mjs"
   },
   "devDependencies": {
     "typescript": "~6.0.2",

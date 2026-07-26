@@ -16,7 +16,7 @@ import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial'
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture'
 import { Color3, Color4 } from '@babylonjs/core/Maths/math.color'
 import { Frustum } from '@babylonjs/core/Maths/math.frustum'
-import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector'
+import { type Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector'
 import { type AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh'
 import '@babylonjs/core/Meshes/instancedMesh'
 import { Mesh } from '@babylonjs/core/Meshes/mesh'
@@ -419,6 +419,10 @@ function damagePlayer(amount: number, attackerPosition: Vector3) {
   stopAutomaticFire()
   releaseAds()
   reloadElapsed = -1
+  // Death interrupts the shotgun exactly like a weapon switch: the reload
+  // clip stops cleanly and its unfinished shell transfer is dropped.
+  cancelShotgunReload()
+  cancelShotgunShotCycle()
   reloadButton.disabled = true
   muzzleFlashRemaining = 0
   weaponFireEffects.reset()
@@ -2073,6 +2077,14 @@ class Zombie {
   private upperBodyImpactDistance = 0
   private resumeStateAfterHit: 'idle' | 'chasing' = 'idle'
   private hitReactionRemaining = 0
+  // Ordinary rifle hits decay over the configured reaction window; a shotgun
+  // blast may stretch it so the heavier stagger also recovers more slowly.
+  private activeHitReactionDuration = ZOMBIE_COMBAT_CONFIG.hitReactionDuration
+  // Shotgun knockback: one horizontal impulse that decays exponentially and is
+  // integrated through moveWithCollisions, so walls always stay solid.
+  private knockbackDirectionX = 0
+  private knockbackDirectionZ = 0
+  private knockbackSpeed = 0
   private attackElapsed = 0
   private attackCooldownRemaining = 0
   private attackDamageApplied = false
@@ -2165,13 +2177,56 @@ class Zombie {
   }
 
   applyHit(zone: ZombieHitZoneType, bulletDirection = Vector3.Forward()) {
-    if (this.disposed || this._state === 'dead') return false
-
     const damage = zone === 'head'
       ? ZOMBIE_COMBAT_CONFIG.headDamage
       : zone === 'torso'
         ? ZOMBIE_COMBAT_CONFIG.torsoDamage
         : ZOMBIE_COMBAT_CONFIG.limbDamage
+    return this.applyDamage(
+      damage,
+      zone === 'head',
+      bulletDirection,
+      ZOMBIE_COMBAT_CONFIG.hitReactionDuration,
+    )
+  }
+
+  // One aggregated call per shotgun blast: every pellet's damage lands at once
+  // so the zombie plays a single controlled reaction instead of up to eight
+  // competing ones. Returns false when the zombie was already dead or disposed,
+  // which is what keeps a blast from re-staggering a corpse.
+  applyShotgunBlast(
+    totalDamage: number,
+    headshot: boolean,
+    flinchDirection: Vector3,
+    staggerSeconds: number,
+  ) {
+    return this.applyDamage(totalDamage, headshot, flinchDirection, staggerSeconds)
+  }
+
+  // Horizontal impulse in world units per second. The caller pre-scales it by
+  // pellet count and distance and caps it; direction only needs to point away
+  // from the shooter. Dead or disposed zombies never accept an impulse.
+  applyKnockback(directionX: number, directionZ: number, impulseSpeed: number) {
+    if (this.disposed || this._state === 'dead' || impulseSpeed <= 0) return
+    const length = Math.hypot(directionX, directionZ)
+    if (length < 0.001) return
+    this.knockbackDirectionX = directionX / length
+    this.knockbackDirectionZ = directionZ / length
+    this.knockbackSpeed = impulseSpeed
+  }
+
+  get knockbackAmount() {
+    return this.knockbackSpeed
+  }
+
+  private applyDamage(
+    damage: number,
+    headshot: boolean,
+    flinchDirection: Vector3,
+    staggerSeconds: number,
+  ) {
+    if (this.disposed || this._state === 'dead') return false
+
     this.health = Math.max(0, this.health - damage)
 
     if (this.health <= 0) {
@@ -2184,8 +2239,14 @@ class Zombie {
     if (!wasAlreadyReacting) {
       this.resumeStateAfterHit = this._state === 'chasing' ? 'chasing' : 'idle'
     }
-    this.hitReactionRemaining = ZOMBIE_COMBAT_CONFIG.hitReactionDuration
-    this.beginUpperBodyImpact(bulletDirection, zone === 'head')
+    // The stagger window is also the decay window of the upper-body flinch, so
+    // heavier hits both push further and recover later.
+    this.activeHitReactionDuration = Math.max(
+      ZOMBIE_COMBAT_CONFIG.hitReactionDuration,
+      staggerSeconds,
+    )
+    this.hitReactionRemaining = this.activeHitReactionDuration
+    this.beginUpperBodyImpact(flinchDirection, headshot)
     this.setState('hit')
     if (wasAlreadyReacting) this.restartHitAnimation()
     return true
@@ -2239,6 +2300,23 @@ class Zombie {
       this.attackCooldownRemaining - deltaSeconds,
     )
 
+    // The knockback slide runs on top of whatever the state machine is doing,
+    // and only for living zombies: the dead branch above has already returned.
+    // moveWithCollisions is the same pipe the chase uses, so an impulse can
+    // never push a zombie through a wall or off the map.
+    if (this.knockbackSpeed > 0) {
+      this.movementDelta.set(
+        this.knockbackDirectionX * this.knockbackSpeed * deltaSeconds,
+        0,
+        this.knockbackDirectionZ * this.knockbackSpeed * deltaSeconds,
+      )
+      this.root.moveWithCollisions(this.movementDelta)
+      this.knockbackSpeed *= Math.exp(
+        -SHOTGUN_COMBAT_CONFIG.knockback.decayPerSecond * deltaSeconds,
+      )
+      if (this.knockbackSpeed < 0.02) this.knockbackSpeed = 0
+    }
+
     if (this._state === 'attacking') {
       this.updateAttack(deltaSeconds, playerPosition)
       this.updateProceduralAnimation(deltaSeconds)
@@ -2248,7 +2326,7 @@ class Zombie {
     if (this._state === 'hit') {
       this.hitReactionRemaining -= deltaSeconds
       this.applyUpperBodyImpact(clamp(
-        this.hitReactionRemaining / ZOMBIE_COMBAT_CONFIG.hitReactionDuration,
+        this.hitReactionRemaining / this.activeHitReactionDuration,
         0,
         1,
       ) ** 2)
@@ -2457,6 +2535,8 @@ class Zombie {
     this.releaseApproachSlotIfHeld()
     this.currentDirectionX = 0
     this.currentDirectionZ = 0
+    // A corpse never slides: any shotgun impulse still decaying dies with it.
+    this.knockbackSpeed = 0
     this.root.checkCollisions = false
     this.disableHitZones()
     onZombieDied()
@@ -3376,10 +3456,78 @@ const SHOTGUN_ASSET_CONFIG = {
   arms: SHOTGUN_ASSET_DEFINITION.arms,
 }
 
-// The rifle is the only weapon the player starts with, and it stays the
-// authority for shooting, ammo, ADS, reload and recoil. The shotgun is a
-// presentation-only view model for now: selecting it never routes into any of
-// the rifle's combat code.
+// Every gameplay number for the pump-action shotgun lives here. The rifle's
+// combat values are untouched; this block only ever feeds the shotgun paths.
+const SHOTGUN_COMBAT_CONFIG = {
+  magazineCapacity: 8,
+  startingLoadedShells: 8,
+  startingReserveShells: 32,
+  pelletsPerShot: 8,
+  damagePerPellet: 12,
+  // Pellet rays stop at maxRange; damage is full inside fullDamageRange and
+  // falls off linearly to the minimum multiplier at maxRange.
+  maxRange: 28,
+  fullDamageRange: 8,
+  minDamageMultiplierAtMaxRange: 0.35,
+  // Cone half-angles. ADS blends between them through the shared adsBlend.
+  hipSpreadDegrees: 4.5,
+  adsSpreadDegrees: 2.5,
+  // Zone scaling is derived from the existing zombie damage table so the
+  // shotgun follows the exact same head/torso/limb rules as the rifle:
+  // pellet damage is the torso baseline scaled by the authored zone ratios.
+  zoneDamageMultipliers: {
+    head: ZOMBIE_COMBAT_CONFIG.headDamage / ZOMBIE_COMBAT_CONFIG.torsoDamage,
+    torso: 1,
+    limbs: ZOMBIE_COMBAT_CONFIG.limbDamage / ZOMBIE_COMBAT_CONFIG.torsoDamage,
+  },
+  // The shotgun rides the same recoilAmount channel and camera-kick pattern as
+  // the rifle, just with a much harder shove. Values are additive on top of the
+  // small built-in kick weaponFireEffects.trigger applies for every weapon.
+  recoil: {
+    viewModelKick: 0.075,
+    viewModelKickCap: 0.09,
+    cameraKickPitch: 0.03,
+    cameraKickYaw: 0.012,
+    adsRecoilReduction: 0.32,
+    muzzleFlashStrength: 1.25,
+  },
+  // One aggregated impulse per blast, in world units/second, integrated by the
+  // zombie through moveWithCollisions and decayed exponentially.
+  knockback: {
+    impulsePerPellet: 0.6,
+    maxImpulse: 4.8,
+    minimumImpulse: 0.3,
+    decayPerSecond: 5.5,
+    staggerSeconds: 0.34,
+  },
+  // Blood bursts per zombie per blast. Every pellet still deals damage; the cap
+  // only keeps eight simultaneous bursts from churning the pooled particles.
+  maxBloodBurstsPerZombie: 3,
+  // Barrel tip in viewModelPivot space. Measured off the loaded, posed rig
+  // (skinned vertex positions of the farthest +Z slice average to
+  // (0.032, 0.219, 0.845); the runtime harness re-checks this via
+  // measureShotgunMuzzle), not eyeballed.
+  muzzleOffset: new Vector3(0.032, 0.219, 0.845),
+  // Watchdog fallbacks matching the authored clip lengths (59 and 409 frames
+  // at 60 fps), used only if a clip cannot be resolved or fails to complete.
+  shotCycleFallbackSeconds: 59 / 60,
+  reloadFallbackSeconds: 409 / 60,
+}
+
+// The four authored clips this phase drives, exactly as exported in the GLB.
+const SHOTGUN_ANIMATION_CLIPS = {
+  idle: 'Armature|SG_FPS_Idle',
+  walk: 'Armature|SG_FPS_Walk',
+  shot: 'Armature|SG_FPS_Shot',
+  reload: 'Armature|SG_FPS_Reload',
+} as const
+
+type ShotgunClipName = keyof typeof SHOTGUN_ANIMATION_CLIPS
+
+// The rifle is the weapon the player starts with. Each weapon owns its own
+// ammo, firing, reload, recoil and animation state; selection routes every
+// fire/reload request to exactly one of them and never lets the other's
+// combat code run.
 type WeaponId = 'rifle' | 'shotgun'
 const WEAPON_LABELS: Readonly<Record<WeaponId, string>> = {
   rifle: 'AK',
@@ -3892,6 +4040,9 @@ class WeaponFireEffects {
   private readonly smokePuffs: MuzzleSmokePuff[] = []
   private readonly shells: EjectedShell[] = []
   private readonly baseExposure: number
+  // Where the flash anchors on the view-model pivot. Weapon selection retargets
+  // it so the burst always sits on the active weapon's real barrel tip.
+  private readonly muzzleLocalPosition = WEAPON_VIEW_CONFIG.muzzlePosition.clone()
   private readonly muzzleWorldPosition = Vector3.Zero()
   private readonly ejectForward = Vector3.Zero()
   private readonly ejectRight = Vector3.Zero()
@@ -3920,7 +4071,7 @@ class WeaponFireEffects {
     this.smokeMaterial = this.createAdditiveMaterial('muzzleSmokeMaterial', smokeTexture)
     this.smokeMaterial.emissiveColor = new Color3(0.3, 0.29, 0.27)
 
-    const muzzle = WEAPON_VIEW_CONFIG.muzzlePosition
+    const muzzle = this.muzzleLocalPosition
 
     this.star = MeshBuilder.CreatePlane('muzzleFlashStar', { size: 0.34 }, scene)
     this.star.parent = viewModelPivot
@@ -4012,6 +4163,19 @@ class WeaponFireEffects {
     })
   }
 
+  // Re-anchors every flash element on a new barrel tip, keeping the same
+  // relative offsets the constructor established. Called on weapon selection.
+  setMuzzlePosition(position: Vector3) {
+    this.muzzleLocalPosition.copyFrom(position)
+    this.star.position.copyFrom(position)
+    this.core.position.copyFrom(position)
+    this.core.position.z += 0.006
+    this.jet.position.copyFrom(position)
+    this.jet.position.z += 0.13
+    this.light.position.copyFrom(position)
+    this.light.position.z += 0.2
+  }
+
   trigger(strength: number) {
     this.flashStrength = clamp(strength, 0.55, 1.25)
     this.flashRemaining = MUZZLE_FLASH_DURATION
@@ -4065,7 +4229,7 @@ class WeaponFireEffects {
   private spawnSmokePuff() {
     const puff = this.smokePuffs[this.nextSmokePuff]
     this.nextSmokePuff = (this.nextSmokePuff + 1) % this.smokeCapacity
-    const muzzle = WEAPON_VIEW_CONFIG.muzzlePosition
+    const muzzle = this.muzzleLocalPosition
     puff.active = true
     puff.age = 0
     puff.lifetime = MUZZLE_SMOKE_LIFETIME * (0.78 + Math.random() * 0.42)
@@ -4276,9 +4440,12 @@ function detectWeaponAnimations(groups: AnimationGroup[]) {
   return detected
 }
 
-function getImportedAnimationDurationSeconds(animation: AnimationGroup) {
+function getImportedAnimationDurationSeconds(
+  animation: AnimationGroup,
+  animationSpeed = RIFLE_ASSET_CONFIG.animationSpeed,
+) {
   let durationSeconds = 0
-  const speed = Math.max(0.001, Math.abs(RIFLE_ASSET_CONFIG.animationSpeed))
+  const speed = Math.max(0.001, Math.abs(animationSpeed))
   for (const targetedAnimation of animation.targetedAnimations) {
     const framesPerSecond = targetedAnimation.animation.framePerSecond
     if (!Number.isFinite(framesPerSecond) || framesPerSecond <= 0) continue
@@ -4645,30 +4812,115 @@ equipWeapon = () => {
 }
 
 // ---------------------------------------------------------------------------
-// Shotgun view model
+// Shotgun view model and combat state
 //
-// Presentation only for this step: the shotgun is imported through the same
-// local asset manager, wrapped in the same recentre/offset pair, and parented to
-// the same viewModelPivot the rifle uses, so hip/ADS blending, sway, bob and the
-// future recoil channel apply to it unchanged. It has no fire, ammo, reload,
-// pump or HUD behaviour, and it deliberately shares none of the rifle's
-// combat-facing animation map.
+// The shotgun is imported through the same local asset manager, wrapped in the
+// same recentre/offset pair, and parented to the same viewModelPivot the rifle
+// uses, so hip/ADS blending, sway, bob and recoil apply to it unchanged. Its
+// combat behaviour is driven exclusively by the four authored clips resolved in
+// shotgunClips; it deliberately shares none of the rifle's animation map, ammo
+// or reload state, and the rifle's paths never reach any of this while the
+// shotgun is selected.
 // ---------------------------------------------------------------------------
 
 let disposeShotgunResources: (() => void) | null = null
+
+// The authored clips this phase drives. Resolved once at load; null entries
+// mean the GLB changed, in which case the duration fallbacks keep firing and
+// reloading functional (without inventing procedural animations).
+let shotgunClips: Record<ShotgunClipName, AnimationGroup | null> = {
+  idle: null,
+  walk: null,
+  shot: null,
+  reload: null,
+}
+let activeShotgunAnimation: AnimationGroup | null = null
+
+// Separate shotgun ammunition. Never shared with, or reset by, the rifle's
+// magazine/reserve pair.
+let shotgunLoadedShells = SHOTGUN_COMBAT_CONFIG.startingLoadedShells
+let shotgunReserveShells = SHOTGUN_COMBAT_CONFIG.startingReserveShells
+
+// -1 = inactive. While >= 0 these advance with render time and act as the
+// watchdogs that keep the authored end observers honest, exactly like the
+// rifle's reload watchdog.
+let shotgunShotElapsed = -1
+let shotgunReloadElapsed = -1
+let shotgunShotDurationSeconds = SHOTGUN_COMBAT_CONFIG.shotCycleFallbackSeconds
+let shotgunReloadDurationSeconds = SHOTGUN_COMBAT_CONFIG.reloadFallbackSeconds
+
+// Mirrors the bob "moving" state so the shotgun can hold its authored walk
+// loop while the player moves. Written once per frame by the view-model tick.
+let playerIsMoving = false
+
+// Diagnostics for the runtime harness: what the most recent blast actually did.
+interface ShotgunBlastDiagnostics {
+  pelletRaysCast: number
+  pelletsIntoZombies: number
+  zombiesHit: number
+  zombiesDamaged: number
+  zombiesKilled: number
+  targetPellets: number
+  blockedPellets: number
+  missedPellets: number
+  headshot: boolean
+  totalDamage: number
+  // Mean distance-falloff multiplier across the pellets that reached zombies:
+  // 1 inside full-damage range, approaching the configured minimum at maxRange.
+  averageFalloff: number
+  maxKnockbackImpulse: number
+}
+let lastShotgunBlast: ShotgunBlastDiagnostics | null = null
 
 function stopShotgunAnimations() {
   for (const animation of shotgunAnimationGroups) {
     if (animation.isStarted) animation.stop(true)
   }
+  activeShotgunAnimation = null
 }
 
-// Idle is the authored loop the artist shipped for the held pose; equip is the
-// documented fallback. With neither, every clip is stopped and reset so the rig
-// rests in its stable authored reference pose instead of a half-played frame.
+// Exact-name resolution first; the normalized fallback only absorbs harmless
+// re-exports (case or separator changes), never a different clip.
+function resolveShotgunClip(groups: readonly AnimationGroup[], clipName: string) {
+  const exact = groups.find((group) => group.name === clipName)
+  if (exact) return exact
+  const normalize = (value: string) => value.toLowerCase().replace(/[\s_.|-]+/g, '')
+  const normalizedTarget = normalize(clipName)
+  return groups.find((group) => normalize(group.name).endsWith(normalizedTarget)) ?? null
+}
+
+// Every shotgun action funnels through here, mirroring the rifle's single
+// entry point: the guard keeps shotgun clips from being driven while another
+// weapon is selected, and the stop-first policy means no two shotgun groups
+// can ever fight over the rig.
+function playShotgunAnimation(name: ShotgunClipName, loop = false) {
+  if (activeWeaponId !== 'shotgun') return false
+  const animation = shotgunClips[name]
+  if (!animation) return false
+
+  stopShotgunAnimations()
+  // Rewind authored tracks so repeat shots/reloads always start from frame 0.
+  if (!loop) animation.reset()
+  animation.start(
+    loop,
+    SHOTGUN_ASSET_CONFIG.animationSpeed,
+    animation.from,
+    animation.to,
+    false,
+  )
+  activeShotgunAnimation = animation
+  canvas.dataset.shotgunActiveAnimation = animation.name
+  return true
+}
+
+// The held loop: the authored walk while the player is moving, idle otherwise.
+// With no usable clip, every group is stopped and reset so the rig rests in
+// its stable authored reference pose instead of a half-played frame.
 function playShotgunRestAnimation() {
   stopShotgunAnimations()
-  const animation = shotgunRestAnimation
+  const animation = (playerIsMoving ? shotgunClips.walk : null)
+    ?? shotgunClips.idle
+    ?? shotgunRestAnimation
   if (!animation) {
     for (const group of shotgunAnimationGroups) group.reset()
     canvas.dataset.shotgunActiveAnimation = 'reference-pose'
@@ -4681,8 +4933,99 @@ function playShotgunRestAnimation() {
     animation.to,
     false,
   )
+  activeShotgunAnimation = animation
   canvas.dataset.shotgunActiveAnimation = animation.name
   return true
+}
+
+// One permanent observer per group, attached exactly once at load, mirroring
+// the rifle. Weapon switching never adds or removes observers, so repeated
+// switching cannot stack callbacks. Note every deliberate stop in this file
+// uses stop(true), which skips this notification; only natural clip completion
+// lands here.
+function handleShotgunAnimationEnd(animation: AnimationGroup) {
+  if (activeShotgunAnimation !== animation) return
+  activeShotgunAnimation = null
+
+  if (animation === shotgunClips.reload) {
+    completeShotgunReload()
+    return
+  }
+  if (animation === shotgunClips.shot) {
+    completeShotgunShotCycle()
+  }
+}
+
+// The authored shot clip IS the fire-and-pump cycle: only its completion (or
+// the duration watchdog, if the clip stalls) re-arms the trigger.
+function completeShotgunShotCycle() {
+  if (shotgunShotElapsed < 0) return
+  shotgunShotElapsed = -1
+  const shot = shotgunClips.shot
+  if (activeShotgunAnimation === shot) activeShotgunAnimation = null
+  if (shot?.isStarted) shot.stop(true)
+  if (activeWeaponId === 'shotgun' && shotgunReloadElapsed < 0) {
+    playShotgunRestAnimation()
+  }
+}
+
+// Interruption path (weapon switch, death, restart, disposal): the cycle gate
+// is simply cleared; no rest clip is forced because the shotgun is either
+// leaving the hands or the whole scene is being reset.
+function cancelShotgunShotCycle() {
+  if (shotgunShotElapsed < 0) return
+  shotgunShotElapsed = -1
+  const shot = shotgunClips.shot
+  if (activeShotgunAnimation === shot) activeShotgunAnimation = null
+  if (shot?.isStarted) shot.stop(true)
+}
+
+function beginShotgunReload() {
+  if (activeWeaponId !== 'shotgun' || !shotgunReady) return
+  if (gameOver || !gameplayInputEnabled()) return
+  // The pump cycle finishes before shells go in, and a running reload is
+  // never restarted.
+  if (shotgunReloadElapsed >= 0 || shotgunShotElapsed >= 0) return
+  if (shotgunLoadedShells >= SHOTGUN_COMBAT_CONFIG.magazineCapacity) return
+  if (shotgunReserveShells <= 0) return
+
+  shotgunReloadElapsed = 0
+  reloadButton.disabled = true
+  playShotgunAnimation('reload')
+}
+
+// The single ammo-transfer point. Only completeShotgunReload calls it, and the
+// elapsed guard there means it can run at most once per started reload, so an
+// interrupted reload never moves a shell and ammo can never be created.
+function applyShotgunReloadAmmo() {
+  const needed = SHOTGUN_COMBAT_CONFIG.magazineCapacity - shotgunLoadedShells
+  const loaded = Math.min(needed, shotgunReserveShells)
+  if (loaded <= 0) return
+  shotgunLoadedShells += loaded
+  shotgunReserveShells -= loaded
+  updateAmmoDisplay()
+}
+
+function completeShotgunReload() {
+  if (shotgunReloadElapsed < 0) return
+  shotgunReloadElapsed = -1
+  applyShotgunReloadAmmo()
+  const reload = shotgunClips.reload
+  if (activeShotgunAnimation === reload) activeShotgunAnimation = null
+  if (reload?.isStarted) reload.stop(true)
+  reloadButton.disabled = false
+  if (activeWeaponId === 'shotgun') playShotgunRestAnimation()
+}
+
+// Interruption path: the state is cleared BEFORE the clip is stopped so no
+// callback ordering can ever reach the ammo transfer above.
+function cancelShotgunReload() {
+  if (shotgunReloadElapsed < 0) return
+  shotgunReloadElapsed = -1
+  const reload = shotgunClips.reload
+  if (activeShotgunAnimation === reload) activeShotgunAnimation = null
+  if (reload?.isStarted) reload.stop(true)
+  reloadButton.disabled = false
 }
 
 function setShotgunViewModelEnabled(enabled: boolean) {
@@ -4700,6 +5043,10 @@ function setShotgunViewModelEnabled(enabled: boolean) {
 // without a view model.
 function discardShotgunViewModel(context: string, error: unknown) {
   const wasSelected = activeWeaponId === 'shotgun'
+  // Disposal is an interruption: clear the reload first so its unfinished
+  // ammo transfer is dropped, then clear the pump-cycle gate.
+  cancelShotgunReload()
+  cancelShotgunShotCycle()
   stopShotgunAnimations()
   shotgunRoot?.setEnabled(false)
   try {
@@ -4712,6 +5059,8 @@ function discardShotgunViewModel(context: string, error: unknown) {
   shotgunMeshes = []
   shotgunAnimationGroups = []
   shotgunRestAnimation = null
+  shotgunClips = { idle: null, walk: null, shot: null, reload: null }
+  activeShotgunAnimation = null
   shotgunReady = false
   canvas.dataset.shotgunReady = 'unavailable'
   canvas.dataset.shotgunActiveAnimation = 'none'
@@ -4720,6 +5069,8 @@ function discardShotgunViewModel(context: string, error: unknown) {
     activeWeaponId = 'rifle'
     canvas.dataset.activeWeapon = activeWeaponId
     setRifleViewModelEnabled(true)
+    weaponFireEffects.setMuzzlePosition(WEAPON_VIEW_CONFIG.muzzlePosition)
+    updateAmmoDisplay()
     equipWeapon()
   }
   updateWeaponSwitchControl()
@@ -4797,12 +5148,22 @@ async function loadLocalShotgunModel(parent: TransformNode) {
     for (const animation of animationGroups) {
       animation.speedRatio = SHOTGUN_ASSET_CONFIG.animationSpeed
       enableImportedAnimationBlending(animation)
+      // The one permanent completion observer per clip. It dispatches into the
+      // shotgun's own handlers only, so nothing here can ever reach the
+      // rifle's reload or fire completion paths.
+      animation.onAnimationGroupEndObservable.add(handleShotgunAnimationEnd)
     }
-    // Detection only: the shotgun's fire/reload clips are catalogued for the
-    // later combat step but are never started, and no end-observer is attached,
-    // so nothing here can reach the rifle's reload or fire completion handlers.
     const detectedAnimations = detectWeaponAnimations(animationGroups)
-    const restAnimation = detectedAnimations.idle ?? detectedAnimations.equip ?? null
+    const resolvedClips: Record<ShotgunClipName, AnimationGroup | null> = {
+      idle: resolveShotgunClip(animationGroups, SHOTGUN_ANIMATION_CLIPS.idle),
+      walk: resolveShotgunClip(animationGroups, SHOTGUN_ANIMATION_CLIPS.walk),
+      shot: resolveShotgunClip(animationGroups, SHOTGUN_ANIMATION_CLIPS.shot),
+      reload: resolveShotgunClip(animationGroups, SHOTGUN_ANIMATION_CLIPS.reload),
+    }
+    const restAnimation = resolvedClips.idle
+      ?? detectedAnimations.idle
+      ?? detectedAnimations.equip
+      ?? null
     const clipNames = animationGroups.map((animation) => animation.name)
     const skeletonBoneCount = entries.skeletons.reduce(
       (totalBones, skeleton) => totalBones + skeleton.bones.length,
@@ -4827,6 +5188,15 @@ async function loadLocalShotgunModel(parent: TransformNode) {
     shotgunMeshes = [...modelMeshes]
     shotgunAnimationGroups = animationGroups
     shotgunRestAnimation = restAnimation
+    shotgunClips = resolvedClips
+    // Cycle durations come straight off the authored clips; the fallbacks only
+    // stand in if a clip is missing, keeping the fire/reload gates functional.
+    shotgunShotDurationSeconds = resolvedClips.shot
+      ? getImportedAnimationDurationSeconds(resolvedClips.shot, SHOTGUN_ASSET_CONFIG.animationSpeed)
+      : SHOTGUN_COMBAT_CONFIG.shotCycleFallbackSeconds
+    shotgunReloadDurationSeconds = resolvedClips.reload
+      ? getImportedAnimationDurationSeconds(resolvedClips.reload, SHOTGUN_ASSET_CONFIG.animationSpeed)
+      : SHOTGUN_COMBAT_CONFIG.reloadFallbackSeconds
     disposeShotgunResources = () => {
       activatedEntries.dispose()
       if (!activatedRoot.isDisposed()) activatedRoot.dispose()
@@ -4837,6 +5207,11 @@ async function loadLocalShotgunModel(parent: TransformNode) {
     canvas.dataset.shotgunReady = 'glb'
     canvas.dataset.shotgunActiveAnimation = 'stopped'
     canvas.dataset.shotgunRestAnimation = restAnimation?.name ?? 'reference-pose'
+    canvas.dataset.shotgunResolvedClips = (Object.keys(resolvedClips) as ShotgunClipName[])
+      .filter((name) => resolvedClips[name] !== null)
+      .join(',') || 'none'
+    canvas.dataset.shotgunShotDuration = shotgunShotDurationSeconds.toFixed(6)
+    canvas.dataset.shotgunReloadDuration = shotgunReloadDurationSeconds.toFixed(6)
     canvas.dataset.shotgunClipNames = clipNames.join(',') || 'none'
     canvas.dataset.shotgunAnimations =
       (Object.keys(detectedAnimations) as WeaponAnimationName[]).join(',') || 'none'
@@ -4866,6 +5241,8 @@ async function loadLocalShotgunModel(parent: TransformNode) {
       shotgunMeshes = []
       shotgunAnimationGroups = []
       shotgunRestAnimation = null
+      shotgunClips = { idle: null, walk: null, shot: null, reload: null }
+      activeShotgunAnimation = null
       disposeShotgunResources = null
     }
     shotgunReady = false
@@ -4913,6 +5290,11 @@ function selectWeapon(weaponId: WeaponId) {
     stopAutomaticFire()
     setRifleViewModelEnabled(false)
   } else {
+    // Same policy for the shotgun: an interrupted reload transfers no shells,
+    // and an interrupted pump cycle never blocks the next selection.
+    cancelShotgunReload()
+    cancelShotgunShotCycle()
+    stopAutomaticFire()
     setShotgunViewModelEnabled(false)
   }
 
@@ -4922,6 +5304,15 @@ function selectWeapon(weaponId: WeaponId) {
   } else {
     setShotgunViewModelEnabled(true)
   }
+
+  // The flash follows the active weapon's real barrel tip, and the HUD counter
+  // always shows the selected weapon's own ammunition.
+  weaponFireEffects.setMuzzlePosition(
+    weaponId === 'shotgun'
+      ? SHOTGUN_COMBAT_CONFIG.muzzleOffset
+      : WEAPON_VIEW_CONFIG.muzzlePosition,
+  )
+  updateAmmoDisplay()
 
   canvas.dataset.activeWeapon = weaponId
   weaponSwitchCount += 1
@@ -5010,8 +5401,12 @@ let adsHeld = false
 let adsBlend = 0
 const weaponRay = new Ray(Vector3.Zero(), Vector3.Forward(), 100)
 
+// The one ammo readout shows whichever weapon is in the player's hands, in the
+// HUD's existing loaded/reserve format.
 function updateAmmoDisplay() {
-  ammoDisplay.textContent = `${magazineAmmo}/${reserveAmmo}`
+  ammoDisplay.textContent = activeWeaponId === 'shotgun'
+    ? `${shotgunLoadedShells}/${shotgunReserveShells}`
+    : `${magazineAmmo}/${reserveAmmo}`
 }
 
 function pulseCrosshair() {
@@ -5068,8 +5463,8 @@ function hitZombieWithBullet(
   return true
 }
 
-// Reload belongs to the rifle. The shotgun has no ammo or reload behaviour yet,
-// so selecting it must never reach this path.
+// The rifle's reload. The shotgun runs its own beginShotgunReload, so this
+// path must never run while the shotgun is selected.
 function beginReload() {
   if (activeWeaponId !== 'rifle') return
   if (gameOver || reloadElapsed >= 0 || magazineAmmo >= 30 || reserveAmmo <= 0) return
@@ -5144,8 +5539,8 @@ function disposeTrainingTarget(target: TargetState) {
 }
 
 function fire() {
-  // The shotgun does not shoot yet. Pressing fire while it is selected must do
-  // nothing at all rather than fall through to the rifle's shot.
+  // The rifle's shot. Pressing fire with the shotgun selected routes to
+  // fireShotgun instead and must never fall through to here.
   if (activeWeaponId !== 'rifle') return
   if (gameOver || magazineAmmo <= 0 || reloadElapsed >= 0) return
 
@@ -5188,8 +5583,263 @@ function fire() {
   if (target) hitTarget(target)
 }
 
-fireWeapon = fire
-reloadWeapon = beginReload
+// ---------------------------------------------------------------------------
+// Shotgun firing
+// ---------------------------------------------------------------------------
+
+const shotgunPelletRay = new Ray(Vector3.Zero(), Vector3.Forward(), SHOTGUN_COMBAT_CONFIG.maxRange)
+const shotgunAimForward = Vector3.Forward()
+const shotgunAimRight = Vector3.Right()
+const shotgunAimUp = Vector3.Up()
+
+// Full damage inside fullDamageRange, then a straight line down to the minimum
+// multiplier at maxRange. Applied independently to every pellet.
+function shotgunDamageFalloff(distance: number) {
+  const { fullDamageRange, maxRange, minDamageMultiplierAtMaxRange } = SHOTGUN_COMBAT_CONFIG
+  if (distance <= fullDamageRange) return 1
+  const progress = clamp(
+    (distance - fullDamageRange) / (maxRange - fullDamageRange),
+    0,
+    1,
+  )
+  return 1 + (minDamageMultiplierAtMaxRange - 1) * progress
+}
+
+interface ShotgunPelletBurst {
+  point: Vector3
+  direction: Vector3
+  headshot: boolean
+}
+
+interface ShotgunBlastImpact {
+  pelletCount: number
+  totalDamage: number
+  headshot: boolean
+  knockbackImpulse: number
+  bloodBursts: ShotgunPelletBurst[]
+  flinchDirection: Vector3
+}
+
+function fireShotgun() {
+  // Hard gates, in the order the design doc lists them: shotgun in hand, the
+  // player alive with gameplay input live, a shell chambered, no reload in
+  // flight, and the previous fire-and-pump cycle fully completed.
+  if (activeWeaponId !== 'shotgun' || !shotgunReady) return
+  if (gameOver || !gameplayInputEnabled()) return
+  if (shotgunLoadedShells <= 0) return
+  if (shotgunReloadElapsed >= 0) return
+  if (shotgunShotElapsed >= 0) return
+
+  // Exactly one shell per trigger pull, and the authored SG_FPS_Shot clip IS
+  // the fire-and-pump cycle: its completion (watched below and by the clip's
+  // end observer) is what re-arms the trigger.
+  shotgunLoadedShells -= 1
+  updateAmmoDisplay()
+  shotgunShotElapsed = 0
+  playShotgunAnimation('shot')
+
+  // Muzzle flash and recoil belong to the trigger pull, not the pump. The
+  // burst is bigger than the rifle's and the camera kick is far heavier, with
+  // a small random horizontal component; the view-model shove rides the same
+  // recoilAmount channel the rifle uses and recovers through the same damping,
+  // so the barrel settles back exactly onto the crosshair.
+  const recoilScale = 1 - adsBlend * SHOTGUN_COMBAT_CONFIG.recoil.adsRecoilReduction
+  recoilAmount = Math.min(
+    SHOTGUN_COMBAT_CONFIG.recoil.viewModelKickCap,
+    recoilAmount + SHOTGUN_COMBAT_CONFIG.recoil.viewModelKick * recoilScale,
+  )
+  muzzleFlashRemaining = MUZZLE_FLASH_DURATION
+  weaponFireEffects.trigger(SHOTGUN_COMBAT_CONFIG.recoil.muzzleFlashStrength)
+  camera.cameraRotation.x -= SHOTGUN_COMBAT_CONFIG.recoil.cameraKickPitch * recoilScale
+  camera.cameraRotation.y += (Math.random() * 2 - 1)
+    * SHOTGUN_COMBAT_CONFIG.recoil.cameraKickYaw * recoilScale
+  pulseCrosshair()
+
+  // All pellets leave from the camera/crosshair line with individual random
+  // spread inside the hip/ADS cone.
+  camera.getDirectionToRef(Vector3.Forward(), shotgunAimForward)
+  camera.getDirectionToRef(Vector3.Right(), shotgunAimRight)
+  camera.getDirectionToRef(Vector3.Up(), shotgunAimUp)
+  const spreadDegrees = SHOTGUN_COMBAT_CONFIG.hipSpreadDegrees
+    + (SHOTGUN_COMBAT_CONFIG.adsSpreadDegrees - SHOTGUN_COMBAT_CONFIG.hipSpreadDegrees)
+    * adsBlend
+  const spreadRadians = spreadDegrees * Math.PI / 180
+
+  const impacts = new Map<Zombie, ShotgunBlastImpact>()
+  const diagnostics: ShotgunBlastDiagnostics = {
+    pelletRaysCast: 0,
+    pelletsIntoZombies: 0,
+    zombiesHit: 0,
+    zombiesDamaged: 0,
+    zombiesKilled: 0,
+    targetPellets: 0,
+    blockedPellets: 0,
+    missedPellets: 0,
+    headshot: false,
+    totalDamage: 0,
+    averageFalloff: 0,
+    maxKnockbackImpulse: 0,
+  }
+  let falloffSum = 0
+
+  for (let pellet = 0; pellet < SHOTGUN_COMBAT_CONFIG.pelletsPerShot; pellet += 1) {
+    // Uniform sampling over the cone's disc, so the pattern clusters near the
+    // aim point without collapsing onto it.
+    const coneAngle = spreadRadians * Math.sqrt(Math.random())
+    const azimuth = Math.random() * Math.PI * 2
+    const radial = Math.tan(coneAngle)
+    const offsetRight = Math.cos(azimuth) * radial
+    const offsetUp = Math.sin(azimuth) * radial
+    shotgunPelletRay.origin.copyFrom(camera.globalPosition)
+    shotgunPelletRay.direction.set(
+      shotgunAimForward.x + shotgunAimRight.x * offsetRight + shotgunAimUp.x * offsetUp,
+      shotgunAimForward.y + shotgunAimRight.y * offsetRight + shotgunAimUp.y * offsetUp,
+      shotgunAimForward.z + shotgunAimRight.z * offsetRight + shotgunAimUp.z * offsetUp,
+    )
+    shotgunPelletRay.direction.normalize()
+    shotgunPelletRay.length = SHOTGUN_COMBAT_CONFIG.maxRange
+
+    // One independent closest-hit raycast per pellet. Because a ray resolves
+    // to a single nearest pickable mesh, one pellet can only ever touch one
+    // hit zone of one zombie, so overlapping head/torso/limb volumes can
+    // never double-count it -- while separate pellets remain free to land on
+    // the same zombie. View-model weapon and arm meshes are not pickable, and
+    // the first blocking wall or prop simply wins the pick.
+    diagnostics.pelletRaysCast += 1
+    const result = scene.pickWithRay(shotgunPelletRay)
+    if (!result?.hit || !result.pickedMesh) {
+      diagnostics.missedPellets += 1
+      continue
+    }
+
+    const zombieHit = zombieHitZones.get(result.pickedMesh as Mesh)
+    if (!zombieHit) {
+      const target = targets.get(result.pickedMesh as Mesh)
+      if (target) {
+        hitTarget(target)
+        diagnostics.targetPellets += 1
+      } else {
+        diagnostics.blockedPellets += 1
+      }
+      continue
+    }
+
+    const falloff = shotgunDamageFalloff(result.distance)
+    const headshot = zombieHit.zone === 'head'
+    const pelletDamage = SHOTGUN_COMBAT_CONFIG.damagePerPellet
+      * SHOTGUN_COMBAT_CONFIG.zoneDamageMultipliers[zombieHit.zone]
+      * falloff
+    let impact = impacts.get(zombieHit.zombie)
+    if (!impact) {
+      impact = {
+        pelletCount: 0,
+        totalDamage: 0,
+        headshot: false,
+        knockbackImpulse: 0,
+        bloodBursts: [],
+        flinchDirection: Vector3.Zero(),
+      }
+      impacts.set(zombieHit.zombie, impact)
+    }
+    impact.pelletCount += 1
+    impact.totalDamage += pelletDamage
+    impact.headshot ||= headshot
+    impact.knockbackImpulse += SHOTGUN_COMBAT_CONFIG.knockback.impulsePerPellet * falloff
+    impact.flinchDirection.addInPlace(shotgunPelletRay.direction)
+    diagnostics.pelletsIntoZombies += 1
+    falloffSum += falloff
+
+    // Per-pellet blood at each real impact point, capped per zombie so one
+    // blast cannot flush the shared particle pool. Head pellets take priority
+    // inside the cap so a headshot blast always bleeds like one.
+    const burst: ShotgunPelletBurst = {
+      point: result.pickedPoint?.clone() ?? result.pickedMesh.getAbsolutePosition().clone(),
+      direction: shotgunPelletRay.direction.clone(),
+      headshot,
+    }
+    if (impact.bloodBursts.length < SHOTGUN_COMBAT_CONFIG.maxBloodBurstsPerZombie) {
+      impact.bloodBursts.push(burst)
+    } else if (headshot) {
+      const replaceIndex = impact.bloodBursts.findIndex((existing) => !existing.headshot)
+      if (replaceIndex >= 0) impact.bloodBursts[replaceIndex] = burst
+    }
+  }
+
+  // Damage and knockback are settled once per zombie, after every pellet has
+  // been cast, so each zombie takes a single aggregated hit reaction and a
+  // single capped impulse instead of up to eight conflicting ones.
+  diagnostics.zombiesHit = impacts.size
+  let anyDamage = diagnostics.targetPellets > 0
+  let anyHeadshot = false
+  for (const [zombie, impact] of impacts) {
+    if (impact.flinchDirection.lengthSquared() < 0.000001) {
+      impact.flinchDirection.copyFrom(shotgunAimForward)
+    }
+    impact.flinchDirection.normalize()
+    const damaged = zombie.applyShotgunBlast(
+      impact.totalDamage,
+      impact.headshot,
+      impact.flinchDirection,
+      SHOTGUN_COMBAT_CONFIG.knockback.staggerSeconds,
+    )
+    if (!damaged) continue
+    diagnostics.zombiesDamaged += 1
+    diagnostics.totalDamage += impact.totalDamage
+    anyDamage = true
+    if (impact.headshot) anyHeadshot = true
+
+    // Head bursts spawn last so the strongest burst is the one that reads as
+    // the defining hit of the blast.
+    impact.bloodBursts.sort((a, b) => Number(a.headshot) - Number(b.headshot))
+    for (const burst of impact.bloodBursts) {
+      bloodEffectPool.spawn(burst.point, burst.direction, burst.headshot)
+    }
+
+    if (zombie.eliminated) {
+      // Death handling stays exactly as authored: a killed zombie plays its
+      // death where it stands and never takes the impulse.
+      diagnostics.zombiesKilled += 1
+      continue
+    }
+    const impulse = Math.min(
+      SHOTGUN_COMBAT_CONFIG.knockback.maxImpulse,
+      impact.knockbackImpulse,
+    )
+    if (impulse < SHOTGUN_COMBAT_CONFIG.knockback.minimumImpulse) continue
+    // Push straight away from the shooter on the ground plane.
+    zombie.applyKnockback(
+      zombie.root.position.x - camera.globalPosition.x,
+      zombie.root.position.z - camera.globalPosition.z,
+      impulse,
+    )
+    diagnostics.maxKnockbackImpulse = Math.max(diagnostics.maxKnockbackImpulse, impulse)
+  }
+
+  // Shared feedback fires once per blast, not once per pellet.
+  if (anyDamage) showHitMarker()
+  if (anyHeadshot) {
+    showHeadshotIndicator()
+    camera.cameraRotation.x -= 0.0035
+    camera.cameraRotation.y += (Math.random() - 0.5) * 0.004
+  }
+  diagnostics.headshot = anyHeadshot
+  diagnostics.averageFalloff = diagnostics.pelletsIntoZombies > 0
+    ? falloffSum / diagnostics.pelletsIntoZombies
+    : 0
+  lastShotgunBlast = diagnostics
+}
+
+// Fire and reload requests route to the selected weapon only, so no AK ammo,
+// animation, recoil or callback can ever run while the shotgun is in hand,
+// and vice versa. Both the desktop bindings and the mobile buttons call these.
+fireWeapon = () => {
+  if (activeWeaponId === 'shotgun') fireShotgun()
+  else fire()
+}
+reloadWeapon = () => {
+  if (activeWeaponId === 'shotgun') beginShotgunReload()
+  else beginReload()
+}
 
 function capturePointerSafely(element: HTMLElement, pointerId: number) {
   try {
@@ -5405,6 +6055,13 @@ function restartPrototype() {
   reserveAmmo = 120
   reloadElapsed = -1
   reloadApplied = false
+  // The shotgun restarts on its configured loadout with no reload or pump
+  // cycle in flight; an interrupted reload transfers nothing.
+  cancelShotgunReload()
+  cancelShotgunShotCycle()
+  shotgunLoadedShells = SHOTGUN_COMBAT_CONFIG.startingLoadedShells
+  shotgunReserveShells = SHOTGUN_COMBAT_CONFIG.startingReserveShells
+  lastShotgunBlast = null
   recoilAmount = 0
   muzzleFlashRemaining = 0
   weaponFireEffects.reset()
@@ -5494,6 +6151,7 @@ scene.onBeforeRenderObservable.add(() => {
   )
   previousCameraPosition.copyFrom(camera.position)
   const moving = deployed && horizontalMovement > 0.0005
+  playerIsMoving = moving
   bobBlend = damp(bobBlend, moving ? 1 : 0, 8, deltaSeconds)
   if (moving) bobTime += deltaSeconds * 8.2
 
@@ -5525,6 +6183,39 @@ scene.onBeforeRenderObservable.add(() => {
       // The AnimationGroup end observable is authoritative. This duration-based
       // watchdog prevents a suspended/malformed clip from locking reload state.
       completeReload()
+    }
+  }
+
+  // Shotgun cycle clocks. The authored end observers are authoritative here
+  // too; these watchdogs only stop a stalled clip from wedging the trigger or
+  // the reload, mirroring the rifle's pattern above.
+  if (shotgunShotElapsed >= 0) {
+    shotgunShotElapsed += deltaSeconds
+    if (shotgunShotElapsed
+      >= shotgunShotDurationSeconds + RELOAD_COMPLETION_GRACE_SECONDS) {
+      completeShotgunShotCycle()
+    }
+  }
+  if (shotgunReloadElapsed >= 0) {
+    shotgunReloadElapsed += deltaSeconds
+    if (shotgunReloadElapsed
+      >= shotgunReloadDurationSeconds + RELOAD_COMPLETION_GRACE_SECONDS) {
+      completeShotgunReload()
+    }
+  }
+
+  // Locomotion loop for the shotgun's rest state: the authored walk while the
+  // player moves, idle when standing. Never while a shot or reload is playing,
+  // so those clips can never be overridden by the loop.
+  if (activeWeaponId === 'shotgun'
+    && shotgunReady
+    && shotgunShotElapsed < 0
+    && shotgunReloadElapsed < 0) {
+    const desiredRest = (playerIsMoving ? shotgunClips.walk : null)
+      ?? shotgunClips.idle
+      ?? shotgunRestAnimation
+    if (desiredRest && activeShotgunAnimation !== desiredRest) {
+      playShotgunRestAnimation()
     }
   }
 
@@ -5739,16 +6430,30 @@ if (import.meta.env.DEV) {
           sceneMeshCount: scene.meshes.length,
           sceneSkeletonCount: scene.skeletons.length,
           sceneTransformNodeCount: scene.transformNodes.length,
+          hudAmmoText: ammoDisplay.textContent,
+          lastShotgunBlast: lastShotgunBlast ? { ...lastShotgunBlast } : null,
           shotgunActiveAnimation: canvas.dataset.shotgunActiveAnimation ?? 'none',
+          shotgunAmmo: `${shotgunLoadedShells}/${shotgunReserveShells}`,
           shotgunAnimationGroupCount: shotgunAnimationGroups.length,
           shotgunBoneCount: Number(canvas.dataset.shotgunBoneCount ?? 0),
           shotgunClipNames: canvas.dataset.shotgunClipNames ?? 'none',
           shotgunEnabled: Boolean(shotgunRoot?.isEnabled()),
+          shotgunEndObserverCounts: {
+            idle: shotgunClips.idle?.onAnimationGroupEndObservable.observers.length ?? 0,
+            walk: shotgunClips.walk?.onAnimationGroupEndObservable.observers.length ?? 0,
+            shot: shotgunClips.shot?.onAnimationGroupEndObservable.observers.length ?? 0,
+            reload: shotgunClips.reload?.onAnimationGroupEndObservable.observers.length ?? 0,
+          },
           shotgunHierarchyNodeCount: Number(canvas.dataset.shotgunHierarchyNodeCount ?? 0),
           shotgunMeshCount: Number(canvas.dataset.shotgunMeshCount ?? 0),
           shotgunReady: canvas.dataset.shotgunReady,
+          shotgunReloadDuration: shotgunReloadDurationSeconds,
+          shotgunReloadElapsed,
+          shotgunResolvedClips: canvas.dataset.shotgunResolvedClips ?? 'none',
           shotgunRestAnimation: canvas.dataset.shotgunRestAnimation ?? 'none',
           shotgunSceneMeshCount: shotgunMeshes.length,
+          shotgunShotDuration: shotgunShotDurationSeconds,
+          shotgunShotElapsed,
           shotgunSkeletonCount: Number(canvas.dataset.shotgunSkeletonCount ?? 0),
           weaponSwitchCount,
           zombieAnimationMapping: canvas.dataset.zombieAnimationMapping ?? 'none',
@@ -5791,7 +6496,83 @@ if (import.meta.env.DEV) {
             },
             state: zombie.state,
             upperBodyPush: zombie.upperBodyPushAmount,
+            knockback: zombie.knockbackAmount,
           })),
+        }
+      },
+      fire() {
+        fireWeapon()
+      },
+      reload() {
+        reloadWeapon()
+      },
+      inputGates() {
+        return {
+          isDesktop,
+          isTouchDevice,
+          gameReady,
+          deployed,
+          webViewActive,
+          portraitInputPaused,
+          gameOver,
+          gameplayInputEnabled: gameplayInputEnabled(),
+        }
+      },
+      // Reports the shotgun barrel tip in viewModelPivot space so the harness
+      // can verify the configured muzzle flash anchor against the real posed
+      // geometry. Skinned positions are read through getPositionData, which
+      // applies the current bone pose without mutating any vertex buffer; the
+      // farthest +Z slice across every shotgun mesh is the muzzle ring.
+      measureShotgunMuzzle() {
+        if (shotgunMeshes.length === 0) return { error: 'no-mesh', meshNames: [] }
+        viewModelPivot.computeWorldMatrix(true)
+        const pivotInverse = viewModelPivot.getWorldMatrix().clone().invert()
+        const vertex = Vector3.Zero()
+        const transformed = Vector3.Zero()
+        const meshData: { positions: Float32Array | number[]; toPivot: Matrix }[] = []
+        for (const mesh of shotgunMeshes) {
+          if (!(mesh instanceof Mesh) || mesh.getTotalVertices() === 0) continue
+          const positions = mesh.getPositionData(true, false)
+          if (!positions) continue
+          mesh.computeWorldMatrix(true)
+          meshData.push({
+            positions,
+            toPivot: mesh.getWorldMatrix().multiply(pivotInverse),
+          })
+        }
+        if (meshData.length === 0) {
+          return { error: 'no-positions', meshNames: shotgunMeshes.map((mesh) => mesh.name) }
+        }
+        let maxZ = Number.NEGATIVE_INFINITY
+        for (const { positions, toPivot } of meshData) {
+          for (let index = 0; index < positions.length; index += 3) {
+            vertex.copyFromFloats(positions[index], positions[index + 1], positions[index + 2])
+            Vector3.TransformCoordinatesToRef(vertex, toPivot, transformed)
+            if (transformed.z > maxZ) maxZ = transformed.z
+          }
+        }
+        let frontCount = 0
+        let sumX = 0
+        let sumY = 0
+        let sumZ = 0
+        for (const { positions, toPivot } of meshData) {
+          for (let index = 0; index < positions.length; index += 3) {
+            vertex.copyFromFloats(positions[index], positions[index + 1], positions[index + 2])
+            Vector3.TransformCoordinatesToRef(vertex, toPivot, transformed)
+            if (transformed.z <= maxZ - 0.03) continue
+            frontCount += 1
+            sumX += transformed.x
+            sumY += transformed.y
+            sumZ += transformed.z
+          }
+        }
+        if (frontCount === 0) return { error: 'no-front-vertices', meshNames: [], maxZ }
+        const configured = SHOTGUN_COMBAT_CONFIG.muzzleOffset
+        return {
+          measured: { x: sumX / frontCount, y: sumY / frontCount, z: sumZ / frontCount },
+          configured: { x: configured.x, y: configured.y, z: configured.z },
+          frontVertexCount: frontCount,
+          maxZ,
         }
       },
       damagePlayer(amount: number, zombieIndex = 0) {
