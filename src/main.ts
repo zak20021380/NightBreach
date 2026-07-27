@@ -14,6 +14,7 @@ import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imagePro
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial'
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial'
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture'
+import { Space } from '@babylonjs/core/Maths/math.axis'
 import { Color3, Color4 } from '@babylonjs/core/Maths/math.color'
 import { Frustum } from '@babylonjs/core/Maths/math.frustum'
 import { type Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector'
@@ -2094,6 +2095,11 @@ class Zombie {
   private deathImpulseSpeed = 0
   private deathImpulseRemaining = 0
   private pendingDeathImpulseMinimumSpeed = 0
+  private readonly deathBackFallAxis = Vector3.Right()
+  private readonly deathBackFallForward = Vector3.Forward()
+  private deathBackFallActive = false
+  private deathBackFallElapsed = 0
+  private deathBackFallAppliedAngle = 0
   private attackElapsed = 0
   private attackCooldownRemaining = 0
   private attackDamageApplied = false
@@ -2242,6 +2248,23 @@ class Zombie {
     return this.deathImpulseSpeed
   }
 
+  get deathBackFallAngle() {
+    return this.deathBackFallAppliedAngle
+  }
+
+  get chestUpAmount() {
+    if (this.disposed || this.visual.root.isDisposed()) return 0
+    this.visual.root.computeWorldMatrix(true)
+    Vector3.TransformNormalToRef(
+      Vector3.Forward(),
+      this.visual.root.getWorldMatrix(),
+      this.deathBackFallForward,
+    )
+    if (this.deathBackFallForward.lengthSquared() < 0.000001) return 0
+    this.deathBackFallForward.normalize()
+    return this.deathBackFallForward.y
+  }
+
   private applyDamage(
     damage: number,
     headshot: boolean,
@@ -2311,6 +2334,7 @@ class Zombie {
 
     if (this._state === 'dead') {
       this.updateDeathImpulse(deltaSeconds)
+      this.updateDeathBackFall(deltaSeconds)
       this.deathElapsed += deltaSeconds
       this.updateProceduralAnimation(deltaSeconds)
       if (this.deathElapsed >= (
@@ -2584,6 +2608,7 @@ class Zombie {
       )
       this.deathImpulseRemaining = SHOTGUN_COMBAT_CONFIG.knockback.deathDurationSeconds
       this.root.checkCollisions = true
+      this.beginDeathBackFall()
     } else {
       this.root.checkCollisions = false
     }
@@ -2614,6 +2639,57 @@ class Zombie {
     this.knockbackRemaining = 0
     this.pendingDeathImpulseMinimumSpeed = 0
     this.root.checkCollisions = false
+  }
+
+  private beginDeathBackFall() {
+    // The imported character's configured face/chest axis is +Z, but derive
+    // its current world direction from the live hierarchy so yaw, future asset
+    // corrections, and either visual factory cannot invert the fall.
+    this.visual.root.computeWorldMatrix(true)
+    Vector3.TransformNormalToRef(
+      Vector3.Forward(),
+      this.visual.root.getWorldMatrix(),
+      this.deathBackFallForward,
+    )
+    this.deathBackFallForward.y = 0
+    if (this.deathBackFallForward.lengthSquared() < 0.000001) return
+    this.deathBackFallForward.normalize()
+
+    // Rotating around forward x up takes the measured chest direction toward
+    // +Y. That places the measured back direction toward the ground without a
+    // guessed Euler sign.
+    Vector3.CrossToRef(
+      this.deathBackFallForward,
+      Vector3.Up(),
+      this.deathBackFallAxis,
+    )
+    if (this.deathBackFallAxis.lengthSquared() < 0.000001) return
+    this.deathBackFallAxis.normalize()
+    this.deathBackFallActive = true
+    this.deathBackFallElapsed = 0
+    this.deathBackFallAppliedAngle = 0
+  }
+
+  private updateDeathBackFall(deltaSeconds: number) {
+    if (!this.deathBackFallActive) return
+    const { deathBackFallDurationSeconds, deathBackFallAngleRadians } =
+      SHOTGUN_COMBAT_CONFIG.knockback
+    this.deathBackFallElapsed = Math.min(
+      deathBackFallDurationSeconds,
+      this.deathBackFallElapsed + deltaSeconds,
+    )
+    const progress = clamp(
+      this.deathBackFallElapsed / deathBackFallDurationSeconds,
+      0,
+      1,
+    )
+    const easedProgress = progress * progress * (3 - 2 * progress)
+    const nextAngle = deathBackFallAngleRadians * easedProgress
+    const angleStep = nextAngle - this.deathBackFallAppliedAngle
+    if (angleStep > 0.000001) {
+      this.visual.root.rotate(this.deathBackFallAxis, angleStep, Space.WORLD)
+      this.deathBackFallAppliedAngle = nextAngle
+    }
   }
 
   private getDeathAnimationDuration() {
@@ -3000,7 +3076,9 @@ class Zombie {
   }
 
   private updateProceduralAnimation(deltaSeconds: number) {
-    if (this._state === 'dead' && !this.visual.animations.death) {
+    if (this._state === 'dead'
+      && !this.visual.animations.death
+      && !this.deathBackFallActive) {
       this.visual.root.rotation.x = Math.min(
         this.proceduralBaseRotationX + Math.PI * 0.48,
         this.visual.root.rotation.x + deltaSeconds * 1.6,
@@ -3585,6 +3663,8 @@ const SHOTGUN_COMBAT_CONFIG = {
     deathDurationSeconds: 0.9,
     deathDecayPerSecond: 2,
     deathMaxSpeed: 11.2,
+    deathBackFallDurationSeconds: 0.78,
+    deathBackFallAngleRadians: 82 * Math.PI / 180,
   },
   // Blood bursts per zombie per blast. Every pellet still deals damage; the cap
   // only keeps eight simultaneous bursts from churning the pooled particles.
@@ -6624,6 +6704,8 @@ if (import.meta.env.DEV) {
             upperBodyPush: zombie.upperBodyPushAmount,
             knockback: zombie.knockbackAmount,
             deathKnockback: zombie.deathImpulseAmount,
+            deathBackFallAngle: zombie.deathBackFallAngle,
+            chestUp: zombie.chestUpAmount,
           })),
         }
       },

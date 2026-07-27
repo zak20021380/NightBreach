@@ -463,10 +463,18 @@ async function runDesktopPass() {
       const api = window.__nightBreachTest
       while (api.snapshot().zombies[0].health > 20) api.hitZombie(0, 'limbs')
       api.setPlayerPosition(0, -10)
-      api.setZombiePosition(0, 0, -8)
+      api.setZombiePosition(0, 0, -5)
       api.setCameraRotation(0.2, 0)
     })()`)
+    await cdp.waitForExpression(
+      'window.__nightBreachTest.zombieFacingDot(0) > 0.95',
+      3_000,
+      'zombie facing player before lethal blast',
+    )
+    await cdp.evaluate('window.__nightBreachTest.setZombiePosition(0, 0, -8)')
     const beforeLethalBlast = await snapshot(cdp)
+    assert(await cdp.evaluate('window.__nightBreachTest.zombieFacingDot(0) > 0.95'),
+      'The lethal shotgun orientation test was not staged from the zombie front.')
     await fireDesktop(cdp)
     const lethalBlast = await snapshot(cdp)
     assert(lethalBlast.lastShotgunBlast.pelletsIntoZombies === 8,
@@ -493,11 +501,17 @@ async function runDesktopPass() {
       - beforeLethalBlast.zombies[0].position.z
     assert(lethalDisplacement >= 3 && lethalDisplacement <= 5,
       `Lethal close blast displacement was outside 3–5 units: ${lethalDisplacement}.`)
+    assert(killed.zombies[0].deathBackFallAngle > 1.4
+      && killed.zombies[0].deathBackFallAngle < 1.5,
+    `Lethal shotgun back-fall angle was not settled: ${killed.zombies[0].deathBackFallAngle}.`)
+    assert(killed.zombies[0].chestUp > 0.9,
+      `Shotgun-killed zombie landed chest-down instead of on its back: ${killed.zombies[0].chestUp}.`)
     assert(killed.zombies[0].knockback === 0,
       'The death impulse did not settle.')
     console.log(
       `shotgun-smoke: lethal 8-pellet blast displaced corpse `
-      + `${lethalDisplacement.toFixed(3)} units`,
+      + `${lethalDisplacement.toFixed(3)} units and settled chest-up `
+      + `${killed.zombies[0].chestUp.toFixed(3)}`,
     )
     await waitForPumpCycleComplete(cdp)
     const corpsePosition = killed.zombies[0].position
