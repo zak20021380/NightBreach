@@ -1,6 +1,7 @@
 import './style.css'
 import { type AnimationGroup } from '@babylonjs/core/Animations/animationGroup'
 import { type AssetContainer } from '@babylonjs/core/assetContainer'
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer'
 import { TargetCamera } from '@babylonjs/core/Cameras/targetCamera'
 import { UniversalCamera } from '@babylonjs/core/Cameras/universalCamera'
 import '@babylonjs/core/Collisions/collisionCoordinator'
@@ -22,6 +23,7 @@ import { type AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh'
 import '@babylonjs/core/Meshes/instancedMesh'
 import { Mesh } from '@babylonjs/core/Meshes/mesh'
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder'
+import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData'
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode'
 import { Scene } from '@babylonjs/core/scene'
 import {
@@ -433,6 +435,7 @@ function damagePlayer(amount: number, attackerPosition: Vector3) {
   reloadButton.disabled = true
   muzzleFlashRemaining = 0
   weaponFireEffects.reset()
+  shotgunShellEjectionPool?.reset()
   stopCameraControls()
   document.body.classList.add('game-over')
   retryOverlay.setAttribute('aria-hidden', 'false')
@@ -4589,7 +4592,7 @@ class WeaponFireEffects {
     this.light.position.z += 0.2
   }
 
-  trigger(strength: number) {
+  trigger(strength: number, ejectRifleCasing = true) {
     this.flashStrength = clamp(strength, 0.55, 1.25)
     this.flashRemaining = MUZZLE_FLASH_DURATION
     this.flashSpin = Math.random() * Math.PI * 2
@@ -4601,7 +4604,7 @@ class WeaponFireEffects {
     camera.cameraRotation.y += (Math.random() - 0.5) * 0.0056 * this.flashStrength
 
     this.spawnSmokePuff()
-    this.ejectShell()
+    if (ejectRifleCasing) this.ejectShell()
   }
 
   reset() {
@@ -5238,6 +5241,269 @@ equipWeapon = () => {
 
 let disposeShotgunResources: (() => void) | null = null
 
+const SHOTGUN_SHELL_EJECTION_CONFIG = {
+  authoredOffsetSeconds: SHOTGUN_AUDIO_CONFIG.pumpOffsetSeconds,
+  capacity: isLowEndMobile ? 3 : isMobile ? 4 : 5,
+  lifetimeSeconds: 2.6,
+  shellLength: 0.063,
+  groundClearance: 0.012,
+  gravity: 9.4,
+  portOffset: {
+    forward: 0.34,
+    right: 0.14,
+    up: -0.1,
+  },
+} as const
+canvas.dataset.shotgunShellEjectionTiming = (
+  SHOTGUN_SHELL_EJECTION_CONFIG.authoredOffsetSeconds
+  / Math.max(0.001, Math.abs(SHOTGUN_ASSET_CONFIG.animationSpeed))
+).toFixed(6)
+canvas.dataset.shotgunShellPoolCapacity = String(SHOTGUN_SHELL_EJECTION_CONFIG.capacity)
+
+interface SpentShotgunShell {
+  active: boolean
+  age: number
+  mesh: Mesh
+  velocity: Vector3
+  spin: Vector3
+}
+
+// The GLB shell is skinned to 12ge_low_062, so a direct clone would keep
+// following the reload bone. Bake that small reference once into a centered,
+// static prototype instead; pooled clones then share one geometry and the
+// authored 12ge material without retaining a skeleton or allocating per shot.
+class ShotgunShellEjectionPool {
+  private readonly shells: SpentShotgunShell[] = []
+  private readonly forward = Vector3.Zero()
+  private readonly right = Vector3.Zero()
+  private readonly up = Vector3.Zero()
+  private readonly spawnPosition = Vector3.Zero()
+  private readonly removeUpdateObserver: () => void
+  private fallbackMaterial: SurfaceMaterial | null = null
+  private nextShell = 0
+
+  constructor(reference: Mesh | null) {
+    const prototype = reference
+      ? this.createPrototypeFromReference(reference)
+      : this.createFallbackPrototype()
+
+    for (let index = 0; index < SHOTGUN_SHELL_EJECTION_CONFIG.capacity; index += 1) {
+      const mesh = index === 0
+        ? prototype
+        : prototype.clone(`spentShotgunShell${index}`, null, true)
+      mesh.name = `spentShotgunShell${index}`
+      mesh.parent = null
+      mesh.skeleton = null
+      mesh.isPickable = false
+      mesh.checkCollisions = false
+      mesh.receiveShadows = false
+      mesh.layerMask = WORLD_RENDER_LAYER_MASK
+      mesh.renderingGroupId = 0
+      mesh.alwaysSelectAsActiveMesh = false
+      mesh.isVisible = false
+      this.shells.push({
+        active: false,
+        age: 0,
+        mesh,
+        velocity: Vector3.Zero(),
+        spin: Vector3.Zero(),
+      })
+    }
+
+    const observer = scene.onBeforeRenderObservable.add(() => {
+      this.update(Math.min(engine.getDeltaTime() / 1000, 0.05))
+    })
+    this.removeUpdateObserver = () => {
+      scene.onBeforeRenderObservable.remove(observer)
+    }
+  }
+
+  private createPrototypeFromReference(reference: Mesh) {
+    const sourcePositions = reference.getPositionData(true, true)
+    const sourceIndices = reference.getIndices()
+    if (!sourcePositions || sourcePositions.length < 9 || !sourceIndices) {
+      throw new Error('The authored shotgun shell mesh did not expose usable geometry.')
+    }
+
+    const positions = Array.from(sourcePositions)
+    let minimumX = Number.POSITIVE_INFINITY
+    let minimumY = Number.POSITIVE_INFINITY
+    let minimumZ = Number.POSITIVE_INFINITY
+    let maximumX = Number.NEGATIVE_INFINITY
+    let maximumY = Number.NEGATIVE_INFINITY
+    let maximumZ = Number.NEGATIVE_INFINITY
+    for (let index = 0; index < positions.length; index += 3) {
+      minimumX = Math.min(minimumX, positions[index])
+      minimumY = Math.min(minimumY, positions[index + 1])
+      minimumZ = Math.min(minimumZ, positions[index + 2])
+      maximumX = Math.max(maximumX, positions[index])
+      maximumY = Math.max(maximumY, positions[index + 1])
+      maximumZ = Math.max(maximumZ, positions[index + 2])
+    }
+
+    const centerX = (minimumX + maximumX) * 0.5
+    const centerY = (minimumY + maximumY) * 0.5
+    const centerZ = (minimumZ + maximumZ) * 0.5
+    const longestSide = Math.max(
+      maximumX - minimumX,
+      maximumY - minimumY,
+      maximumZ - minimumZ,
+    )
+    if (!Number.isFinite(longestSide) || longestSide <= 0) {
+      throw new Error('The authored shotgun shell mesh returned invalid bounds.')
+    }
+    const authoredScale = SHOTGUN_SHELL_EJECTION_CONFIG.shellLength / longestSide
+    for (let index = 0; index < positions.length; index += 3) {
+      positions[index] = (positions[index] - centerX) * authoredScale
+      positions[index + 1] = (positions[index + 1] - centerY) * authoredScale
+      positions[index + 2] = (positions[index + 2] - centerZ) * authoredScale
+    }
+
+    const vertexData = new VertexData()
+    vertexData.positions = positions
+    vertexData.indices = Array.from(sourceIndices)
+    const sourceNormals = reference.getNormalsData(true, true)
+    if (sourceNormals?.length === positions.length) {
+      vertexData.normals = Array.from(sourceNormals)
+    }
+    const sourceUvs = reference.getVerticesData(VertexBuffer.UVKind)
+    if (sourceUvs) vertexData.uvs = Array.from(sourceUvs)
+
+    const prototype = new Mesh('spentShotgunShell0', scene)
+    vertexData.applyToMesh(prototype, false)
+    if (reference.material) {
+      prototype.material = reference.material
+    } else {
+      this.fallbackMaterial = this.createFallbackMaterial()
+      prototype.material = this.fallbackMaterial
+    }
+    canvas.dataset.shotgunShellSource = `${reference.name}:${reference.material?.name ?? 'fallback-material'}`
+    return prototype
+  }
+
+  private createFallbackMaterial() {
+    return createMaterial(
+      'spentShotgunShellFallbackMaterial',
+      Color3.FromHexString('#8d291f'),
+      0.48,
+      0.18,
+    )
+  }
+
+  private createFallbackPrototype() {
+    this.fallbackMaterial = this.createFallbackMaterial()
+    const prototype = MeshBuilder.CreateCylinder('spentShotgunShell0', {
+      height: SHOTGUN_SHELL_EJECTION_CONFIG.shellLength,
+      diameter: 0.021,
+      tessellation: 8,
+    }, scene)
+    prototype.material = this.fallbackMaterial
+    canvas.dataset.shotgunShellSource = 'procedural-fallback'
+    return prototype
+  }
+
+  eject() {
+    const shell = this.shells[this.nextShell]
+    this.nextShell = (this.nextShell + 1) % this.shells.length
+
+    camera.getDirectionToRef(Vector3.Forward(), this.forward)
+    camera.getDirectionToRef(Vector3.Right(), this.right)
+    camera.getDirectionToRef(Vector3.Up(), this.up)
+    const port = SHOTGUN_SHELL_EJECTION_CONFIG.portOffset
+    this.spawnPosition.copyFrom(camera.position)
+    this.spawnPosition.addInPlaceFromFloats(
+      this.forward.x * port.forward + this.right.x * port.right + this.up.x * port.up,
+      this.forward.y * port.forward + this.right.y * port.right + this.up.y * port.up,
+      this.forward.z * port.forward + this.right.z * port.right + this.up.z * port.up,
+    )
+
+    const rightPower = 2.15 + Math.random() * 0.65
+    const upPower = 1.65 + Math.random() * 0.55
+    const forwardPower = 0.12 + Math.random() * 0.28
+    shell.active = true
+    shell.age = 0
+    shell.velocity.set(
+      this.right.x * rightPower + this.up.x * upPower + this.forward.x * forwardPower,
+      this.right.y * rightPower + this.up.y * upPower + this.forward.y * forwardPower,
+      this.right.z * rightPower + this.up.z * upPower + this.forward.z * forwardPower,
+    )
+    shell.spin.set(
+      (Math.random() - 0.5) * 24,
+      (Math.random() - 0.5) * 18,
+      (Math.random() - 0.5) * 28,
+    )
+    shell.mesh.position.copyFrom(this.spawnPosition)
+    shell.mesh.rotation.set(
+      Math.random() * Math.PI,
+      Math.random() * Math.PI,
+      Math.random() * Math.PI,
+    )
+    shell.mesh.visibility = 1
+    shell.mesh.isVisible = true
+  }
+
+  reset() {
+    for (const shell of this.shells) {
+      shell.active = false
+      shell.mesh.isVisible = false
+    }
+  }
+
+  dispose() {
+    this.removeUpdateObserver()
+    for (const shell of this.shells) shell.mesh.dispose(false, false)
+    this.shells.length = 0
+    this.fallbackMaterial?.dispose()
+    this.fallbackMaterial = null
+  }
+
+  private update(deltaSeconds: number) {
+    const lifetime = SHOTGUN_SHELL_EJECTION_CONFIG.lifetimeSeconds
+    const groundY = SHOTGUN_SHELL_EJECTION_CONFIG.groundClearance
+    for (const shell of this.shells) {
+      if (!shell.active) continue
+      shell.age += deltaSeconds
+      if (shell.age >= lifetime) {
+        shell.active = false
+        shell.mesh.isVisible = false
+        continue
+      }
+
+      shell.velocity.y -= SHOTGUN_SHELL_EJECTION_CONFIG.gravity * deltaSeconds
+      shell.velocity.scaleInPlace(Math.max(0, 1 - 0.55 * deltaSeconds))
+      shell.mesh.position.addInPlaceFromFloats(
+        shell.velocity.x * deltaSeconds,
+        shell.velocity.y * deltaSeconds,
+        shell.velocity.z * deltaSeconds,
+      )
+      shell.mesh.rotation.addInPlaceFromFloats(
+        shell.spin.x * deltaSeconds,
+        shell.spin.y * deltaSeconds,
+        shell.spin.z * deltaSeconds,
+      )
+
+      if (shell.mesh.position.y <= groundY) {
+        shell.mesh.position.y = groundY
+        if (shell.velocity.y < -0.25) {
+          shell.velocity.y *= -0.28
+          shell.velocity.x *= 0.72
+          shell.velocity.z *= 0.72
+          shell.spin.scaleInPlace(0.7)
+        } else {
+          shell.velocity.y = 0
+          shell.velocity.x *= Math.max(0, 1 - 5 * deltaSeconds)
+          shell.velocity.z *= Math.max(0, 1 - 5 * deltaSeconds)
+          shell.spin.scaleInPlace(Math.max(0, 1 - 4 * deltaSeconds))
+        }
+      }
+
+      shell.mesh.visibility = clamp((lifetime - shell.age) / 0.35, 0, 1)
+    }
+  }
+}
+
+let shotgunShellEjectionPool: ShotgunShellEjectionPool | null = null
+
 // The authored clips this phase drives. Resolved once at load; null entries
 // mean the GLB changed, in which case the duration fallbacks keep firing and
 // reloading functional (without inventing procedural animations).
@@ -5261,6 +5527,7 @@ let shotgunShotElapsed = -1
 let shotgunReloadElapsed = -1
 let shotgunShotDurationSeconds = SHOTGUN_COMBAT_CONFIG.shotCycleFallbackSeconds
 let shotgunReloadDurationSeconds = SHOTGUN_COMBAT_CONFIG.reloadFallbackSeconds
+let shotgunShellEjectedForCycle = false
 
 // Mirrors the bob "moving" state so the shotgun can hold its authored walk
 // loop while the player moves. Written once per frame by the view-model tick.
@@ -5374,6 +5641,7 @@ function handleShotgunAnimationEnd(animation: AnimationGroup) {
 function completeShotgunShotCycle() {
   if (shotgunShotElapsed < 0) return
   shotgunShotElapsed = -1
+  shotgunShellEjectedForCycle = false
   const shot = shotgunClips.shot
   if (activeShotgunAnimation === shot) activeShotgunAnimation = null
   if (shot?.isStarted) shot.stop(true)
@@ -5388,6 +5656,7 @@ function completeShotgunShotCycle() {
 function cancelShotgunShotCycle() {
   if (shotgunShotElapsed < 0) return
   shotgunShotElapsed = -1
+  shotgunShellEjectedForCycle = false
   const shot = shotgunClips.shot
   if (activeShotgunAnimation === shot) activeShotgunAnimation = null
   if (shot?.isStarted) shot.stop(true)
@@ -5615,7 +5884,27 @@ async function loadLocalShotgunModel(parent: TransformNode) {
       ? getImportedAnimationDurationSeconds(resolvedClips.reload, SHOTGUN_ASSET_CONFIG.animationSpeed)
       : SHOTGUN_COMBAT_CONFIG.reloadFallbackSeconds
     await shotgunAudio.preload()
+    const shellReference = modelMeshes.find((mesh): mesh is Mesh =>
+      mesh instanceof Mesh
+      && (mesh.material?.name.toLowerCase() === '12ge'
+        || mesh.name.toLowerCase().includes('object_94')),
+    ) ?? null
+    shotgunShellEjectionPool?.dispose()
+    try {
+      shotgunShellEjectionPool = new ShotgunShellEjectionPool(shellReference)
+    } catch (error) {
+      logRuntimeWarning(
+        '[Shotgun Shell] Authored shell cloning failed; using the lightweight fallback.',
+        error,
+      )
+      shotgunShellEjectionPool = new ShotgunShellEjectionPool(null)
+    }
+    const activatedShellPool = shotgunShellEjectionPool
     disposeShotgunResources = () => {
+      activatedShellPool.dispose()
+      if (shotgunShellEjectionPool === activatedShellPool) {
+        shotgunShellEjectionPool = null
+      }
       activatedEntries.dispose()
       if (!activatedRoot.isDisposed()) activatedRoot.dispose()
     }
@@ -5649,6 +5938,8 @@ async function loadLocalShotgunModel(parent: TransformNode) {
     return modelRoot
   } catch (error) {
     try {
+      shotgunShellEjectionPool?.dispose()
+      shotgunShellEjectionPool = null
       entries?.dispose()
       modelRoot?.dispose()
     } catch (disposeError) {
@@ -6079,6 +6370,7 @@ function fireShotgun() {
   shotgunLoadedShells -= 1
   updateAmmoDisplay()
   shotgunShotElapsed = 0
+  shotgunShellEjectedForCycle = false
   playShotgunAnimation('shot')
 
   // Muzzle flash and recoil belong to the trigger pull, not the pump. The
@@ -6092,7 +6384,10 @@ function fireShotgun() {
     recoilAmount + SHOTGUN_COMBAT_CONFIG.recoil.viewModelKick * recoilScale,
   )
   muzzleFlashRemaining = MUZZLE_FLASH_DURATION
-  weaponFireEffects.trigger(SHOTGUN_COMBAT_CONFIG.recoil.muzzleFlashStrength)
+  // The generic fire effect owns AK brass. The shotgun's larger spent shell
+  // stays chambered until the authored pump frame below, so suppress the
+  // immediate rifle casing here.
+  weaponFireEffects.trigger(SHOTGUN_COMBAT_CONFIG.recoil.muzzleFlashStrength, false)
   // This call shares the exact trigger point with the visible muzzle flash and
   // the pellet raycasts immediately below. It also schedules the later pump
   // cue from the same audio clock as the shot, avoiding timer/frame drift.
@@ -6528,6 +6823,7 @@ function restartPrototype() {
   recoilAmount = 0
   muzzleFlashRemaining = 0
   weaponFireEffects.reset()
+  shotgunShellEjectionPool?.reset()
   reloadButton.disabled = false
   updateAmmoDisplay()
   // Cleared here rather than further down so the retry can put the default
@@ -6654,6 +6950,15 @@ scene.onBeforeRenderObservable.add(() => {
   // the reload, mirroring the rifle's pattern above.
   if (shotgunShotElapsed >= 0) {
     shotgunShotElapsed += deltaSeconds
+    const ejectionTime = SHOTGUN_SHELL_EJECTION_CONFIG.authoredOffsetSeconds
+      / Math.max(0.001, Math.abs(SHOTGUN_ASSET_CONFIG.animationSpeed))
+    if (!shotgunShellEjectedForCycle
+      && shotgunShotElapsed >= ejectionTime
+      && activeWeaponId === 'shotgun'
+      && !gameOver) {
+      shotgunShellEjectedForCycle = true
+      shotgunShellEjectionPool?.eject()
+    }
     if (shotgunShotElapsed
       >= shotgunShotDurationSeconds + RELOAD_COMPLETION_GRACE_SECONDS) {
       completeShotgunShotCycle()
