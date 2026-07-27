@@ -305,14 +305,14 @@ try {
   await waitForHttp(`http://127.0.0.1:${serverPort}/`)
   const results = []
   results.push(await validateViewport(serverPort, {
-    expectedCapacity: 96,
+    expectedCapacity: 144,
     height: 720,
     mobile: false,
     name: 'desktop-1280x720',
     width: 1280,
   }))
   results.push(await validateViewport(serverPort, {
-    expectedCapacity: 28,
+    expectedCapacity: 42,
     height: 390,
     mobile: true,
     name: 'mobile-844x390',

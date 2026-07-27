@@ -191,9 +191,10 @@ function createSnowflakeTexture(scene: Scene) {
   const context = texture.getContext()
   context.clearRect(0, 0, 32, 32)
   const glow = context.createRadialGradient(16, 16, 1, 16, 16, 15)
-  glow.addColorStop(0, 'rgba(255,255,255,0.95)')
-  glow.addColorStop(0.32, 'rgba(238,247,255,0.72)')
-  glow.addColorStop(1, 'rgba(218,235,248,0)')
+  glow.addColorStop(0, 'rgba(255,255,255,1)')
+  glow.addColorStop(0.22, 'rgba(250,253,255,0.94)')
+  glow.addColorStop(0.52, 'rgba(232,244,255,0.66)')
+  glow.addColorStop(1, 'rgba(210,230,246,0)')
   context.fillStyle = glow
   context.fillRect(0, 0, 32, 32)
   texture.hasAlpha = true
@@ -266,9 +267,9 @@ export class WinterEnvironment {
     this.snowParticles.maxSize = WINTER_CONFIG.snow.maxSize
     this.snowParticles.emitRate = particleSettings.emitRate
     this.snowParticles.gravity = new Vector3(0, -0.12, 0)
-    this.snowParticles.color1 = new Color4(0.88, 0.94, 1, 0.58)
-    this.snowParticles.color2 = new Color4(0.74, 0.85, 0.94, 0.34)
-    this.snowParticles.colorDead = new Color4(0.7, 0.82, 0.92, 0)
+    this.snowParticles.color1 = new Color4(1, 1, 1, 0.78)
+    this.snowParticles.color2 = new Color4(0.9, 0.96, 1, 0.52)
+    this.snowParticles.colorDead = new Color4(0.84, 0.92, 1, 0)
     this.snowParticles.blendMode = ParticleSystem.BLENDMODE_STANDARD
     this.snowParticles.renderingGroupId = 0
     this.snowParticles.layerMask = worldLayerMask
