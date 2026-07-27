@@ -86,11 +86,17 @@ const WALL_HEIGHT = 3.12
 const FRONT_Z = -HOUSE_DEPTH * 0.5 + WALL_THICKNESS * 0.5
 const DOOR_CENTER_X = 1.48
 const DOOR_OPENING_WIDTH = 1.46
-const DOOR_WIDTH = 1.38
+const DOOR_WIDTH = DOOR_OPENING_WIDTH
 const DOOR_HEIGHT = 2.34
+const DOOR_PANEL_DEPTH = 0.15
 const DOOR_LEFT_X = DOOR_CENTER_X - DOOR_WIDTH * 0.5
+const DOOR_RECESS_Z = FRONT_Z - WALL_THICKNESS * 0.5 + 0.13
 const DOOR_ANIMATION_SECONDS = 0.46
 const DOOR_OPEN_ANGLE = -Math.PI * 0.53
+const FRONT_WINDOW_CENTER_X = -1.35
+const FRONT_WINDOW_CENTER_Y = 1.86
+const FRONT_WINDOW_OPENING_WIDTH = 1.82
+const FRONT_WINDOW_OPENING_HEIGHT = 1.02
 
 function worldPosition(
   transform: HouseTransform,
@@ -148,6 +154,7 @@ export function createEnterableOperationsHouse(
   const stainDetails: Mesh[] = []
   const snowDetails: Mesh[] = []
   const lampDetails: Mesh[] = []
+  const windowCavityDetails: Mesh[] = []
 
   const stainMaterial = makeAccentMaterial(
     scene,
@@ -164,6 +171,30 @@ export function createEnterableOperationsHouse(
     'operationsWarmLampGlass',
     Color3.FromHexString('#8f6d3c'),
     Color3.FromHexString('#e6a64f').scale(0.76),
+  )
+  const windowCavityMaterial = makeAccentMaterial(
+    scene,
+    'operationsWindowCavity',
+    Color3.FromHexString('#101617'),
+    Color3.FromHexString('#080c0d'),
+  )
+  const windowGlassMaterial = new PBRMaterial('operationsDirtyWindowGlass', scene)
+  windowGlassMaterial.albedoColor = Color3.FromHexString('#1d2a2c')
+  windowGlassMaterial.emissiveColor = Color3.FromHexString('#080e0f')
+  windowGlassMaterial.metallic = 0.06
+  windowGlassMaterial.roughness = 0.8
+  windowGlassMaterial.alpha = 0.84
+  windowGlassMaterial.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND
+  windowGlassMaterial.environmentIntensity = 0.3
+
+  const doorCoatingMaterial = new PBRMaterial('operationsDoorCoating', scene)
+  doorCoatingMaterial.albedoColor = Color3.FromHexString('#202825')
+  doorCoatingMaterial.metallic = 0.28
+  doorCoatingMaterial.roughness = 0.9
+  const doorWearMaterial = makeAccentMaterial(
+    scene,
+    'operationsDoorWear',
+    Color3.FromHexString('#514538'),
   )
 
   function detailBox(
@@ -287,13 +318,65 @@ export function createEnterableOperationsHouse(
   const frontRightCenter = doorOpeningRight + frontRightWidth * 0.5
   const lintelHeight = WALL_HEIGHT - DOOR_HEIGHT
   const lintelY = DOOR_HEIGHT + lintelHeight * 0.5
+  const frontWindowLeft =
+    FRONT_WINDOW_CENTER_X - FRONT_WINDOW_OPENING_WIDTH * 0.5
+  const frontWindowRight =
+    FRONT_WINDOW_CENTER_X + FRONT_WINDOW_OPENING_WIDTH * 0.5
+  const frontWindowBottom =
+    FRONT_WINDOW_CENTER_Y - FRONT_WINDOW_OPENING_HEIGHT * 0.5
+  const frontWindowTop =
+    FRONT_WINDOW_CENTER_Y + FRONT_WINDOW_OPENING_HEIGHT * 0.5
+  const frontWindowFarLeftWidth = frontWindowLeft + HOUSE_WIDTH * 0.5
+  const frontWindowDoorSideWidth = doorOpeningLeft - frontWindowRight
 
   // Exterior shell. The front is segmented around a real, collider-free opening.
   shellWall.push(
     detailBox(
-      'operationsFrontWallLeft',
-      new Vector3(frontLeftCenter, WALL_HEIGHT * 0.5, FRONT_Z),
-      new Vector3(frontLeftWidth, WALL_HEIGHT, WALL_THICKNESS),
+      'operationsFrontWallWindowLeft',
+      new Vector3(
+        -HOUSE_WIDTH * 0.5 + frontWindowFarLeftWidth * 0.5,
+        WALL_HEIGHT * 0.5,
+        FRONT_Z,
+      ),
+      new Vector3(frontWindowFarLeftWidth, WALL_HEIGHT, WALL_THICKNESS),
+      materials.wall,
+    ),
+    detailBox(
+      'operationsFrontWallWindowRight',
+      new Vector3(
+        frontWindowRight + frontWindowDoorSideWidth * 0.5,
+        WALL_HEIGHT * 0.5,
+        FRONT_Z,
+      ),
+      new Vector3(frontWindowDoorSideWidth, WALL_HEIGHT, WALL_THICKNESS),
+      materials.wall,
+    ),
+    detailBox(
+      'operationsFrontWallWindowBelow',
+      new Vector3(
+        FRONT_WINDOW_CENTER_X,
+        frontWindowBottom * 0.5,
+        FRONT_Z,
+      ),
+      new Vector3(
+        FRONT_WINDOW_OPENING_WIDTH,
+        frontWindowBottom,
+        WALL_THICKNESS,
+      ),
+      materials.wall,
+    ),
+    detailBox(
+      'operationsFrontWallWindowAbove',
+      new Vector3(
+        FRONT_WINDOW_CENTER_X,
+        frontWindowTop + (WALL_HEIGHT - frontWindowTop) * 0.5,
+        FRONT_Z,
+      ),
+      new Vector3(
+        FRONT_WINDOW_OPENING_WIDTH,
+        WALL_HEIGHT - frontWindowTop,
+        WALL_THICKNESS,
+      ),
       materials.wall,
     ),
     detailBox(
@@ -378,13 +461,69 @@ export function createEnterableOperationsHouse(
     ),
   )
 
-  // Readable dark window recesses and the original battered boards are retained.
+  // The front window is a true opening through the visible shell. A deep,
+  // low-part-count frame, inset dirty glass, and opaque cavity backing give it
+  // believable parallax without rendering the room through transparent glass.
   const exteriorFrontZ = -HOUSE_DEPTH * 0.5 - 0.045
+  const windowFrameDepth = WALL_THICKNESS + 0.1
+  const windowFrameZ = FRONT_Z - 0.01
+  const windowFrameBar = 0.09
+  const windowGlassZ = FRONT_Z + 0.065
+  const windowClearWidth = FRONT_WINDOW_OPENING_WIDTH - windowFrameBar * 2
+  const windowClearHeight = FRONT_WINDOW_OPENING_HEIGHT - windowFrameBar * 2
   metalDetails.push(
     detailBox(
-      'operationsFrontWindowRecess',
-      new Vector3(-1.35, 1.86, exteriorFrontZ - 0.07),
-      new Vector3(1.75, 0.92, 0.1),
+      'operationsFrontWindowFrameLeft',
+      new Vector3(
+        frontWindowLeft + windowFrameBar * 0.5,
+        FRONT_WINDOW_CENTER_Y,
+        windowFrameZ,
+      ),
+      new Vector3(windowFrameBar, FRONT_WINDOW_OPENING_HEIGHT, windowFrameDepth),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontWindowFrameRight',
+      new Vector3(
+        frontWindowRight - windowFrameBar * 0.5,
+        FRONT_WINDOW_CENTER_Y,
+        windowFrameZ,
+      ),
+      new Vector3(windowFrameBar, FRONT_WINDOW_OPENING_HEIGHT, windowFrameDepth),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontWindowFrameTop',
+      new Vector3(
+        FRONT_WINDOW_CENTER_X,
+        frontWindowTop - windowFrameBar * 0.5,
+        windowFrameZ,
+      ),
+      new Vector3(
+        FRONT_WINDOW_OPENING_WIDTH - windowFrameBar * 2,
+        windowFrameBar,
+        windowFrameDepth,
+      ),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontWindowFrameBottom',
+      new Vector3(
+        FRONT_WINDOW_CENTER_X,
+        frontWindowBottom + windowFrameBar * 0.5,
+        windowFrameZ,
+      ),
+      new Vector3(
+        FRONT_WINDOW_OPENING_WIDTH - windowFrameBar * 2,
+        windowFrameBar,
+        windowFrameDepth,
+      ),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontWindowMullion',
+      new Vector3(FRONT_WINDOW_CENTER_X, FRONT_WINDOW_CENTER_Y, windowFrameZ),
+      new Vector3(0.055, windowClearHeight, windowFrameDepth),
       materials.metal,
     ),
     detailBox(
@@ -427,21 +566,162 @@ export function createEnterableOperationsHouse(
       { x: -0.03, z: -0.17 },
     ),
   )
+
+  shellConcrete.push(detailBox(
+    'operationsFrontWindowSill',
+    new Vector3(
+      FRONT_WINDOW_CENTER_X,
+      frontWindowBottom - 0.025,
+      exteriorFrontZ - 0.045,
+    ),
+    new Vector3(FRONT_WINDOW_OPENING_WIDTH + 0.18, 0.11, 0.37),
+    materials.concrete,
+  ))
+
+  windowCavityDetails.push(detailBox(
+    'operationsFrontWindowDarkBacking',
+    new Vector3(
+      FRONT_WINDOW_CENTER_X,
+      FRONT_WINDOW_CENTER_Y,
+      FRONT_Z + WALL_THICKNESS * 0.5 + 0.018,
+    ),
+    new Vector3(windowClearWidth, windowClearHeight, 0.035),
+    windowCavityMaterial,
+  ))
+  const frontWindowGlass = detailBox(
+    'operationsFrontWindowDirtyGlass',
+    new Vector3(FRONT_WINDOW_CENTER_X, FRONT_WINDOW_CENTER_Y, windowGlassZ),
+    new Vector3(windowClearWidth, windowClearHeight, 0.024),
+    windowGlassMaterial,
+  )
+  frontWindowGlass.isPickable = false
+  frontWindowGlass.receiveShadows = true
+  registerEnvironmentMesh(frontWindowGlass)
+  visibleMeshCount += 1
+
+  // A few matte deposits sit just above the glass. They merge into the existing
+  // stain draw group, avoiding another transparent grime layer.
+  stainDetails.push(
+    detailBox(
+      'operationsFrontWindowBottomGrime',
+      new Vector3(
+        FRONT_WINDOW_CENTER_X - 0.04,
+        FRONT_WINDOW_CENTER_Y - windowClearHeight * 0.42,
+        windowGlassZ - 0.019,
+      ),
+      new Vector3(windowClearWidth * 0.88, 0.045, 0.01),
+      stainMaterial,
+      { z: -0.015 },
+    ),
+    detailBox(
+      'operationsFrontWindowCornerGrime',
+      new Vector3(
+        FRONT_WINDOW_CENTER_X - windowClearWidth * 0.39,
+        FRONT_WINDOW_CENTER_Y + windowClearHeight * 0.34,
+        windowGlassZ - 0.02,
+      ),
+      new Vector3(0.17, 0.15, 0.01),
+      stainMaterial,
+      { z: 0.08 },
+    ),
+    detailBox(
+      'operationsFrontWindowRainStreak',
+      new Vector3(
+        FRONT_WINDOW_CENTER_X + windowClearWidth * 0.31,
+        FRONT_WINDOW_CENTER_Y + 0.03,
+        windowGlassZ - 0.02,
+      ),
+      new Vector3(0.035, windowClearHeight * 0.54, 0.01),
+      stainMaterial,
+      { z: -0.035 },
+    ),
+  )
+
+  // Metal returns line the complete structural opening. Exterior casing and
+  // inset door stops overlap the closed slab, removing straight sightlines at
+  // both corners while leaving the full doorway clear once the slab swings in.
+  const doorJambDepth = WALL_THICKNESS + 0.12
+  const doorJambWidth = 0.1
+  const doorCasingZ = FRONT_Z - WALL_THICKNESS * 0.5 - 0.04
+  const doorStopZ = DOOR_RECESS_Z + DOOR_PANEL_DEPTH * 0.5 + 0.026
+  metalDetails.push(
+    detailBox(
+      'operationsFrontDoorLeftJamb',
+      new Vector3(
+        doorOpeningLeft + doorJambWidth * 0.5,
+        DOOR_HEIGHT * 0.5,
+        FRONT_Z,
+      ),
+      new Vector3(doorJambWidth, DOOR_HEIGHT, doorJambDepth),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontDoorRightJamb',
+      new Vector3(
+        doorOpeningRight - doorJambWidth * 0.5,
+        DOOR_HEIGHT * 0.5,
+        FRONT_Z,
+      ),
+      new Vector3(doorJambWidth, DOOR_HEIGHT, doorJambDepth),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontDoorUpperJamb',
+      new Vector3(DOOR_CENTER_X, DOOR_HEIGHT - 0.045, FRONT_Z),
+      new Vector3(
+        DOOR_OPENING_WIDTH - doorJambWidth * 2,
+        0.09,
+        doorJambDepth,
+      ),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontDoorLeftCasing',
+      new Vector3(doorOpeningLeft - 0.075, 1.2, doorCasingZ),
+      new Vector3(0.15, 2.4, 0.08),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontDoorRightCasing',
+      new Vector3(doorOpeningRight + 0.075, 1.2, doorCasingZ),
+      new Vector3(0.15, 2.4, 0.08),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontDoorHeaderCasing',
+      new Vector3(DOOR_CENTER_X, 2.42, doorCasingZ),
+      new Vector3(DOOR_OPENING_WIDTH + 0.3, 0.16, 0.08),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontDoorLeftStop',
+      new Vector3(
+        doorOpeningLeft + doorJambWidth + 0.025,
+        1.17,
+        doorStopZ,
+      ),
+      new Vector3(0.05, 2.22, 0.052),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontDoorRightStop',
+      new Vector3(
+        doorOpeningRight - doorJambWidth - 0.025,
+        1.17,
+        doorStopZ,
+      ),
+      new Vector3(0.05, 2.22, 0.052),
+      materials.metal,
+    ),
+    detailBox(
+      'operationsFrontDoorUpperStop',
+      new Vector3(DOOR_CENTER_X, DOOR_HEIGHT - 0.115, doorStopZ),
+      new Vector3(DOOR_OPENING_WIDTH - doorJambWidth * 2, 0.05, 0.052),
+      materials.metal,
+    ),
+  )
+
   woodDetails.push(
-    detailBox(
-      'operationsFrontWindowBoard1',
-      new Vector3(-1.35, 1.68, exteriorFrontZ - 0.14),
-      new Vector3(1.55, 0.16, 0.1),
-      materials.wood,
-      { z: 0.04 },
-    ),
-    detailBox(
-      'operationsFrontWindowBoard2',
-      new Vector3(-1.35, 2.03, exteriorFrontZ - 0.14),
-      new Vector3(1.55, 0.16, 0.1),
-      materials.wood,
-      { z: -0.06 },
-    ),
     detailBox(
       'operationsRearWindowBoard1',
       new Vector3(0.1, 1.7, HOUSE_DEPTH * 0.5 + 0.15),
@@ -880,6 +1160,8 @@ export function createEnterableOperationsHouse(
     HOUSE_TRANSFORM,
     DOOR_CENTER_X,
     0,
+    // Keep the established interaction anchor and 2.2 m trigger distance even
+    // though the visible slab now sits correctly inside the jamb.
     FRONT_Z - WALL_THICKNESS * 0.5 - 0.018,
   )
   const doorPivot = new TransformNode('operationsFrontDoorHinge', scene)
@@ -887,18 +1169,18 @@ export function createEnterableOperationsHouse(
     HOUSE_TRANSFORM,
     DOOR_LEFT_X,
     0.035,
-    FRONT_Z - WALL_THICKNESS * 0.5 - 0.018,
+    DOOR_RECESS_Z,
   ))
   doorPivot.rotation.y = HOUSE_TRANSFORM.rotationY
 
   const doorPanel = MeshBuilder.CreateBox(
     'operationsFrontDoor',
-    { width: DOOR_WIDTH, height: DOOR_HEIGHT, depth: 0.12 },
+    { width: DOOR_WIDTH, height: DOOR_HEIGHT, depth: DOOR_PANEL_DEPTH },
     scene,
   )
   doorPanel.parent = doorPivot
   doorPanel.position.set(DOOR_WIDTH * 0.5, DOOR_HEIGHT * 0.5, 0)
-  doorPanel.material = materials.wood
+  doorPanel.material = materials.metal
   doorPanel.checkCollisions = true
   doorPanel.isPickable = true
   doorPanel.receiveShadows = true
@@ -913,37 +1195,172 @@ export function createEnterableOperationsHouse(
   collisionMeshCount += 1
   visibleMeshCount += 1
 
-  const doorBrace = MeshBuilder.CreateBox(
-    'operationsFrontDoorBrace',
-    { width: DOOR_WIDTH * 0.82, height: 0.1, depth: 0.045 },
-    scene,
-  )
-  doorBrace.parent = doorPivot
-  doorBrace.position.set(DOOR_WIDTH * 0.51, DOOR_HEIGHT * 0.52, -0.078)
-  doorBrace.rotation.z = -0.1
-  doorBrace.material = materials.metal
-  doorBrace.isPickable = false
-  doorBrace.checkCollisions = false
-  doorBrace.receiveShadows = true
-  doorBrace.layerMask = worldLayerMask
-  shadowGenerator?.addShadowCaster(doorBrace)
-  registerEnvironmentMesh(doorBrace)
-  visibleMeshCount += 1
+  const movingDoorMeshes: Mesh[] = [doorPanel]
 
-  const doorHandle = MeshBuilder.CreateSphere(
-    'operationsFrontDoorHandle',
-    { diameter: 0.13, segments: 6 },
+  function configureMovingDoorMesh(mesh: Mesh, material: HouseMaterial) {
+    mesh.parent = doorPivot
+    mesh.material = material
+    mesh.isPickable = false
+    mesh.checkCollisions = false
+    mesh.receiveShadows = true
+    mesh.layerMask = worldLayerMask
+    shadowGenerator?.addShadowCaster(mesh)
+    registerEnvironmentMesh(mesh)
+    movingDoorMeshes.push(mesh)
+    visibleMeshCount += 1
+    return mesh
+  }
+
+  function mergeMovingDoorPieces(
+    name: string,
+    pieces: Mesh[],
+    material: HouseMaterial,
+  ) {
+    const merged = Mesh.MergeMeshes(pieces, true, true)
+    if (merged) {
+      merged.name = name
+      return configureMovingDoorMesh(merged, material)
+    }
+    pieces.forEach((piece) => configureMovingDoorMesh(piece, material))
+    return null
+  }
+
+  function localDoorBox(
+    name: string,
+    position: Vector3,
+    size: Vector3,
+    rotation: BoxRotation = {},
+  ) {
+    const mesh = MeshBuilder.CreateBox(
+      name,
+      { width: size.x, height: size.y, depth: size.z },
+      scene,
+    )
+    mesh.position.copyFrom(position)
+    mesh.rotation.set(rotation.x ?? 0, rotation.y ?? 0, rotation.z ?? 0)
+    return mesh
+  }
+
+  const doorFaceZ = -DOOR_PANEL_DEPTH * 0.5 - 0.014
+  mergeMovingDoorPieces(
+    'operationsFrontDoorReinforcedPanels',
+    [
+      localDoorBox(
+        'operationsFrontDoorUpperPanel',
+        new Vector3(DOOR_WIDTH * 0.5, 1.7, doorFaceZ),
+        new Vector3(DOOR_WIDTH - 0.22, 0.82, 0.028),
+      ),
+      localDoorBox(
+        'operationsFrontDoorLowerPanel',
+        new Vector3(DOOR_WIDTH * 0.5, 0.63, doorFaceZ),
+        new Vector3(DOOR_WIDTH - 0.22, 0.82, 0.028),
+      ),
+    ],
+    doorCoatingMaterial,
+  )
+
+  const doorMetalPieces = [
+    localDoorBox(
+      'operationsFrontDoorLeftEdge',
+      new Vector3(0.055, DOOR_HEIGHT * 0.5, doorFaceZ - 0.012),
+      new Vector3(0.07, DOOR_HEIGHT - 0.08, 0.052),
+    ),
+    localDoorBox(
+      'operationsFrontDoorRightEdge',
+      new Vector3(DOOR_WIDTH - 0.055, DOOR_HEIGHT * 0.5, doorFaceZ - 0.012),
+      new Vector3(0.07, DOOR_HEIGHT - 0.08, 0.052),
+    ),
+    localDoorBox(
+      'operationsFrontDoorTopEdge',
+      new Vector3(DOOR_WIDTH * 0.5, DOOR_HEIGHT - 0.055, doorFaceZ - 0.012),
+      new Vector3(DOOR_WIDTH - 0.12, 0.07, 0.052),
+    ),
+    localDoorBox(
+      'operationsFrontDoorBottomEdge',
+      new Vector3(DOOR_WIDTH * 0.5, 0.055, doorFaceZ - 0.012),
+      new Vector3(DOOR_WIDTH - 0.12, 0.07, 0.052),
+    ),
+    localDoorBox(
+      'operationsFrontDoorCenterRib',
+      new Vector3(DOOR_WIDTH * 0.5, 1.165, doorFaceZ - 0.014),
+      new Vector3(DOOR_WIDTH - 0.16, 0.075, 0.055),
+      { z: -0.018 },
+    ),
+    localDoorBox(
+      'operationsFrontDoorHandlePlate',
+      new Vector3(DOOR_WIDTH - 0.2, 1.16, doorFaceZ - 0.036),
+      new Vector3(0.14, 0.3, 0.055),
+    ),
+    localDoorBox(
+      'operationsFrontDoorLever',
+      new Vector3(DOOR_WIDTH - 0.27, 1.16, doorFaceZ - 0.092),
+      new Vector3(0.2, 0.045, 0.065),
+      { z: -0.06 },
+    ),
+    localDoorBox(
+      'operationsFrontDoorLatchEdge',
+      new Vector3(DOOR_WIDTH - 0.018, 1.16, 0),
+      new Vector3(0.035, 0.29, DOOR_PANEL_DEPTH + 0.018),
+    ),
+  ]
+  for (const [index, y] of [0.4, 1.17, 1.94].entries()) {
+    const hinge = MeshBuilder.CreateCylinder(
+      `operationsFrontDoorHinge${index + 1}`,
+      { diameter: 0.095, height: 0.24, tessellation: 8 },
+      scene,
+    )
+    hinge.position.set(0.018, y, -0.035)
+    doorMetalPieces.push(hinge)
+  }
+  const handleSpindle = MeshBuilder.CreateCylinder(
+    'operationsFrontDoorHandleSpindle',
+    { diameter: 0.065, height: 0.13, tessellation: 8 },
     scene,
   )
-  doorHandle.parent = doorPivot
-  doorHandle.position.set(DOOR_WIDTH - 0.17, 1.16, -0.11)
-  doorHandle.material = materials.metal
-  doorHandle.isPickable = false
-  doorHandle.checkCollisions = false
-  doorHandle.receiveShadows = true
-  doorHandle.layerMask = worldLayerMask
-  registerEnvironmentMesh(doorHandle)
-  visibleMeshCount += 1
+  handleSpindle.position.set(DOOR_WIDTH - 0.2, 1.16, doorFaceZ - 0.07)
+  handleSpindle.rotation.x = Math.PI * 0.5
+  doorMetalPieces.push(handleSpindle)
+  mergeMovingDoorPieces(
+    'operationsFrontDoorHardware',
+    doorMetalPieces,
+    materials.metal,
+  )
+  mergeMovingDoorPieces(
+    'operationsFrontDoorWear',
+    [
+      localDoorBox(
+        'operationsFrontDoorUpperWear',
+        new Vector3(DOOR_WIDTH * 0.63, 1.84, doorFaceZ - 0.037),
+        new Vector3(0.3, 0.014, 0.012),
+        { z: -0.12 },
+      ),
+      localDoorBox(
+        'operationsFrontDoorUpperScratch',
+        new Vector3(DOOR_WIDTH * 0.43, 1.55, doorFaceZ - 0.037),
+        new Vector3(0.24, 0.012, 0.012),
+        { z: 0.16 },
+      ),
+      localDoorBox(
+        'operationsFrontDoorLowerWear',
+        new Vector3(DOOR_WIDTH * 0.34, 0.42, doorFaceZ - 0.037),
+        new Vector3(0.22, 0.014, 0.012),
+        { z: 0.08 },
+      ),
+      localDoorBox(
+        'operationsFrontDoorLowerScrape',
+        new Vector3(DOOR_WIDTH * 0.7, 0.37, doorFaceZ - 0.037),
+        new Vector3(0.015, 0.25, 0.012),
+        { z: -0.06 },
+      ),
+      localDoorBox(
+        'operationsFrontDoorBottomDirt',
+        new Vector3(DOOR_WIDTH * 0.48, 0.17, doorFaceZ - 0.037),
+        new Vector3(0.55, 0.032, 0.012),
+        { z: -0.025 },
+      ),
+    ],
+    doorWearMaterial,
+  )
 
   let doorState: InteractiveDoorState = 'closed'
   let doorProgress = 0
@@ -952,9 +1369,7 @@ export function createEnterableOperationsHouse(
     const eased = doorProgress * doorProgress * (3 - 2 * doorProgress)
     doorPivot.rotation.y = HOUSE_TRANSFORM.rotationY + DOOR_OPEN_ANGLE * eased
     doorPivot.computeWorldMatrix(true)
-    doorPanel.computeWorldMatrix(true)
-    doorBrace.computeWorldMatrix(true)
-    doorHandle.computeWorldMatrix(true)
+    movingDoorMeshes.forEach((mesh) => mesh.computeWorldMatrix(true))
   }
 
   const frontDoor: InteractiveHouseDoor = {
@@ -1004,6 +1419,12 @@ export function createEnterableOperationsHouse(
   mergeDetails('damagedOperationsBuildingStains', stainDetails, stainMaterial, true)
   mergeDetails('damagedOperationsBuildingTrackedSnow', snowDetails, trackedSnowMaterial, true)
   mergeDetails('damagedOperationsBuildingLampGlass', lampDetails, warmLampMaterial, true)
+  mergeDetails(
+    'damagedOperationsBuildingWindowBacking',
+    windowCavityDetails,
+    windowCavityMaterial,
+    true,
+  )
 
   const roofSnowPosition = worldPosition(HOUSE_TRANSFORM, -1.3, 3.33, -0.04)
   const winterSurfaces: WinterSurface[] = [{

@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url'
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const artifactDirectory = process.env.NIGHTBREACH_WINTER_ARTIFACT_DIR
   ?? join(tmpdir(), 'nightbreach-winter-validation')
+const requestedHouseView = process.env.NIGHTBREACH_HOUSE_VIEW
+const doorOnly = process.env.NIGHTBREACH_DOOR_ONLY === '1'
 const chromeCandidates = [
   process.env.CHROME_PATH,
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -217,7 +219,7 @@ async function validateViewport(serverPort, definition) {
     `)
     await cdp.evaluate(`document.querySelector('#instructions').click()`)
     await cdp.waitFor(`window.__nightBreachTest.snapshot().deployed`)
-    await delay(1_250)
+    await delay(doorOnly ? 150 : 1_250)
 
     if (!definition.mobile) {
       await cdp.send('Page.bringToFront')
@@ -277,13 +279,19 @@ async function validateViewport(serverPort, definition) {
       definition.mobile ? winter.controls !== 'none' : winter.controls === 'none',
       `${definition.name} control layout did not match its input mode.`,
     )
+    if (doorOnly) {
+      await cdp.evaluate(`window.__nightBreachTest.setWinterMode(false)`)
+    }
 
-    const screenshot = await cdp.send('Page.captureScreenshot', {
-      format: 'png',
-      fromSurface: true,
-    })
-    const screenshotPath = join(artifactDirectory, `${definition.name}.png`)
-    writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'))
+    let screenshotPath = null
+    if (!doorOnly && !requestedHouseView) {
+      const screenshot = await cdp.send('Page.captureScreenshot', {
+        format: 'png',
+        fromSurface: true,
+      })
+      screenshotPath = join(artifactDirectory, `${definition.name}.png`)
+      writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'))
+    }
 
     // Stage the player at the real front-door transform while looking away.
     // Availability must come only from the fixed 2.2m doorway zone, never from
@@ -325,18 +333,164 @@ async function validateViewport(serverPort, definition) {
             && closedDoor.door.promptText === 'Press E to Open'),
       `${definition.name} did not expose the correct closed-door control: ${JSON.stringify(closedDoor.door)}`,
     )
-    const exteriorHouseScreenshot = await cdp.send('Page.captureScreenshot', {
-      format: 'png',
-      fromSurface: true,
-    })
-    const exteriorHouseScreenshotPath = join(
-      artifactDirectory,
-      `${definition.name}-house-exterior.png`,
+    if (doorOnly) {
+      console.log('door-only: closed prompt and collision passed')
+      assert(
+        await cdp.evaluate(`window.__nightBreachTest.interactWithDoor()`),
+        `${definition.name} rejected the open interaction.`,
+      )
+      await cdp.waitFor(`window.__nightBreachTest.snapshot().door.state === 'open'`, 20_000)
+      const openedDoor = await cdp.evaluate(`window.__nightBreachTest.snapshot().door`)
+      assert(openedDoor.collisionEnabled && !openedDoor.animating,
+        `${definition.name} did not retain the moving slab collider after opening.`)
+      console.log('door-only: open animation and collision passed')
+
+      await cdp.evaluate(`(() => {
+        const rotation = -0.04;
+        const cosine = Math.cos(rotation);
+        const sine = Math.sin(rotation);
+        const localX = 1.48;
+        const localZ = -3.62;
+        const x = -15.6 + localX * cosine - localZ * sine;
+        const z = 19.7 + localX * sine + localZ * cosine;
+        window.__nightBreachTest.setPlayerPosition(x, z);
+        window.__nightBreachTest.setCameraRotation(0, rotation);
+      })()`)
+      await cdp.send('Input.dispatchKeyEvent', {
+        code: 'KeyW',
+        key: 'w',
+        nativeVirtualKeyCode: 87,
+        type: 'keyDown',
+        windowsVirtualKeyCode: 87,
+      })
+      await delay(1_350)
+      await cdp.send('Input.dispatchKeyEvent', {
+        code: 'KeyW',
+        key: 'w',
+        nativeVirtualKeyCode: 87,
+        type: 'keyUp',
+        windowsVirtualKeyCode: 87,
+      })
+      const traversal = await cdp.evaluate(`(() => {
+        const position = window.__nightBreachTest.snapshot().cameraPosition;
+        const rotation = -0.04;
+        const offsetX = position.x + 15.6;
+        const offsetZ = position.z - 19.7;
+        return {
+          localZ: -offsetX * Math.sin(rotation) + offsetZ * Math.cos(rotation),
+          position,
+        };
+      })()`)
+      assert(
+        traversal.localZ > -2.42,
+        `${definition.name} player did not cross the open threshold: ${JSON.stringify(traversal)}`,
+      )
+      console.log('door-only: player collision traversal passed')
+
+      await cdp.evaluate(`(() => {
+        const rotation = -0.04;
+        const cosine = Math.cos(rotation);
+        const sine = Math.sin(rotation);
+        const localX = 1.48;
+        const localZ = -0.76;
+        const x = -15.6 + localX * cosine - localZ * sine;
+        const z = 19.7 + localX * sine + localZ * cosine;
+        window.__nightBreachTest.setPlayerPosition(x, z);
+      })()`)
+      await delay(180)
+      const insideDoorControl = await cdp.evaluate(
+        `window.__nightBreachTest.snapshot().door`,
+      )
+      assert(
+        insideDoorControl.interactionAvailable,
+        `${definition.name} did not expose the close control from inside: ${JSON.stringify(insideDoorControl)}`,
+      )
+      console.log('door-only: inside close control passed')
+      assert(
+        await cdp.evaluate(`window.__nightBreachTest.interactWithDoor()`),
+        `${definition.name} rejected the close interaction.`,
+      )
+      console.log('door-only: close interaction accepted')
+      await cdp.waitFor(`window.__nightBreachTest.snapshot().door.state === 'closed'`, 15_000)
+      const afterCloseSnapshot = await cdp.evaluate(
+        `window.__nightBreachTest.snapshot()`,
+      )
+      const closedAfterTraversal = afterCloseSnapshot.door
+      assert(
+        closedAfterTraversal.state === 'closed'
+          && closedAfterTraversal.collisionEnabled
+          && !closedAfterTraversal.animating,
+        `${definition.name} door did not close correctly after traversal: ${JSON.stringify({
+          door: closedAfterTraversal,
+          errors: cdp.errors,
+          gameOver: afterCloseSnapshot.gameOver,
+          renderLoop: afterCloseSnapshot.renderLoop,
+          webViewActive: afterCloseSnapshot.webViewActive,
+        })}`,
+      )
+      assert(cdp.errors.length === 0,
+        `${definition.name} reported browser errors: ${cdp.errors.join(' | ')}`)
+      return {
+        name: definition.name,
+        door: {
+          closedAfterTraversal,
+          openedDoor,
+          playerTraversal: traversal,
+        },
+        performanceTier: winter.performanceTier,
+      }
+    }
+
+    const houseViews = [
+      { name: 'front', localX: 1.48, localZ: -4.78 },
+      { name: 'left-corner', localX: -0.02, localZ: -3.88 },
+      { name: 'right-corner', localX: 3.0, localZ: -3.88 },
+    ]
+    const selectedHouseViews = requestedHouseView
+      ? houseViews.filter(({ name }) => name === requestedHouseView)
+      : houseViews
+    assert(
+      selectedHouseViews.length > 0,
+      `Unknown NIGHTBREACH_HOUSE_VIEW: ${requestedHouseView}`,
     )
-    writeFileSync(
-      exteriorHouseScreenshotPath,
-      Buffer.from(exteriorHouseScreenshot.data, 'base64'),
-    )
+    const exteriorHouseScreenshotPaths = {}
+    for (const view of selectedHouseViews) {
+      await cdp.evaluate(`(() => {
+        const rotation = -0.04;
+        const cosine = Math.cos(rotation);
+        const sine = Math.sin(rotation);
+        const localX = ${view.localX};
+        const localZ = ${view.localZ};
+        const targetX = 1.48;
+        const targetZ = -2.78;
+        const x = -15.6 + localX * cosine - localZ * sine;
+        const z = 19.7 + localX * sine + localZ * cosine;
+        const localYaw = Math.atan2(targetX - localX, targetZ - localZ);
+        window.__nightBreachTest.setPlayerPosition(x, z);
+        window.__nightBreachTest.setCameraRotation(-0.025, rotation + localYaw);
+      })()`)
+      await delay(120)
+      const screenshot = await cdp.send('Page.captureScreenshot', {
+        format: 'png',
+        fromSurface: true,
+      })
+      const screenshotPath = join(
+        artifactDirectory,
+        `${definition.name}-house-${view.name}.png`,
+      )
+      writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'))
+      exteriorHouseScreenshotPaths[view.name] = screenshotPath
+    }
+    if (requestedHouseView) {
+      assert(cdp.errors.length === 0,
+        `${definition.name} reported browser errors: ${cdp.errors.join(' | ')}`)
+      return {
+        name: definition.name,
+        house: { exteriorScreenshotPaths: exteriorHouseScreenshotPaths },
+        performanceTier: winter.performanceTier,
+        snow: winter.state,
+      }
+    }
 
     const exteriorControl = await activateDoorControl(cdp, definition, 71)
     assert(
@@ -526,7 +680,7 @@ async function validateViewport(serverPort, definition) {
       frameSample: { normal: normalFrames, winter: winterFrames },
       house: {
         closedAgain,
-        exteriorScreenshotPath: exteriorHouseScreenshotPath,
+        exteriorScreenshotPaths: exteriorHouseScreenshotPaths,
         interiorScreenshotPath: interiorHouseScreenshotPath,
         interior: interiorState.interior,
         snowSuppressedInside: interiorState.winter.locallySuppressed
@@ -565,20 +719,27 @@ const server = spawn(process.execPath, [
 try {
   await waitForHttp(`http://127.0.0.1:${serverPort}/`)
   const results = []
+  const desktopDefinition = doorOnly
+    ? { height: 450, name: 'door-800x450', width: 800 }
+    : requestedHouseView
+      ? { height: 540, name: 'house-960x540', width: 960 }
+      : { height: 720, name: 'desktop-1280x720', width: 1280 }
   results.push(await validateViewport(serverPort, {
     expectedCapacity: 144,
-    height: 720,
+    height: desktopDefinition.height,
     mobile: false,
-    name: 'desktop-1280x720',
-    width: 1280,
+    name: desktopDefinition.name,
+    width: desktopDefinition.width,
   }))
-  results.push(await validateViewport(serverPort, {
-    expectedCapacity: 42,
-    height: 390,
-    mobile: true,
-    name: 'mobile-844x390',
-    width: 844,
-  }))
+  if (!requestedHouseView && !doorOnly) {
+    results.push(await validateViewport(serverPort, {
+      expectedCapacity: 42,
+      height: 390,
+      mobile: true,
+      name: 'mobile-844x390',
+      width: 844,
+    }))
+  }
   console.log(JSON.stringify({ winterValidation: results }, null, 2))
 } finally {
   server.kill()
