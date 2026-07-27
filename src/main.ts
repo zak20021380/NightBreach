@@ -2080,11 +2080,12 @@ class Zombie {
   // Ordinary rifle hits decay over the configured reaction window; a shotgun
   // blast may stretch it so the heavier stagger also recovers more slowly.
   private activeHitReactionDuration = ZOMBIE_COMBAT_CONFIG.hitReactionDuration
-  // Shotgun knockback: one horizontal impulse that decays exponentially and is
+  // Shotgun knockback: one horizontal impulse with a bounded lifetime. It is
   // integrated through moveWithCollisions, so walls always stay solid.
   private knockbackDirectionX = 0
   private knockbackDirectionZ = 0
   private knockbackSpeed = 0
+  private knockbackRemaining = 0
   private attackElapsed = 0
   private attackCooldownRemaining = 0
   private attackDamageApplied = false
@@ -2203,16 +2204,20 @@ class Zombie {
     return this.applyDamage(totalDamage, headshot, flinchDirection, staggerSeconds)
   }
 
-  // Horizontal impulse in world units per second. The caller pre-scales it by
-  // pellet count and distance and caps it; direction only needs to point away
-  // from the shooter. Dead or disposed zombies never accept an impulse.
-  applyKnockback(directionX: number, directionZ: number, impulseSpeed: number) {
-    if (this.disposed || this._state === 'dead' || impulseSpeed <= 0) return
+  // Horizontal initial speed in world units per second. The caller derives it
+  // from aggregated pellet force and distance; direction only needs to point
+  // away from the shooter. Dead or disposed zombies never accept an impulse.
+  applyKnockback(directionX: number, directionZ: number, initialSpeed: number) {
+    if (this.disposed || this._state === 'dead' || initialSpeed <= 0) return
     const length = Math.hypot(directionX, directionZ)
     if (length < 0.001) return
     this.knockbackDirectionX = directionX / length
     this.knockbackDirectionZ = directionZ / length
-    this.knockbackSpeed = impulseSpeed
+    this.knockbackSpeed = Math.min(
+      initialSpeed,
+      SHOTGUN_COMBAT_CONFIG.knockback.maxSpeed,
+    )
+    this.knockbackRemaining = SHOTGUN_COMBAT_CONFIG.knockback.durationSeconds
   }
 
   get knockbackAmount() {
@@ -2300,27 +2305,23 @@ class Zombie {
       this.attackCooldownRemaining - deltaSeconds,
     )
 
-    // The knockback slide runs on top of whatever the state machine is doing,
-    // and only for living zombies: the dead branch above has already returned.
-    // moveWithCollisions is the same pipe the chase uses, so an impulse can
-    // never push a zombie through a wall or off the map.
-    if (this.knockbackSpeed > 0) {
+    // The knockback slide runs only for living zombies: the dead branch above
+    // has already returned. moveWithCollisions is the same pipe the chase uses,
+    // so an impulse can never push a zombie through a wall or off the map.
+    const knockbackActive = this.knockbackRemaining > 0 && this.knockbackSpeed > 0
+    if (knockbackActive) {
+      const movementSeconds = Math.min(deltaSeconds, this.knockbackRemaining)
       this.movementDelta.set(
-        this.knockbackDirectionX * this.knockbackSpeed * deltaSeconds,
+        this.knockbackDirectionX * this.knockbackSpeed * movementSeconds,
         0,
-        this.knockbackDirectionZ * this.knockbackSpeed * deltaSeconds,
+        this.knockbackDirectionZ * this.knockbackSpeed * movementSeconds,
       )
       this.root.moveWithCollisions(this.movementDelta)
       this.knockbackSpeed *= Math.exp(
-        -SHOTGUN_COMBAT_CONFIG.knockback.decayPerSecond * deltaSeconds,
+        -SHOTGUN_COMBAT_CONFIG.knockback.decayPerSecond * movementSeconds,
       )
-      if (this.knockbackSpeed < 0.02) this.knockbackSpeed = 0
-    }
-
-    if (this._state === 'attacking') {
-      this.updateAttack(deltaSeconds, playerPosition)
-      this.updateProceduralAnimation(deltaSeconds)
-      return
+      this.knockbackRemaining = Math.max(0, this.knockbackRemaining - deltaSeconds)
+      if (this.knockbackRemaining === 0) this.knockbackSpeed = 0
     }
 
     if (this._state === 'hit') {
@@ -2335,6 +2336,20 @@ class Zombie {
         this.setState(this.resumeStateAfterHit)
         this.thinkTimeRemaining = 0
       }
+    }
+
+    // Do not let chase or attack movement counteract an active blast. Hit
+    // reaction timing and animation still advance above, so AI resumes cleanly
+    // on the first frame after the configured knockback window.
+    if (knockbackActive) {
+      this.updateProceduralAnimation(deltaSeconds)
+      return
+    }
+
+    if (this._state === 'attacking') {
+      this.updateAttack(deltaSeconds, playerPosition)
+      this.updateProceduralAnimation(deltaSeconds)
+      return
     }
 
     if (this._state !== 'hit') {
@@ -2537,6 +2552,7 @@ class Zombie {
     this.currentDirectionZ = 0
     // A corpse never slides: any shotgun impulse still decaying dies with it.
     this.knockbackSpeed = 0
+    this.knockbackRemaining = 0
     this.root.checkCollisions = false
     this.disableHitZones()
     onZombieDied()
@@ -3491,14 +3507,19 @@ const SHOTGUN_COMBAT_CONFIG = {
     adsRecoilReduction: 0.32,
     muzzleFlashStrength: 1.25,
   },
-  // One aggregated impulse per blast, in world units/second, integrated by the
-  // zombie through moveWithCollisions and decayed exponentially.
+  // One aggregated impulse per zombie per blast. forcePerPellet is converted
+  // to initial horizontal speed after the distance curve and capped at
+  // maxSpeed. Movement lasts durationSeconds and decays exponentially.
   knockback: {
-    impulsePerPellet: 0.6,
-    maxImpulse: 4.8,
-    minimumImpulse: 0.3,
-    decayPerSecond: 5.5,
-    staggerSeconds: 0.34,
+    forcePerPellet: 2.1,
+    fullForceRange: 5,
+    weakForceRange: 8,
+    weakForceMultiplier: 0.3,
+    longRangeForceMultiplier: 0.015,
+    minimumForce: 0.15,
+    durationSeconds: 0.72,
+    decayPerSecond: 1.5,
+    maxSpeed: 11.5,
   },
   // Blood bursts per zombie per blast. Every pellet still deals damage; the cap
   // only keeps eight simultaneous bursts from churning the pooled particles.
@@ -5605,6 +5626,30 @@ function shotgunDamageFalloff(distance: number) {
   return 1 + (minDamageMultiplierAtMaxRange - 1) * progress
 }
 
+// Knockback has a deliberately sharper curve than damage: maximum force is
+// retained through five units, is already much weaker at eight, and approaches
+// zero at the pellet ray's maximum range.
+function shotgunKnockbackFalloff(distance: number) {
+  const {
+    fullForceRange,
+    weakForceRange,
+    weakForceMultiplier,
+    longRangeForceMultiplier,
+  } = SHOTGUN_COMBAT_CONFIG.knockback
+  if (distance <= fullForceRange) return 1
+  if (distance <= weakForceRange) {
+    const progress = (distance - fullForceRange) / (weakForceRange - fullForceRange)
+    return 1 + (weakForceMultiplier - 1) * progress
+  }
+  const progress = clamp(
+    (distance - weakForceRange) / (SHOTGUN_COMBAT_CONFIG.maxRange - weakForceRange),
+    0,
+    1,
+  )
+  return weakForceMultiplier
+    + (longRangeForceMultiplier - weakForceMultiplier) * progress
+}
+
 interface ShotgunPelletBurst {
   point: Vector3
   direction: Vector3
@@ -5744,7 +5789,8 @@ function fireShotgun() {
     impact.pelletCount += 1
     impact.totalDamage += pelletDamage
     impact.headshot ||= headshot
-    impact.knockbackImpulse += SHOTGUN_COMBAT_CONFIG.knockback.impulsePerPellet * falloff
+    impact.knockbackImpulse += SHOTGUN_COMBAT_CONFIG.knockback.forcePerPellet
+      * shotgunKnockbackFalloff(result.distance)
     impact.flinchDirection.addInPlace(shotgunPelletRay.direction)
     diagnostics.pelletsIntoZombies += 1
     falloffSum += falloff
@@ -5780,7 +5826,7 @@ function fireShotgun() {
       impact.totalDamage,
       impact.headshot,
       impact.flinchDirection,
-      SHOTGUN_COMBAT_CONFIG.knockback.staggerSeconds,
+      SHOTGUN_COMBAT_CONFIG.knockback.durationSeconds,
     )
     if (!damaged) continue
     diagnostics.zombiesDamaged += 1
@@ -5802,10 +5848,10 @@ function fireShotgun() {
       continue
     }
     const impulse = Math.min(
-      SHOTGUN_COMBAT_CONFIG.knockback.maxImpulse,
+      SHOTGUN_COMBAT_CONFIG.knockback.maxSpeed,
       impact.knockbackImpulse,
     )
-    if (impulse < SHOTGUN_COMBAT_CONFIG.knockback.minimumImpulse) continue
+    if (impulse < SHOTGUN_COMBAT_CONFIG.knockback.minimumForce) continue
     // Push straight away from the shooter on the ground plane.
     zombie.applyKnockback(
       zombie.root.position.x - camera.globalPosition.x,

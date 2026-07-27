@@ -405,7 +405,7 @@ async function runDesktopPass() {
       `The blast did not stagger the zombie: ${blast.zombies[0].state}.`)
     assert(blast.zombies[0].knockback > 0 || blast.zombies[0].state === 'dead',
       'A close-range blast did not apply knockback.')
-    assert(blast.lastShotgunBlast.maxKnockbackImpulse <= 4.8 + 0.0001,
+    assert(blast.lastShotgunBlast.maxKnockbackImpulse <= 11.5 + 0.0001,
       `Knockback exceeded its cap: ${blast.lastShotgunBlast.maxKnockbackImpulse}.`)
     assert(blast.zombies[0].upperBodyPush > 0.001 || blast.zombies[0].state === 'dead',
       'The blast did not displace the upper-body impact layer.')
@@ -417,14 +417,23 @@ async function runDesktopPass() {
     assert(blast.shotgunShotElapsed >= 0, 'The pump-cycle gate was not armed by the shot.')
     await session.screenshot('desktop-shotgun-muzzle-flash.png')
 
-    // The zombie must be pushed away from the player (toward +Z) while the
-    // impulse decays, and the impulse must not survive as a permanent slide.
+    // Four to eight close pellets must visibly throw the zombie several steps
+    // away from the player (toward +Z), with no chase movement fighting the
+    // controlled impulse.
     const knockbackStartZ = blast.zombies[0].position.z
     if (blast.zombies[0].state !== 'dead') {
       await cdp.waitForExpression(
-        `${snapshotExpression}.zombies[0].position.z > ${knockbackStartZ + 0.12}`,
+        `${snapshotExpression}.zombies[0].position.z > ${knockbackStartZ + 2.5}`,
         5_000,
         'knockback displacement',
+      )
+      const displaced = await snapshot(cdp)
+      const knockbackDisplacement = displaced.zombies[0].position.z - knockbackStartZ
+      assert(displaced.zombies[0].state === 'hit',
+        'Normal zombie AI resumed before the close-range knockback ended.')
+      console.log(
+        `shotgun-smoke: ${blast.lastShotgunBlast.pelletsIntoZombies} close pellets `
+        + `displaced zombie ${knockbackDisplacement.toFixed(3)} units`,
       )
       await cdp.waitForExpression(
         `${snapshotExpression}.zombies[0].knockback === 0`,
