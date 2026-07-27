@@ -37,6 +37,8 @@ import {
   type AssetProgressSnapshot,
   LocalAssetManager,
 } from './assets/localAssetManager'
+import { resolveInitialWinterMode } from './winterConfig'
+import { WinterEnvironment, type WinterSurface } from './winterEnvironment'
 
 function getElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector)
@@ -93,11 +95,12 @@ const isDesktop = !isTouchDevice
 const hardwareThreadCount = navigator.hardwareConcurrency || 4
 const deviceMemoryGb = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 4
 const isLowEndMobile = isMobile && (hardwareThreadCount <= 4 || deviceMemoryGb <= 4)
+const performanceTier = isLowEndMobile ? 'mobile-low' : isMobile ? 'mobile' : 'desktop'
 const WORLD_RENDER_LAYER_MASK = 0x0fffffff
 const VIEW_MODEL_RENDER_LAYER_MASK = 0x10000000
 
 document.body.classList.toggle('touch-device', isTouchDevice)
-canvas.dataset.performanceTier = isLowEndMobile ? 'mobile-low' : isMobile ? 'mobile' : 'desktop'
+canvas.dataset.performanceTier = performanceTier
 if (isTouchDevice) {
   instructions.innerHTML = 'Tap to deploy<br /><span>Left stick to move &middot; swipe to aim</span>'
 }
@@ -1261,6 +1264,109 @@ sandbagLayouts.slice(1).forEach((position, index) => {
   sandbag.rotation.y = index < 6 ? 0.04 : -0.14
   sandbag.receiveShadows = true
 })
+
+// Winter is a separate, non-pickable render layer. These planes sit just above
+// the existing surfaces and never replace or modify gameplay geometry.
+const winterSurfaces: WinterSurface[] = [
+  { name: 'ground', x: 0, y: 0.018, z: 0, width: 51.8, depth: 51.8 },
+  { name: 'northWall', x: 0, y: 4.48, z: 26, width: 52, depth: 0.86 },
+  { name: 'southWall', x: 0, y: 4.48, z: -26, width: 52, depth: 0.86 },
+  { name: 'eastWall', x: 26, y: 4.48, z: 0, width: 0.86, depth: 52 },
+  { name: 'westWall', x: -26, y: 4.48, z: 0, width: 0.86, depth: 52 },
+  ...crateLayouts.map(({ position, size }, index) => ({
+    name: `crate${index + 1}`,
+    x: position.x,
+    y: position.y + size.y * 0.5 + 0.024,
+    z: position.z,
+    width: size.x * 0.99,
+    depth: size.z * 0.99,
+  })),
+  ...pillarPositions.map((position, index) => ({
+    name: `pillar${index + 1}`,
+    x: position.x,
+    y: position.y + 2.274,
+    z: position.z,
+    width: 1.12,
+    depth: 1.12,
+  })),
+  ...damagedWallLayouts.map(({ position, size, rotation }, index) => ({
+    name: `damagedWall${index + 1}`,
+    x: position.x,
+    y: position.y + size.y * 0.5 + 0.024,
+    z: position.z,
+    width: size.x * 0.98,
+    depth: size.z * 0.98,
+    rotationY: rotation,
+  })),
+  ...barrierLayouts.flatMap(({ position, rotation }, index) => [
+    {
+      name: `barrierBase${index + 1}`,
+      x: position.x,
+      y: 0.444,
+      z: position.z,
+      width: 3.56,
+      depth: 0.91,
+      rotationY: rotation,
+    },
+    {
+      name: `barrierTop${index + 1}`,
+      x: position.x,
+      y: 1.164,
+      z: position.z,
+      width: 3.16,
+      depth: 0.45,
+      rotationY: rotation,
+    },
+  ]),
+]
+const winterEnvironment = new WinterEnvironment({
+  scene,
+  camera,
+  skyLight,
+  sunLight,
+  surfaces: winterSurfaces,
+  performanceTier,
+  worldLayerMask: WORLD_RENDER_LAYER_MASK,
+  initialEnabled: resolveInitialWinterMode(window.location.search),
+})
+
+function updateWinterRuntimeMetadata() {
+  const winter = winterEnvironment.snapshot()
+  canvas.dataset.winterMode = winter.enabled ? 'winter' : 'normal'
+  canvas.dataset.winterSource = 'procedural'
+  canvas.dataset.snowParticleCapacity = String(winter.particleCapacity)
+  canvas.dataset.snowParticleEmitRate = String(winter.particleEmitRate)
+  document.documentElement.style.colorScheme = winter.enabled ? 'dark' : ''
+  return winter
+}
+
+const winterControl = Object.freeze({
+  get enabled() {
+    return winterEnvironment.isEnabled
+  },
+  setEnabled(enabled: boolean) {
+    winterEnvironment.setEnabled(Boolean(enabled))
+    return updateWinterRuntimeMetadata()
+  },
+  toggle() {
+    winterEnvironment.toggle()
+    return updateWinterRuntimeMetadata()
+  },
+  snapshot() {
+    return winterEnvironment.snapshot()
+  },
+})
+Object.defineProperty(window, 'nightBreachWinter', {
+  configurable: true,
+  value: winterControl,
+})
+updateWinterRuntimeMetadata()
+console.info(
+  `[Night Breach][Winter] ${winterEnvironment.isEnabled ? 'Enabled' : 'Disabled'}; `
+  + `${winterEnvironment.surfaceMeshCount} snow-covered surfaces, `
+  + `${winterEnvironment.particleCapacity} pooled flakes at `
+  + `${winterEnvironment.particleEmitRate}/second.`,
+)
 
 function createVisualDetailBox(
   name: string,
@@ -7856,6 +7962,7 @@ if (import.meta.env.DEV) {
           moveInputX,
           moveInputY,
           mapReady: canvas.dataset.mapReady === 'true',
+          winter: winterEnvironment.snapshot(),
           reloadElapsed,
           reloadDuration: reloadDurationSeconds,
           reloadEndObserverCount:
@@ -8077,6 +8184,12 @@ if (import.meta.env.DEV) {
       },
       toggleWeapon() {
         return toggleWeaponSelection()
+      },
+      setWinterMode(enabled: boolean) {
+        return winterControl.setEnabled(enabled)
+      },
+      toggleWinter() {
+        return winterControl.toggle()
       },
       setCameraRotation(pitch: number, yaw: number) {
         camera.rotation.set(pitch, yaw, 0)
