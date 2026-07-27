@@ -1559,76 +1559,6 @@ void initializeLocalEnvironment().catch((error) => {
   logRuntimeWarning('Environment source: procedural fallback active.', error)
 })
 
-interface TargetState {
-  root: TransformNode
-  meshes: Mesh[]
-  material: SurfaceMaterial
-  hits: number
-  flashTimer?: number
-}
-
-const dummyColor = Color3.FromHexString('#696b50')
-const dummyHitColor = Color3.White()
-const dummyHitEmissive = new Color3(0.16, 0.16, 0.16)
-const targets = new Map<Mesh, TargetState>()
-const targetPositions = [
-  new Vector3(-17, 0, -1),
-  new Vector3(-7, 0, 16),
-  new Vector3(4, 0, 19),
-  new Vector3(16, 0, 16),
-  new Vector3(18, 0, -13),
-]
-
-function createTrainingDummy(position: Vector3, index: number) {
-  const root = new TransformNode(`trainingDummy${index}`, scene)
-  root.position.copyFrom(position)
-  const material = createMaterial(`dummyMaterial${index}`, dummyColor, 0.9, 0.04)
-  const meshes: Mesh[] = []
-
-  function addPart(mesh: Mesh, localPosition: Vector3) {
-    mesh.parent = root
-    mesh.position.copyFrom(localPosition)
-    mesh.material = material
-    prepareWorldMesh(mesh, true, true, false)
-    meshes.push(mesh)
-  }
-
-  addPart(
-    MeshBuilder.CreateSphere(`dummyHead${index}`, { diameter: 0.42, segments: 8 }, scene),
-    new Vector3(0, 2.55, 0),
-  )
-  addPart(
-    MeshBuilder.CreateBox(
-      `dummyTorso${index}`,
-      { width: 0.86, height: 1.18, depth: 0.34 },
-      scene,
-    ),
-    new Vector3(0, 1.68, 0),
-  )
-  addPart(
-    MeshBuilder.CreateBox(
-      `dummyLeftLeg${index}`,
-      { width: 0.25, height: 0.86, depth: 0.28 },
-      scene,
-    ),
-    new Vector3(-0.23, 0.66, 0),
-  )
-  addPart(
-    MeshBuilder.CreateBox(
-      `dummyRightLeg${index}`,
-      { width: 0.25, height: 0.86, depth: 0.28 },
-      scene,
-    ),
-    new Vector3(0.23, 0.66, 0),
-  )
-
-  const state: TargetState = { root, meshes, material, hits: 0 }
-  meshes.forEach((mesh) => targets.set(mesh, state))
-}
-
-targetPositions.forEach((position, index) => createTrainingDummy(position, index + 1))
-canvas.dataset.trainingTargets = String(targetPositions.length)
-
 type ZombieState = 'idle' | 'chasing' | 'attacking' | 'hit' | 'dead'
 type ZombieAnimationName = 'idle' | 'walk' | 'run' | 'attack' | 'hit' | 'death'
 type ZombieAnimationMap = Partial<Record<ZombieAnimationName, AnimationGroup>>
@@ -6297,7 +6227,6 @@ interface ShotgunBlastDiagnostics {
   zombiesHit: number
   zombiesDamaged: number
   zombiesKilled: number
-  targetPellets: number
   blockedPellets: number
   missedPellets: number
   headshot: boolean
@@ -6977,33 +6906,6 @@ function completeReload() {
   playImportedWeaponRestAnimation()
 }
 
-function hitTarget(target: TargetState) {
-  target.hits += 1
-  setMaterialColor(target.material, dummyHitColor, dummyHitEmissive)
-  showHitMarker()
-
-  if (target.flashTimer !== undefined) window.clearTimeout(target.flashTimer)
-
-  if (target.hits >= 3) {
-    for (let index = 0; index < target.meshes.length; index += 1) {
-      targets.delete(target.meshes[index])
-    }
-    target.flashTimer = window.setTimeout(disposeTrainingTarget, 90, target)
-    return
-  }
-
-  target.flashTimer = window.setTimeout(restoreTrainingTarget, 120, target)
-}
-
-function restoreTrainingTarget(target: TargetState) {
-  setMaterialColor(target.material, dummyColor)
-}
-
-function disposeTrainingTarget(target: TargetState) {
-  target.root.dispose()
-  target.material.dispose()
-}
-
 function fire() {
   // The rifle's shot. Pressing fire with the shotgun selected routes to
   // fireShotgun instead and must never fall through to here.
@@ -7044,9 +6946,6 @@ function fire() {
   )) {
     return
   }
-
-  const target = targets.get(result.pickedMesh as Mesh)
-  if (target) hitTarget(target)
 }
 
 // ---------------------------------------------------------------------------
@@ -7175,7 +7074,6 @@ function fireShotgun() {
     zombiesHit: 0,
     zombiesDamaged: 0,
     zombiesKilled: 0,
-    targetPellets: 0,
     blockedPellets: 0,
     missedPellets: 0,
     headshot: false,
@@ -7217,13 +7115,7 @@ function fireShotgun() {
 
     const zombieHit = zombieHitZones.get(result.pickedMesh as Mesh)
     if (!zombieHit) {
-      const target = targets.get(result.pickedMesh as Mesh)
-      if (target) {
-        hitTarget(target)
-        diagnostics.targetPellets += 1
-      } else {
-        diagnostics.blockedPellets += 1
-      }
+      diagnostics.blockedPellets += 1
       continue
     }
 
@@ -7277,7 +7169,7 @@ function fireShotgun() {
   // been cast, so each zombie takes a single aggregated hit reaction and a
   // single capped impulse instead of up to eight conflicting ones.
   diagnostics.zombiesHit = impacts.size
-  let anyDamage = diagnostics.targetPellets > 0
+  let anyDamage = false
   let anyHeadshot = false
   for (const [zombie, impact] of impacts) {
     if (impact.flinchDirection.lengthSquared() < 0.000001) {
