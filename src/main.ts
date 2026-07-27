@@ -37,6 +37,7 @@ import {
   type AssetProgressSnapshot,
   LocalAssetManager,
 } from './assets/localAssetManager'
+import { createAbandonedStructures } from './abandonedStructures'
 import { resolveInitialWinterMode } from './winterConfig'
 import { WinterEnvironment, type WinterSurface } from './winterEnvironment'
 
@@ -1265,6 +1266,29 @@ sandbagLayouts.slice(1).forEach((position, index) => {
   sandbag.receiveShadows = true
 })
 
+const abandonedStructures = createAbandonedStructures({
+  scene,
+  shadowGenerator,
+  worldLayerMask: WORLD_RENDER_LAYER_MASK,
+  materials: {
+    concrete: concreteMaterial,
+    hazard: hazardMaterial,
+    metal: darkMetalMaterial,
+    wall: wallConcreteMaterial,
+    wood: wornBrownMaterial,
+  },
+  registerEnvironmentMesh(mesh) {
+    proceduralEnvironmentMeshes.push(mesh)
+  },
+})
+canvas.dataset.structureCount = String(abandonedStructures.structures.length)
+canvas.dataset.structureNames = abandonedStructures.structures
+  .map(({ name }) => name)
+  .join(',')
+canvas.dataset.structureCollisionCount = String(
+  abandonedStructures.collisionMeshCount,
+)
+
 // Winter is a separate, non-pickable render layer. These planes sit just above
 // the existing surfaces and never replace or modify gameplay geometry.
 const winterSurfaces: WinterSurface[] = [
@@ -1318,6 +1342,7 @@ const winterSurfaces: WinterSurface[] = [
       rotationY: rotation,
     },
   ]),
+  ...abandonedStructures.winterSurfaces,
 ]
 const winterEnvironment = new WinterEnvironment({
   scene,
@@ -7962,6 +7987,16 @@ if (import.meta.env.DEV) {
           moveInputX,
           moveInputY,
           mapReady: canvas.dataset.mapReady === 'true',
+          structures: {
+            collisionMeshCount: abandonedStructures.collisionMeshCount,
+            placements: abandonedStructures.structures.map((structure) => ({
+              footprint: [...structure.footprint],
+              label: structure.label,
+              name: structure.name,
+              position: [...structure.position],
+            })),
+            visibleMeshCount: abandonedStructures.visibleMeshCount,
+          },
           winter: winterEnvironment.snapshot(),
           reloadElapsed,
           reloadDuration: reloadDurationSeconds,
