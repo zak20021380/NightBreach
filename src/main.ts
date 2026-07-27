@@ -252,8 +252,13 @@ instructions.addEventListener('pointerup', (event) => {
 
 canvas.addEventListener('pointerdown', (event) => {
   if (!isDesktop || !gameplayInputEnabled() || event.button !== 0) return
+  canvas.focus()
   requestPointerLockSafely()
   fireWeapon()
+})
+
+document.addEventListener('pointerlockchange', () => {
+  if (document.pointerLockElement === canvas) canvas.focus()
 })
 
 window.addEventListener('keydown', (event) => {
@@ -1303,11 +1308,12 @@ canvas.dataset.interiorObjectCount = String(
 )
 
 const frontDoor = abandonedStructures.enterableHouse.frontDoor
-const doorInteractionPosition = Vector3.Zero()
-const doorLookDirection = Vector3.Forward()
-const doorFacingDirection = Vector3.Forward()
-const DOOR_INTERACTION_DISTANCE = 2.65
-const DOOR_INTERACTION_LOOK_DOT = 0.82
+frontDoor.reset()
+const doorwayPosition = Vector3.Zero()
+frontDoor.getDoorwayPositionToRef(doorwayPosition)
+const DOOR_INTERACTION_DISTANCE = 2.2
+const DOOR_INTERACTION_DISTANCE_SQUARED =
+  DOOR_INTERACTION_DISTANCE * DOOR_INTERACTION_DISTANCE
 let doorInteractionAvailable = false
 let doorPromptAction: 'Open' | 'Close' = 'Open'
 let renderedDoorUiVisible = false
@@ -1338,21 +1344,14 @@ function updateDoorInteractionUi() {
     setDoorInteractionUi(false)
     return
   }
-  frontDoor.getInteractionPositionToRef(doorInteractionPosition)
-  doorFacingDirection.copyFrom(doorInteractionPosition)
-  doorFacingDirection.subtractInPlace(camera.globalPosition)
-  const distanceSquared = doorFacingDirection.lengthSquared()
-  if (
-    distanceSquared > DOOR_INTERACTION_DISTANCE * DOOR_INTERACTION_DISTANCE
-    || distanceSquared < 0.0001
-  ) {
-    setDoorInteractionUi(false)
-    return
-  }
-  doorFacingDirection.scaleInPlace(1 / Math.sqrt(distanceSquared))
-  camera.getDirectionToRef(Vector3.Forward(), doorLookDirection)
+  // Door interaction is a fixed horizontal doorway zone. It deliberately does
+  // not ray-pick the panel or shell, so the wall colliders and the moving door
+  // pose can never hide the control from a nearby player.
+  const distanceX = doorwayPosition.x - camera.globalPosition.x
+  const distanceZ = doorwayPosition.z - camera.globalPosition.z
   setDoorInteractionUi(
-    Vector3.Dot(doorLookDirection, doorFacingDirection) >= DOOR_INTERACTION_LOOK_DOT,
+    distanceX * distanceX + distanceZ * distanceZ
+      <= DOOR_INTERACTION_DISTANCE_SQUARED,
   )
 }
 
@@ -1381,7 +1380,6 @@ scene.onBeforeRenderObservable.add(() => {
   canvas.dataset.doorCollision = String(frontDoor.panel.checkCollisions)
   updateDoorInteractionUi()
 })
-frontDoor.reset()
 canvas.dataset.doorState = frontDoor.state
 canvas.dataset.doorCollision = String(frontDoor.panel.checkCollisions)
 

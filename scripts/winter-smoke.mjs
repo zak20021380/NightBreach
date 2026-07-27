@@ -130,6 +130,46 @@ async function connectCdp(debugPort) {
   return { errors, evaluate, send, socket, waitFor }
 }
 
+async function activateDoorControl(cdp, definition, pointerId) {
+  if (definition.mobile) {
+    return cdp.evaluate(`(() => {
+      const button = document.querySelector('#useButton');
+      const bounds = button.getBoundingClientRect();
+      button.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        clientX: bounds.left + bounds.width / 2,
+        clientY: bounds.top + bounds.height / 2,
+        pointerId: ${pointerId},
+        pointerType: 'touch',
+      }));
+      return {
+        focusedCanvas: document.activeElement === document.querySelector('#renderCanvas'),
+        pointerLocked: false,
+      };
+    })()`)
+  }
+
+  await cdp.send('Input.dispatchKeyEvent', {
+    code: 'KeyE',
+    key: 'e',
+    nativeVirtualKeyCode: 69,
+    type: 'keyDown',
+    windowsVirtualKeyCode: 69,
+  })
+  await cdp.send('Input.dispatchKeyEvent', {
+    code: 'KeyE',
+    key: 'e',
+    nativeVirtualKeyCode: 69,
+    type: 'keyUp',
+    windowsVirtualKeyCode: 69,
+  })
+  return cdp.evaluate(`({
+    focusedCanvas: document.activeElement === document.querySelector('#renderCanvas'),
+    pointerLocked: document.pointerLockElement === document.querySelector('#renderCanvas'),
+  })`)
+}
+
 async function validateViewport(serverPort, definition) {
   const debugPort = await getFreePort()
   const profilePath = join(tmpdir(), `nightbreach-winter-${process.pid}-${definition.name}`)
@@ -179,6 +219,27 @@ async function validateViewport(serverPort, definition) {
     await cdp.waitFor(`window.__nightBreachTest.snapshot().deployed`)
     await delay(1_250)
 
+    if (!definition.mobile) {
+      await cdp.send('Page.bringToFront')
+      await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true })
+      await cdp.evaluate(`document.querySelector('#renderCanvas').focus()`)
+      await cdp.send('Runtime.evaluate', {
+        awaitPromise: true,
+        expression: `document.querySelector('#renderCanvas').requestPointerLock()`,
+        userGesture: true,
+      })
+      await cdp.waitFor(
+        `document.pointerLockElement === document.querySelector('#renderCanvas')`,
+        10_000,
+      )
+      assert(
+        await cdp.evaluate(
+          `document.activeElement === document.querySelector('#renderCanvas')`,
+        ),
+        `${definition.name} did not retain canvas focus under pointer lock.`,
+      )
+    }
+
     const winter = await cdp.evaluate(`(() => {
       const canvas = document.querySelector('#renderCanvas');
       const bounds = canvas.getBoundingClientRect();
@@ -224,19 +285,34 @@ async function validateViewport(serverPort, definition) {
     const screenshotPath = join(artifactDirectory, `${definition.name}.png`)
     writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'))
 
-    // Stage the player at the real front-door transform. This validates the
-    // contextual desktop/mobile affordance rather than calling the door object
-    // directly, then verifies its one-animation guard and moving collision.
+    // Stage the player at the real front-door transform while looking away.
+    // Availability must come only from the fixed 2.2m doorway zone, never from
+    // the handle pose, aim direction, or a ray blocked by the house shell.
     await cdp.evaluate(`(() => {
       const rotation = -0.04;
       const cosine = Math.cos(rotation);
       const sine = Math.sin(rotation);
       const localX = 1.48;
-      const localZ = -4.55;
+      const localZ = -5.2;
       const x = -15.6 + localX * cosine - localZ * sine;
       const z = 19.7 + localX * sine + localZ * cosine;
       window.__nightBreachTest.setPlayerPosition(x, z);
-      window.__nightBreachTest.setCameraRotation(0, rotation);
+      window.__nightBreachTest.setCameraRotation(0, rotation + Math.PI);
+    })()`)
+    await delay(100)
+    assert(
+      !await cdp.evaluate(`window.__nightBreachTest.snapshot().door.interactionAvailable`),
+      `${definition.name} exposed the door control beyond the 2.2m doorway zone.`,
+    )
+    await cdp.evaluate(`(() => {
+      const rotation = -0.04;
+      const cosine = Math.cos(rotation);
+      const sine = Math.sin(rotation);
+      const localX = 1.48;
+      const localZ = -5.05;
+      const x = -15.6 + localX * cosine - localZ * sine;
+      const z = 19.7 + localX * sine + localZ * cosine;
+      window.__nightBreachTest.setPlayerPosition(x, z);
     })()`)
     await cdp.waitFor(`window.__nightBreachTest.snapshot().door.interactionAvailable`, 20_000)
     const closedDoor = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
@@ -262,34 +338,33 @@ async function validateViewport(serverPort, definition) {
       Buffer.from(exteriorHouseScreenshot.data, 'base64'),
     )
 
-    const repeatedInputBlocked = await cdp.evaluate(`(() => {
-      if (${definition.mobile}) {
-        const button = document.querySelector('#useButton');
-        const bounds = button.getBoundingClientRect();
-        button.dispatchEvent(new PointerEvent('pointerdown', {
-          bubbles: true,
-          cancelable: true,
-          clientX: bounds.left + bounds.width / 2,
-          clientY: bounds.top + bounds.height / 2,
-          pointerId: 71,
-          pointerType: 'touch',
-        }));
-      } else {
-        window.dispatchEvent(new KeyboardEvent('keydown', {
-          bubbles: true,
-          cancelable: true,
-          code: 'KeyE',
-          key: 'e',
-        }));
-      }
-      return window.__nightBreachTest.interactWithDoor() === false;
-    })()`)
+    const exteriorControl = await activateDoorControl(cdp, definition, 71)
+    assert(
+      definition.mobile
+        || (exteriorControl.focusedCanvas && exteriorControl.pointerLocked),
+      `${definition.name} lost focused pointer-lock keyboard input: ${JSON.stringify(exteriorControl)}`,
+    )
+    const repeatedInputBlocked = await cdp.evaluate(
+      `window.__nightBreachTest.interactWithDoor() === false`,
+    )
     assert(repeatedInputBlocked,
       `${definition.name} accepted repeated door input during the active animation.`)
     await cdp.waitFor(`window.__nightBreachTest.snapshot().door.state === 'open'`, 20_000)
     const openDoor = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
     assert(openDoor.door.collisionEnabled && !openDoor.door.animating,
       `${definition.name} lost door collision after opening: ${JSON.stringify(openDoor.door)}`)
+
+    // Exercise a complete second exterior cycle. The doorway prompt must return
+    // after each animation and the moving panel must retain collision.
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.interactionAvailable`, 20_000)
+    await activateDoorControl(cdp, definition, 72)
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.state === 'closed'`, 20_000)
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.interactionAvailable`, 20_000)
+    await activateDoorControl(cdp, definition, 73)
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.state === 'open'`, 20_000)
+    const exteriorRepeated = await cdp.evaluate(`window.__nightBreachTest.snapshot().door`)
+    assert(exteriorRepeated.collisionEnabled && !exteriorRepeated.animating,
+      `${definition.name} failed repeated exterior cycling: ${JSON.stringify(exteriorRepeated)}`)
 
     // Put one live zombie directly on the front approach and the player beyond
     // the internal doorway. The normal chase mover must cross the open exterior
@@ -366,18 +441,18 @@ async function validateViewport(serverPort, definition) {
       Buffer.from(interiorHouseScreenshot.data, 'base64'),
     )
 
-    // Move deeper inside and look back at the open slab to validate Close through
-    // the same platform control and the same guarded animation path.
+    // Stand within the same fixed doorway zone on the inside while looking away.
+    // This validates that the open slab's moved handle cannot shift the trigger.
     await cdp.evaluate(`(() => {
       const rotation = -0.04;
       const cosine = Math.cos(rotation);
       const sine = Math.sin(rotation);
-      const localX = 0.69;
-      const localZ = 0.05;
+      const localX = 1.48;
+      const localZ = -1.1;
       const x = -15.6 + localX * cosine - localZ * sine;
       const z = 19.7 + localX * sine + localZ * cosine;
       window.__nightBreachTest.setPlayerPosition(x, z);
-      window.__nightBreachTest.setCameraRotation(0.1, rotation + Math.PI);
+      window.__nightBreachTest.setCameraRotation(0.1, rotation);
     })()`)
     await cdp.waitFor(`window.__nightBreachTest.snapshot().door.interactionAvailable`, 20_000)
     const closeControl = await cdp.evaluate(`window.__nightBreachTest.snapshot().door`)
@@ -387,28 +462,17 @@ async function validateViewport(serverPort, definition) {
         : closeControl.promptVisible && closeControl.promptText === 'Press E to Close',
       `${definition.name} did not expose the close control: ${JSON.stringify(closeControl)}`,
     )
-    await cdp.evaluate(`(() => {
-      if (${definition.mobile}) {
-        const button = document.querySelector('#useButton');
-        button.dispatchEvent(new PointerEvent('pointerdown', {
-          bubbles: true,
-          cancelable: true,
-          pointerId: 72,
-          pointerType: 'touch',
-        }));
-      } else {
-        window.dispatchEvent(new KeyboardEvent('keydown', {
-          bubbles: true,
-          cancelable: true,
-          code: 'KeyE',
-          key: 'e',
-        }));
-      }
-    })()`)
+    await activateDoorControl(cdp, definition, 74)
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.state === 'closed'`, 20_000)
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.interactionAvailable`, 20_000)
+    await activateDoorControl(cdp, definition, 75)
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.state === 'open'`, 20_000)
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.interactionAvailable`, 20_000)
+    await activateDoorControl(cdp, definition, 76)
     await cdp.waitFor(`window.__nightBreachTest.snapshot().door.state === 'closed'`, 20_000)
     const closedAgain = await cdp.evaluate(`window.__nightBreachTest.snapshot().door`)
     assert(closedAgain.collisionEnabled && !closedAgain.animating,
-      `${definition.name} did not finish a collision-safe close: ${JSON.stringify(closedAgain)}`)
+      `${definition.name} failed repeated interior cycling: ${JSON.stringify(closedAgain)}`)
 
     const winterFrames = await cdp.evaluate(`new Promise((resolve) => {
       let frames = 0;

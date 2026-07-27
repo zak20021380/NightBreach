@@ -38,7 +38,7 @@ export interface InteractiveHouseDoor {
   readonly panel: Mesh
   readonly state: InteractiveDoorState
   readonly isAnimating: boolean
-  getInteractionPositionToRef: (result: Vector3) => void
+  getDoorwayPositionToRef: (result: Vector3) => void
   reset: () => void
   toggle: () => boolean
   update: (deltaSeconds: number) => void
@@ -876,6 +876,12 @@ export function createEnterableOperationsHouse(
 
   // Real hinged front door. The visible slab is also the single moving collider,
   // so collision and obstacle-picking always follow the exact animated pose.
+  const doorwayPosition = worldPosition(
+    HOUSE_TRANSFORM,
+    DOOR_CENTER_X,
+    0,
+    FRONT_Z - WALL_THICKNESS * 0.5 - 0.018,
+  )
   const doorPivot = new TransformNode('operationsFrontDoorHinge', scene)
   doorPivot.position.copyFrom(worldPosition(
     HOUSE_TRANSFORM,
@@ -959,9 +965,8 @@ export function createEnterableOperationsHouse(
     get isAnimating() {
       return doorState === 'opening' || doorState === 'closing'
     },
-    getInteractionPositionToRef(result) {
-      doorHandle.computeWorldMatrix(true)
-      result.copyFrom(doorHandle.getAbsolutePosition())
+    getDoorwayPositionToRef(result) {
+      result.copyFrom(doorwayPosition)
     },
     reset() {
       doorProgress = 0
