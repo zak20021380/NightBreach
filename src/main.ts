@@ -54,6 +54,7 @@ const assetLoadingProgress = getElement<HTMLProgressElement>('#assetLoadingProgr
 const ammoDisplay = getElement<HTMLDivElement>('#ammo')
 const instructions = getElement<HTMLButtonElement>('#instructions')
 const crosshair = getElement<HTMLDivElement>('#crosshair')
+const doorPrompt = getElement<HTMLDivElement>('#doorPrompt')
 const hitMarker = getElement<HTMLDivElement>('#hitMarker')
 const headshotIndicator = getElement<HTMLDivElement>('#headshotIndicator')
 const damageIndicator = getElement<HTMLDivElement>('#damageIndicator')
@@ -69,6 +70,7 @@ const fireButton = getElement<HTMLButtonElement>('#fireButton')
 const adsButton = getElement<HTMLButtonElement>('#adsButton')
 const reloadButton = getElement<HTMLButtonElement>('#reloadButton')
 const weaponSwitchButton = getElement<HTMLButtonElement>('#weaponSwitchButton')
+const useButton = getElement<HTMLButtonElement>('#useButton')
 const assetLoadingStartedAt = performance.now()
 let assetLoadingHideTimer: number | undefined
 
@@ -129,6 +131,7 @@ let startCameraControls: () => void = () => undefined
 let stopCameraControls: () => void = () => undefined
 let fireWeapon: () => void = () => undefined
 let reloadWeapon: () => void = () => undefined
+let useDoorInteraction: () => boolean = () => false
 let equipWeapon: () => void = () => undefined
 let switchWeaponSlot: (weaponId: 'rifle' | 'shotgun') => boolean = () => false
 let unlockShotgunAudio: () => void = () => undefined
@@ -260,6 +263,7 @@ window.addEventListener('keydown', (event) => {
   // gameplayInputEnabled() already excludes the game-over state, so a downed
   // player can neither reload nor swap weapons.
   if (!isDesktop || !gameplayInputEnabled()) return
+  if (event.code === 'KeyE' && !event.repeat) useDoorInteraction()
   if (event.code === 'KeyR' && !event.repeat) reloadWeapon()
   if (event.code === 'Digit1' && !event.repeat) switchWeaponSlot('rifle')
   if (event.code === 'Digit2' && !event.repeat) switchWeaponSlot('shotgun')
@@ -1288,6 +1292,98 @@ canvas.dataset.structureNames = abandonedStructures.structures
 canvas.dataset.structureCollisionCount = String(
   abandonedStructures.collisionMeshCount,
 )
+canvas.dataset.interiorCollisionCount = String(
+  abandonedStructures.enterableHouse.interior.collisionMeshCount,
+)
+canvas.dataset.interiorLightCount = String(
+  abandonedStructures.enterableHouse.interior.lightCount,
+)
+canvas.dataset.interiorObjectCount = String(
+  abandonedStructures.enterableHouse.interior.objects.length,
+)
+
+const frontDoor = abandonedStructures.enterableHouse.frontDoor
+const doorInteractionPosition = Vector3.Zero()
+const doorLookDirection = Vector3.Forward()
+const doorFacingDirection = Vector3.Forward()
+const DOOR_INTERACTION_DISTANCE = 2.65
+const DOOR_INTERACTION_LOOK_DOT = 0.82
+let doorInteractionAvailable = false
+let doorPromptAction: 'Open' | 'Close' = 'Open'
+let renderedDoorUiVisible = false
+let renderedDoorUiAction: 'Open' | 'Close' | null = null
+
+function setDoorInteractionUi(visible: boolean) {
+  doorInteractionAvailable = visible
+  const action = frontDoor.state === 'open' ? 'Close' : 'Open'
+  doorPromptAction = action
+  if (visible === renderedDoorUiVisible && action === renderedDoorUiAction) return
+  renderedDoorUiVisible = visible
+  renderedDoorUiAction = action
+  if (isDesktop) {
+    const text = `Press E to ${action}`
+    if (doorPrompt.textContent !== text) doorPrompt.textContent = text
+    doorPrompt.classList.toggle('visible', visible)
+    doorPrompt.setAttribute('aria-hidden', String(!visible))
+  }
+  if (isTouchDevice) {
+    useButton.classList.toggle('visible', visible)
+    useButton.setAttribute('aria-hidden', String(!visible))
+  }
+  canvas.dataset.doorInteractionAvailable = String(visible)
+}
+
+function updateDoorInteractionUi() {
+  if (!gameplayInputEnabled() || frontDoor.isAnimating) {
+    setDoorInteractionUi(false)
+    return
+  }
+  frontDoor.getInteractionPositionToRef(doorInteractionPosition)
+  doorFacingDirection.copyFrom(doorInteractionPosition)
+  doorFacingDirection.subtractInPlace(camera.globalPosition)
+  const distanceSquared = doorFacingDirection.lengthSquared()
+  if (
+    distanceSquared > DOOR_INTERACTION_DISTANCE * DOOR_INTERACTION_DISTANCE
+    || distanceSquared < 0.0001
+  ) {
+    setDoorInteractionUi(false)
+    return
+  }
+  doorFacingDirection.scaleInPlace(1 / Math.sqrt(distanceSquared))
+  camera.getDirectionToRef(Vector3.Forward(), doorLookDirection)
+  setDoorInteractionUi(
+    Vector3.Dot(doorLookDirection, doorFacingDirection) >= DOOR_INTERACTION_LOOK_DOT,
+  )
+}
+
+useDoorInteraction = () => {
+  if (!gameplayInputEnabled() || !doorInteractionAvailable) return false
+  if (!frontDoor.toggle()) return false
+  setDoorInteractionUi(false)
+  canvas.dataset.doorState = frontDoor.state
+  return true
+}
+
+useButton.addEventListener('pointerdown', (event) => {
+  if (!isTouchDevice || !gameplayInputEnabled()) return
+  event.preventDefault()
+  event.stopPropagation()
+  useButton.classList.add('active')
+  useDoorInteraction()
+  window.setTimeout(() => useButton.classList.remove('active'), 90)
+}, { passive: false })
+
+scene.onBeforeRenderObservable.add(() => {
+  const deltaSeconds = Math.min(engine.getDeltaTime() / 1000, 0.05)
+  frontDoor.update(deltaSeconds)
+  canvas.dataset.doorState = frontDoor.state
+  canvas.dataset.doorAnimating = String(frontDoor.isAnimating)
+  canvas.dataset.doorCollision = String(frontDoor.panel.checkCollisions)
+  updateDoorInteractionUi()
+})
+frontDoor.reset()
+canvas.dataset.doorState = frontDoor.state
+canvas.dataset.doorCollision = String(frontDoor.panel.checkCollisions)
 
 // Winter is a separate, non-pickable render layer. These planes sit just above
 // the existing surfaces and never replace or modify gameplay geometry.
@@ -1353,6 +1449,7 @@ const winterEnvironment = new WinterEnvironment({
   performanceTier,
   worldLayerMask: WORLD_RENDER_LAYER_MASK,
   initialEnabled: resolveInitialWinterMode(window.location.search),
+  weatherShelters: abandonedStructures.weatherShelters,
 })
 
 function updateWinterRuntimeMetadata() {
@@ -7449,6 +7546,7 @@ cancelMobileInput = () => {
   aimPointerId = null
   stopAutomaticFire()
   releaseAds()
+  useButton.classList.remove('active')
 }
 
 movementControl.addEventListener('pointerdown', (event) => {
@@ -7626,6 +7724,8 @@ function restartPrototype() {
   camera.setTarget(PLAYER_START_TARGET)
   camera.cameraDirection.set(0, 0, 0)
   camera.cameraRotation.set(0, 0)
+  frontDoor.reset()
+  setDoorInteractionUi(false)
   previousCameraPosition.copyFrom(camera.position)
   previousCameraRotation.copyFrom(camera.rotation)
   swayX = 0
@@ -7979,6 +8079,16 @@ if (import.meta.env.DEV) {
           },
           cameraYaw: camera.rotation.y,
           deployed,
+          door: {
+            action: doorPromptAction,
+            animating: frontDoor.isAnimating,
+            collisionEnabled: frontDoor.panel.checkCollisions,
+            interactionAvailable: doorInteractionAvailable,
+            mobileUseVisible: useButton.classList.contains('visible'),
+            promptText: doorPrompt.textContent ?? '',
+            promptVisible: doorPrompt.classList.contains('visible'),
+            state: frontDoor.state,
+          },
           firePointerId,
           gameOver,
           health: playerHealth,
@@ -7996,6 +8106,10 @@ if (import.meta.env.DEV) {
               position: [...structure.position],
             })),
             visibleMeshCount: abandonedStructures.visibleMeshCount,
+          },
+          interior: {
+            ...abandonedStructures.enterableHouse.interior,
+            objects: [...abandonedStructures.enterableHouse.interior.objects],
           },
           winter: winterEnvironment.snapshot(),
           reloadElapsed,
@@ -8088,6 +8202,9 @@ if (import.meta.env.DEV) {
       },
       reload() {
         reloadWeapon()
+      },
+      interactWithDoor() {
+        return useDoorInteraction()
       },
       inputGates() {
         return {

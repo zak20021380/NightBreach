@@ -22,6 +22,17 @@ export interface WinterSurface {
   rotationY?: number
 }
 
+export interface WeatherShelter {
+  name: string
+  x: number
+  z: number
+  width: number
+  depth: number
+  rotationY?: number
+  minimumY?: number
+  maximumY?: number
+}
+
 interface WinterEnvironmentOptions {
   scene: Scene
   camera: Camera
@@ -31,6 +42,7 @@ interface WinterEnvironmentOptions {
   performanceTier: WinterPerformanceTier
   worldLayerMask: number
   initialEnabled: boolean
+  weatherShelters?: readonly WeatherShelter[]
 }
 
 interface EnvironmentPresentation {
@@ -58,6 +70,7 @@ export interface WinterEnvironmentSnapshot {
   fogStart: number
   fogEnd: number
   fogColor: string
+  locallySuppressed: boolean
   particleCapacity: number
   particleEmitRate: number
   skyLightIntensity: number
@@ -209,6 +222,7 @@ export class WinterEnvironment {
   private readonly snowParticles: ParticleSystem
   private readonly emitter = Vector3.Zero()
   private enabled = false
+  private localSnowSuppressed = false
 
   readonly surfaceMeshCount: number
   readonly particleCapacity: number
@@ -277,6 +291,7 @@ export class WinterEnvironment {
 
     scene.onBeforeRenderObservable.add(() => {
       if (!this.enabled) return
+      this.updateLocalSnowSuppression()
       this.emitter.copyFrom(options.camera.globalPosition)
       this.emitter.y += WINTER_CONFIG.snow.emitterHeight
     })
@@ -295,10 +310,18 @@ export class WinterEnvironment {
     }
     this.enabled = enabled
     this.snowSurface.setEnabled(enabled)
-    if (enabled) this.snowParticles.start()
+    if (enabled) {
+      this.localSnowSuppressed = this.isCameraSheltered()
+      this.snowParticles.emitRate = this.localSnowSuppressed
+        ? 0
+        : this.particleEmitRate
+      this.snowParticles.start()
+      if (this.localSnowSuppressed) this.snowParticles.reset()
+    }
     else {
       this.snowParticles.stop()
       this.snowParticles.reset()
+      this.localSnowSuppressed = false
     }
     this.applyPresentation(enabled)
   }
@@ -321,12 +344,45 @@ export class WinterEnvironment {
       fogStart: this.options.scene.fogStart,
       fogEnd: this.options.scene.fogEnd,
       fogColor: `${fog.r.toFixed(3)},${fog.g.toFixed(3)},${fog.b.toFixed(3)}`,
+      locallySuppressed: this.localSnowSuppressed,
       particleCapacity: this.particleCapacity,
       particleEmitRate: this.particleEmitRate,
       skyLightIntensity: this.options.skyLight.intensity,
       sunLightIntensity: this.options.sunLight.intensity,
       surfaceMeshCount: this.surfaceMeshCount,
     }
+  }
+
+  private isCameraSheltered() {
+    const shelters = this.options.weatherShelters
+    if (!shelters || shelters.length === 0) return false
+    const position = this.options.camera.globalPosition
+    for (const shelter of shelters) {
+      if (shelter.minimumY !== undefined && position.y < shelter.minimumY) continue
+      if (shelter.maximumY !== undefined && position.y > shelter.maximumY) continue
+      const rotation = shelter.rotationY ?? 0
+      const cosine = Math.cos(rotation)
+      const sine = Math.sin(rotation)
+      const offsetX = position.x - shelter.x
+      const offsetZ = position.z - shelter.z
+      const localX = offsetX * cosine + offsetZ * sine
+      const localZ = -offsetX * sine + offsetZ * cosine
+      if (
+        Math.abs(localX) <= shelter.width * 0.5
+        && Math.abs(localZ) <= shelter.depth * 0.5
+      ) return true
+    }
+    return false
+  }
+
+  private updateLocalSnowSuppression() {
+    const sheltered = this.isCameraSheltered()
+    if (sheltered === this.localSnowSuppressed) return
+    this.localSnowSuppressed = sheltered
+    this.snowParticles.emitRate = sheltered ? 0 : this.particleEmitRate
+    // Existing flakes are cleared on entry instead of finishing their lifetime
+    // beneath the roof; outdoor emission resumes from the same pool on exit.
+    if (sheltered) this.snowParticles.reset()
   }
 
   private applyPresentation(winter: boolean) {

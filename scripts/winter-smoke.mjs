@@ -137,6 +137,8 @@ async function validateViewport(serverPort, definition) {
     '--headless=new',
     '--no-first-run',
     '--no-default-browser-check',
+    '--no-sandbox',
+    '--disable-gpu-sandbox',
     '--enable-unsafe-swiftshader',
     '--remote-allow-origins=*',
     '--use-angle=swiftshader',
@@ -222,6 +224,192 @@ async function validateViewport(serverPort, definition) {
     const screenshotPath = join(artifactDirectory, `${definition.name}.png`)
     writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'))
 
+    // Stage the player at the real front-door transform. This validates the
+    // contextual desktop/mobile affordance rather than calling the door object
+    // directly, then verifies its one-animation guard and moving collision.
+    await cdp.evaluate(`(() => {
+      const rotation = -0.04;
+      const cosine = Math.cos(rotation);
+      const sine = Math.sin(rotation);
+      const localX = 1.48;
+      const localZ = -4.55;
+      const x = -15.6 + localX * cosine - localZ * sine;
+      const z = 19.7 + localX * sine + localZ * cosine;
+      window.__nightBreachTest.setPlayerPosition(x, z);
+      window.__nightBreachTest.setCameraRotation(0, rotation);
+    })()`)
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.interactionAvailable`, 20_000)
+    const closedDoor = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
+    assert(
+      closedDoor.door.state === 'closed'
+        && closedDoor.door.collisionEnabled
+        && (definition.mobile
+          ? closedDoor.door.mobileUseVisible
+          : closedDoor.door.promptVisible
+            && closedDoor.door.promptText === 'Press E to Open'),
+      `${definition.name} did not expose the correct closed-door control: ${JSON.stringify(closedDoor.door)}`,
+    )
+    const exteriorHouseScreenshot = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      fromSurface: true,
+    })
+    const exteriorHouseScreenshotPath = join(
+      artifactDirectory,
+      `${definition.name}-house-exterior.png`,
+    )
+    writeFileSync(
+      exteriorHouseScreenshotPath,
+      Buffer.from(exteriorHouseScreenshot.data, 'base64'),
+    )
+
+    const repeatedInputBlocked = await cdp.evaluate(`(() => {
+      if (${definition.mobile}) {
+        const button = document.querySelector('#useButton');
+        const bounds = button.getBoundingClientRect();
+        button.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          clientX: bounds.left + bounds.width / 2,
+          clientY: bounds.top + bounds.height / 2,
+          pointerId: 71,
+          pointerType: 'touch',
+        }));
+      } else {
+        window.dispatchEvent(new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          code: 'KeyE',
+          key: 'e',
+        }));
+      }
+      return window.__nightBreachTest.interactWithDoor() === false;
+    })()`)
+    assert(repeatedInputBlocked,
+      `${definition.name} accepted repeated door input during the active animation.`)
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.state === 'open'`, 20_000)
+    const openDoor = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
+    assert(openDoor.door.collisionEnabled && !openDoor.door.animating,
+      `${definition.name} lost door collision after opening: ${JSON.stringify(openDoor.door)}`)
+
+    // Put one live zombie directly on the front approach and the player beyond
+    // the internal doorway. The normal chase mover must cross the open exterior
+    // threshold rather than treating the former solid footprint as an obstacle.
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().zombies.length > 0`, 30_000)
+    await cdp.evaluate(`(() => {
+      const api = window.__nightBreachTest;
+      const rotation = -0.04;
+      const cosine = Math.cos(rotation);
+      const sine = Math.sin(rotation);
+      const world = (localX, localZ) => ({
+        x: -15.6 + localX * cosine - localZ * sine,
+        z: 19.7 + localX * sine + localZ * cosine,
+      });
+      const player = world(1.0, 0.48);
+      const approach = world(1.48, -4.25);
+      api.setPlayerPosition(player.x, player.z);
+      api.setCameraRotation(0, rotation);
+      api.setZombiePosition(0, approach.x, approach.z);
+      api.setZombiePosition(1, 23, -23);
+      api.setZombiePosition(2, -23, -23);
+    })()`)
+    await cdp.waitFor(`(() => {
+      const zombie = window.__nightBreachTest.snapshot().zombies[0];
+      if (!zombie) return false;
+      const rotation = -0.04;
+      const offsetX = zombie.position.x + 15.6;
+      const offsetZ = zombie.position.z - 19.7;
+      const localZ = -offsetX * Math.sin(rotation) + offsetZ * Math.cos(rotation);
+      return localZ > -2.5;
+    })()`, 30_000)
+    const zombieTraversal = await cdp.evaluate(`(() => {
+      const api = window.__nightBreachTest;
+      const position = api.snapshot().zombies[0].position;
+      api.setZombiePosition(0, 23, 23);
+      return position;
+    })()`)
+
+    // Stand in the entry room facing the internal doorway. Snow must clear at
+    // once beneath the roof while the winter lighting and outdoor system remain
+    // enabled.
+    await cdp.evaluate(`(() => {
+      const rotation = -0.04;
+      const cosine = Math.cos(rotation);
+      const sine = Math.sin(rotation);
+      const localX = 1.0;
+      const localZ = -1.72;
+      const x = -15.6 + localX * cosine - localZ * sine;
+      const z = 19.7 + localX * sine + localZ * cosine;
+      window.__nightBreachTest.setPlayerPosition(x, z);
+      window.__nightBreachTest.setCameraRotation(-0.035, rotation);
+    })()`)
+    await cdp.waitFor(`(() => {
+      const winter = window.__nightBreachTest.snapshot().winter;
+      return winter.enabled && winter.locallySuppressed && winter.activeParticles === 0;
+    })()`, 20_000)
+    const interiorState = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
+    assert(
+      interiorState.interior.lightCount === 2
+        && interiorState.interior.collisionMeshCount >= 8
+        && interiorState.interior.objects.includes('storage alcove'),
+      `${definition.name} interior metadata was incomplete: ${JSON.stringify(interiorState.interior)}`,
+    )
+    const interiorHouseScreenshot = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      fromSurface: true,
+    })
+    const interiorHouseScreenshotPath = join(
+      artifactDirectory,
+      `${definition.name}-house-interior.png`,
+    )
+    writeFileSync(
+      interiorHouseScreenshotPath,
+      Buffer.from(interiorHouseScreenshot.data, 'base64'),
+    )
+
+    // Move deeper inside and look back at the open slab to validate Close through
+    // the same platform control and the same guarded animation path.
+    await cdp.evaluate(`(() => {
+      const rotation = -0.04;
+      const cosine = Math.cos(rotation);
+      const sine = Math.sin(rotation);
+      const localX = 0.69;
+      const localZ = 0.05;
+      const x = -15.6 + localX * cosine - localZ * sine;
+      const z = 19.7 + localX * sine + localZ * cosine;
+      window.__nightBreachTest.setPlayerPosition(x, z);
+      window.__nightBreachTest.setCameraRotation(0.1, rotation + Math.PI);
+    })()`)
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.interactionAvailable`, 20_000)
+    const closeControl = await cdp.evaluate(`window.__nightBreachTest.snapshot().door`)
+    assert(
+      definition.mobile
+        ? closeControl.mobileUseVisible
+        : closeControl.promptVisible && closeControl.promptText === 'Press E to Close',
+      `${definition.name} did not expose the close control: ${JSON.stringify(closeControl)}`,
+    )
+    await cdp.evaluate(`(() => {
+      if (${definition.mobile}) {
+        const button = document.querySelector('#useButton');
+        button.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 72,
+          pointerType: 'touch',
+        }));
+      } else {
+        window.dispatchEvent(new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          code: 'KeyE',
+          key: 'e',
+        }));
+      }
+    })()`)
+    await cdp.waitFor(`window.__nightBreachTest.snapshot().door.state === 'closed'`, 20_000)
+    const closedAgain = await cdp.evaluate(`window.__nightBreachTest.snapshot().door`)
+    assert(closedAgain.collisionEnabled && !closedAgain.animating,
+      `${definition.name} did not finish a collision-safe close: ${JSON.stringify(closedAgain)}`)
+
     const winterFrames = await cdp.evaluate(`new Promise((resolve) => {
       let frames = 0;
       const startedAt = performance.now();
@@ -272,6 +460,15 @@ async function validateViewport(serverPort, definition) {
     return {
       name: definition.name,
       frameSample: { normal: normalFrames, winter: winterFrames },
+      house: {
+        closedAgain,
+        exteriorScreenshotPath: exteriorHouseScreenshotPath,
+        interiorScreenshotPath: interiorHouseScreenshotPath,
+        interior: interiorState.interior,
+        snowSuppressedInside: interiorState.winter.locallySuppressed
+          && interiorState.winter.activeParticles === 0,
+        zombieTraversal,
+      },
       performanceTier: winter.performanceTier,
       screenshotPath,
       snow: winter.state,

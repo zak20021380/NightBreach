@@ -127,6 +127,31 @@ body {
   transition-duration: 45ms;
 }
 
+#doorPrompt {
+  position: fixed;
+  top: calc(50% + 36px);
+  left: 50%;
+  z-index: 11;
+  padding: 7px 11px 8px;
+  border: 1px solid rgb(218 224 207 / 30%);
+  background: rgb(19 24 21 / 72%);
+  color: #eef0e6;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.035em;
+  opacity: 0;
+  transform: translate(-50%, 5px);
+  transition: opacity 110ms ease, transform 110ms ease;
+  text-shadow: 0 1px 2px #111;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+#doorPrompt.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
 #hitMarker {
   position: fixed;
   top: 50%;
@@ -534,6 +559,38 @@ body {
   letter-spacing: 0.04em;
 }
 
+#useButton {
+  position: absolute;
+  left: 50%;
+  bottom: max(20px, calc(env(safe-area-inset-bottom) + 12px));
+  z-index: 6;
+  display: none;
+  min-width: 58px;
+  height: clamp(36px, 9.5vh, 46px);
+  padding: 0 14px;
+  border: 1px solid rgb(226 211 166 / 54%);
+  border-radius: 7px;
+  outline: none;
+  background: linear-gradient(180deg, rgb(98 91 66 / 84%), rgb(45 45 37 / 84%));
+  box-shadow: inset 0 1px rgb(255 255 255 / 12%), 0 3px 12px rgb(0 0 0 / 30%);
+  color: #f1ead7;
+  font: 750 clamp(10px, 2.5vh, 13px) / 1 "Segoe UI", Arial, sans-serif;
+  letter-spacing: 0.11em;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.touch-device.game-deployed #useButton.visible {
+  display: grid;
+  place-items: center;
+}
+
+#useButton.active {
+  filter: brightness(1.18);
+  transform: translateX(-50%) scale(0.94);
+}
+
 #orientationNotice {
   position: fixed;
   inset: 0;
@@ -707,6 +764,12 @@ body {
     bottom: max(80px, calc(env(safe-area-inset-bottom) + 21vh));
     width: clamp(42px, 11vh, 52px);
     height: clamp(42px, 11vh, 52px);
+  }
+
+  #useButton {
+    bottom: max(12px, calc(env(safe-area-inset-bottom) + 7px));
+    min-width: 54px;
+    height: 34px;
   }
 }
 
