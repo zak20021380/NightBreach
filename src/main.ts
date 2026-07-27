@@ -122,6 +122,7 @@ let fireWeapon: () => void = () => undefined
 let reloadWeapon: () => void = () => undefined
 let equipWeapon: () => void = () => undefined
 let switchWeaponSlot: (weaponId: 'rifle' | 'shotgun') => boolean = () => false
+let unlockShotgunAudio: () => void = () => undefined
 let cancelMobileInput: () => void = () => undefined
 let stopZombieWaveTimers: () => void = () => undefined
 let startZombieWave: () => void = () => undefined
@@ -200,6 +201,10 @@ function requestPointerLockSafely() {
 }
 
 function deployGame() {
+  // Resume the already-preloaded Web Audio graph inside the activation gesture.
+  // This is required by mobile autoplay policies and keeps later pump/reload
+  // cues available even though they begin after the original pointer event.
+  unlockShotgunAudio()
   if (deployed) return
   if (!gameReady) {
     deployRequested = true
@@ -422,6 +427,7 @@ function damagePlayer(amount: number, attackerPosition: Vector3) {
   reloadElapsed = -1
   // Death interrupts the shotgun exactly like a weapon switch: the reload
   // clip stops cleanly and its unfinished shell transfer is dropped.
+  shotgunAudio.stopAll()
   cancelShotgunReload()
   cancelShotgunShotCycle()
   reloadButton.disabled = true
@@ -3680,6 +3686,247 @@ const SHOTGUN_COMBAT_CONFIG = {
   reloadFallbackSeconds: 409 / 60,
 }
 
+type ShotgunSoundName = 'shot' | 'pump' | 'reload'
+
+// Audio offsets are authored-animation seconds at speed 1. The pump offset is
+// the first frame where Slide_059 leaves its rest position in SG_FPS_Shot.
+// Reload offsets are the four frames where a new 12ge_low_062 shell begins its
+// handling pass in SG_FPS_Reload. Both offsets and playback rate scale with the
+// animation speed, so changing the view-model speed preserves synchronization.
+const SHOTGUN_AUDIO_CONFIG = {
+  masterVolume: 1,
+  volumes: {
+    shot: 0.9,
+    pump: 0.72,
+    reload: 0.68,
+  } satisfies Readonly<Record<ShotgunSoundName, number>>,
+  files: {
+    shot: '/assets/audio/weapons/shotgun/shot.wav',
+    pump: '/assets/audio/weapons/shotgun/pump.wav',
+    reload: '/assets/audio/weapons/shotgun/reload.wav',
+  } satisfies Readonly<Record<ShotgunSoundName, string>>,
+  pumpOffsetSeconds: 23 / 60,
+  reloadOffsetsSeconds: [39 / 60, 120 / 60, 200 / 60, 279 / 60],
+} as const
+
+// One AudioContext, three decoded buffers and three persistent gain nodes keep
+// playback cheap on mobile. AudioBufferSourceNodes are intentionally one-shot,
+// but every live/scheduled source is tracked so an action can never duplicate
+// itself and weapon switches, death, restart or page suspension can stop it.
+class ShotgunAudioController {
+  private context: AudioContext | null = null
+  private masterGain: GainNode | null = null
+  private readonly gains: Partial<Record<ShotgunSoundName, GainNode>> = {}
+  private readonly buffers = new Map<ShotgunSoundName, AudioBuffer>()
+  private readonly activeSources: Record<ShotgunSoundName, Set<AudioBufferSourceNode>> = {
+    shot: new Set(),
+    pump: new Set(),
+    reload: new Set(),
+  }
+  private preloadPromise: Promise<void> | null = null
+  private audioUnavailableLogged = false
+
+  private ensureContext() {
+    if (this.context) return this.context
+    if (typeof AudioContext === 'undefined') {
+      if (!this.audioUnavailableLogged) {
+        this.audioUnavailableLogged = true
+        console.warn('[Night Breach][Shotgun Audio] Web Audio is unavailable in this browser.')
+      }
+      canvas.dataset.shotgunAudioReady = 'unavailable'
+      return null
+    }
+
+    this.context = new AudioContext({ latencyHint: 'interactive' })
+    this.masterGain = this.context.createGain()
+    this.masterGain.gain.value = SHOTGUN_AUDIO_CONFIG.masterVolume
+    this.masterGain.connect(this.context.destination)
+
+    for (const soundName of Object.keys(SHOTGUN_AUDIO_CONFIG.files) as ShotgunSoundName[]) {
+      const gain = this.context.createGain()
+      gain.gain.value = SHOTGUN_AUDIO_CONFIG.volumes[soundName]
+      gain.connect(this.masterGain)
+      this.gains[soundName] = gain
+    }
+    return this.context
+  }
+
+  preload() {
+    if (this.preloadPromise) return this.preloadPromise
+    const context = this.ensureContext()
+    if (!context) return Promise.resolve()
+
+    canvas.dataset.shotgunAudioReady = 'loading'
+    this.preloadPromise = Promise.all(
+      (Object.entries(SHOTGUN_AUDIO_CONFIG.files) as [ShotgunSoundName, string][])
+        .map(async ([soundName, path]) => {
+          try {
+            const response = await fetch(path, { cache: 'force-cache' })
+            if (!response.ok) {
+              throw new Error(`${response.status} ${response.statusText}`)
+            }
+            const buffer = await context.decodeAudioData(await response.arrayBuffer())
+            this.buffers.set(soundName, buffer)
+          } catch (error) {
+            logRuntimeWarning(`[Shotgun Audio] Could not preload ${path}.`, error)
+          }
+        }),
+    ).then(() => {
+      canvas.dataset.shotgunAudioReady = this.buffers.size === 3 ? 'ready' : 'partial'
+    })
+    return this.preloadPromise
+  }
+
+  async unlock() {
+    const context = this.ensureContext()
+    if (!context) return
+
+    // Resume immediately while the browser still considers this call part of
+    // the deployment gesture; decoding may finish asynchronously afterward.
+    if (context.state === 'suspended') {
+      try {
+        await context.resume()
+      } catch (error) {
+        logRuntimeWarning('[Shotgun Audio] AudioContext resume was unavailable.', error)
+      }
+    }
+    await this.preload()
+  }
+
+  private stop(soundName: ShotgunSoundName) {
+    const sources = this.activeSources[soundName]
+    for (const source of sources) {
+      source.onended = null
+      try {
+        source.stop()
+      } catch {
+        // A source that ended between iteration and stop is already harmless.
+      }
+      source.disconnect()
+    }
+    sources.clear()
+  }
+
+  private schedule(
+    soundName: ShotgunSoundName,
+    authoredOffsetsSeconds: readonly number[],
+    animationSpeed: number,
+    baseTime: number,
+  ) {
+    const context = this.context
+    const buffer = this.buffers.get(soundName)
+    const gain = this.gains[soundName]
+    if (!context || !buffer || !gain) return
+
+    const speed = Math.max(0.001, Math.abs(animationSpeed))
+    for (const authoredOffset of authoredOffsetsSeconds) {
+      const source = context.createBufferSource()
+      source.buffer = buffer
+      source.playbackRate.value = speed
+      source.connect(gain)
+      this.activeSources[soundName].add(source)
+      source.onended = () => {
+        this.activeSources[soundName].delete(source)
+        source.disconnect()
+      }
+      source.start(baseTime + authoredOffset / speed)
+    }
+  }
+
+  startShotCycle(animationSpeed: number) {
+    const context = this.context
+    if (!context) return
+    if (context.state === 'suspended') void context.resume()
+
+    // A single source per cue means held fire can never stack an old shot or
+    // pump tail on top of the next authored fire-and-pump cycle.
+    this.stop('reload')
+    this.stop('shot')
+    this.stop('pump')
+    const baseTime = context.currentTime
+    this.schedule('shot', [0], animationSpeed, baseTime)
+    this.schedule(
+      'pump',
+      [SHOTGUN_AUDIO_CONFIG.pumpOffsetSeconds],
+      animationSpeed,
+      baseTime,
+    )
+  }
+
+  startReload(animationSpeed: number) {
+    const context = this.context
+    if (!context) return
+    if (context.state === 'suspended') void context.resume()
+
+    // Reload cannot begin until the shot cycle gate clears, but explicitly
+    // retire any remaining shot/pump tail so mechanical cues never overlap.
+    this.stop('shot')
+    this.stop('pump')
+    this.stop('reload')
+    this.schedule(
+      'reload',
+      SHOTGUN_AUDIO_CONFIG.reloadOffsetsSeconds,
+      animationSpeed,
+      context.currentTime,
+    )
+  }
+
+  resumeShotCycle(elapsedSeconds: number, animationSpeed: number) {
+    const context = this.context
+    if (!context) return
+    if (context.state === 'suspended') void context.resume()
+
+    this.stop('pump')
+    const speed = Math.max(0.001, Math.abs(animationSpeed))
+    const authoredElapsed = elapsedSeconds * speed
+    if (authoredElapsed >= SHOTGUN_AUDIO_CONFIG.pumpOffsetSeconds) return
+    this.schedule(
+      'pump',
+      [SHOTGUN_AUDIO_CONFIG.pumpOffsetSeconds - authoredElapsed],
+      speed,
+      context.currentTime,
+    )
+  }
+
+  resumeReload(elapsedSeconds: number, animationSpeed: number) {
+    const context = this.context
+    if (!context) return
+    if (context.state === 'suspended') void context.resume()
+
+    this.stop('reload')
+    const speed = Math.max(0.001, Math.abs(animationSpeed))
+    const authoredElapsed = elapsedSeconds * speed
+    const remainingOffsets = SHOTGUN_AUDIO_CONFIG.reloadOffsetsSeconds
+      .filter((offset) => offset > authoredElapsed)
+      .map((offset) => offset - authoredElapsed)
+    this.schedule('reload', remainingOffsets, speed, context.currentTime)
+  }
+
+  stopReload() {
+    this.stop('reload')
+  }
+
+  stopAll() {
+    this.stop('shot')
+    this.stop('pump')
+    this.stop('reload')
+  }
+}
+
+canvas.dataset.shotgunAudioReady = 'loading'
+canvas.dataset.shotgunAudioTimings = [
+  'shot:0.000000',
+  `pump:${SHOTGUN_AUDIO_CONFIG.pumpOffsetSeconds.toFixed(6)}`,
+  ...SHOTGUN_AUDIO_CONFIG.reloadOffsetsSeconds.map(
+    (offset, index) => `reload${index + 1}:${offset.toFixed(6)}`,
+  ),
+].join(',')
+const shotgunAudio = new ShotgunAudioController()
+unlockShotgunAudio = () => {
+  void shotgunAudio.unlock()
+}
+void shotgunAudio.preload()
+
 // The four authored clips this phase drives, exactly as exported in the GLB.
 const SHOTGUN_ANIMATION_CLIPS = {
   idle: 'Armature|SG_FPS_Idle',
@@ -5158,6 +5405,7 @@ function beginShotgunReload() {
   shotgunReloadElapsed = 0
   reloadButton.disabled = true
   playShotgunAnimation('reload')
+  shotgunAudio.startReload(SHOTGUN_ASSET_CONFIG.animationSpeed)
 }
 
 // The single ammo-transfer point. Only completeShotgunReload calls it, and the
@@ -5186,6 +5434,7 @@ function completeShotgunReload() {
 // Interruption path: the state is cleared BEFORE the clip is stopped so no
 // callback ordering can ever reach the ammo transfer above.
 function cancelShotgunReload() {
+  shotgunAudio.stopReload()
   if (shotgunReloadElapsed < 0) return
   shotgunReloadElapsed = -1
   const reload = shotgunClips.reload
@@ -5199,6 +5448,7 @@ function setShotgunViewModelEnabled(enabled: boolean) {
   shotgunRoot.setEnabled(enabled)
   if (enabled) playShotgunRestAnimation()
   else {
+    shotgunAudio.stopAll()
     stopShotgunAnimations()
     canvas.dataset.shotgunActiveAnimation = 'stopped'
   }
@@ -5213,6 +5463,7 @@ function discardShotgunViewModel(context: string, error: unknown) {
   // ammo transfer is dropped, then clear the pump-cycle gate.
   cancelShotgunReload()
   cancelShotgunShotCycle()
+  shotgunAudio.stopAll()
   stopShotgunAnimations()
   shotgunRoot?.setEnabled(false)
   try {
@@ -5363,6 +5614,7 @@ async function loadLocalShotgunModel(parent: TransformNode) {
     shotgunReloadDurationSeconds = resolvedClips.reload
       ? getImportedAnimationDurationSeconds(resolvedClips.reload, SHOTGUN_ASSET_CONFIG.animationSpeed)
       : SHOTGUN_COMBAT_CONFIG.reloadFallbackSeconds
+    await shotgunAudio.preload()
     disposeShotgunResources = () => {
       activatedEntries.dispose()
       if (!activatedRoot.isDisposed()) activatedRoot.dispose()
@@ -5841,6 +6093,10 @@ function fireShotgun() {
   )
   muzzleFlashRemaining = MUZZLE_FLASH_DURATION
   weaponFireEffects.trigger(SHOTGUN_COMBAT_CONFIG.recoil.muzzleFlashStrength)
+  // This call shares the exact trigger point with the visible muzzle flash and
+  // the pellet raycasts immediately below. It also schedules the later pump
+  // cue from the same audio clock as the shot, avoiding timer/frame drift.
+  shotgunAudio.startShotCycle(SHOTGUN_ASSET_CONFIG.animationSpeed)
   camera.cameraRotation.x -= SHOTGUN_COMBAT_CONFIG.recoil.cameraKickPitch * recoilScale
   camera.cameraRotation.y += (Math.random() * 2 - 1)
     * SHOTGUN_COMBAT_CONFIG.recoil.cameraKickYaw * recoilScale
@@ -6253,6 +6509,7 @@ function clamp(value: number, minimum: number, maximum: number) {
 function restartPrototype() {
   if (!gameOver) return
 
+  shotgunAudio.stopAll()
   resetZombieWave()
   bloodEffectPool.reset()
   playerHealth = PLAYER_MAX_HEALTH
@@ -6526,6 +6783,7 @@ function setWebViewActive(active: boolean) {
   canvas.dataset.webViewActive = String(nextActive)
 
   if (!nextActive) {
+    shotgunAudio.stopAll()
     cancelMobileInput()
     if (isDesktop && deployed && !gameOver) stopCameraControls()
     for (let index = 0; index < zombies.length; index += 1) {
@@ -6548,6 +6806,22 @@ function setWebViewActive(active: boolean) {
       pausedWeaponAnimations[index].restart()
     }
     pausedWeaponAnimations.length = 0
+    // Scheduled Web Audio sources cannot be paused. Backgrounding stops them
+    // above; on return, rebuild only cues that have not yet occurred so the
+    // resumed authored clip stays synchronized without replaying old sounds.
+    if (activeWeaponId === 'shotgun') {
+      if (shotgunShotElapsed >= 0) {
+        shotgunAudio.resumeShotCycle(
+          shotgunShotElapsed,
+          SHOTGUN_ASSET_CONFIG.animationSpeed,
+        )
+      } else if (shotgunReloadElapsed >= 0) {
+        shotgunAudio.resumeReload(
+          shotgunReloadElapsed,
+          SHOTGUN_ASSET_CONFIG.animationSpeed,
+        )
+      }
+    }
     if (isDesktop && deployed && !gameOver) startCameraControls()
   }
 
