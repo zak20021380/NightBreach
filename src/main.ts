@@ -2086,6 +2086,14 @@ class Zombie {
   private knockbackDirectionZ = 0
   private knockbackSpeed = 0
   private knockbackRemaining = 0
+  // A lethal close blast hands its already-aggregated horizontal momentum to
+  // this separate corpse mover. Death animation and wave state remain owned by
+  // the normal death path; only the root translation continues briefly.
+  private deathImpulseDirectionX = 0
+  private deathImpulseDirectionZ = 0
+  private deathImpulseSpeed = 0
+  private deathImpulseRemaining = 0
+  private pendingDeathImpulseMinimumSpeed = 0
   private attackElapsed = 0
   private attackCooldownRemaining = 0
   private attackDamageApplied = false
@@ -2207,7 +2215,12 @@ class Zombie {
   // Horizontal initial speed in world units per second. The caller derives it
   // from aggregated pellet force and distance; direction only needs to point
   // away from the shooter. Dead or disposed zombies never accept an impulse.
-  applyKnockback(directionX: number, directionZ: number, initialSpeed: number) {
+  applyKnockback(
+    directionX: number,
+    directionZ: number,
+    initialSpeed: number,
+    deathImpulseMinimumSpeed = 0,
+  ) {
     if (this.disposed || this._state === 'dead' || initialSpeed <= 0) return
     const length = Math.hypot(directionX, directionZ)
     if (length < 0.001) return
@@ -2218,10 +2231,15 @@ class Zombie {
       SHOTGUN_COMBAT_CONFIG.knockback.maxSpeed,
     )
     this.knockbackRemaining = SHOTGUN_COMBAT_CONFIG.knockback.durationSeconds
+    this.pendingDeathImpulseMinimumSpeed = deathImpulseMinimumSpeed
   }
 
   get knockbackAmount() {
-    return this.knockbackSpeed
+    return this._state === 'dead' ? this.deathImpulseSpeed : this.knockbackSpeed
+  }
+
+  get deathImpulseAmount() {
+    return this.deathImpulseSpeed
   }
 
   private applyDamage(
@@ -2292,6 +2310,7 @@ class Zombie {
     this.setPaused(false)
 
     if (this._state === 'dead') {
+      this.updateDeathImpulse(deltaSeconds)
       this.deathElapsed += deltaSeconds
       this.updateProceduralAnimation(deltaSeconds)
       if (this.deathElapsed >= (
@@ -2321,7 +2340,10 @@ class Zombie {
         -SHOTGUN_COMBAT_CONFIG.knockback.decayPerSecond * movementSeconds,
       )
       this.knockbackRemaining = Math.max(0, this.knockbackRemaining - deltaSeconds)
-      if (this.knockbackRemaining === 0) this.knockbackSpeed = 0
+      if (this.knockbackRemaining === 0) {
+        this.knockbackSpeed = 0
+        this.pendingDeathImpulseMinimumSpeed = 0
+      }
     }
 
     if (this._state === 'hit') {
@@ -2550,13 +2572,48 @@ class Zombie {
     this.releaseApproachSlotIfHeld()
     this.currentDirectionX = 0
     this.currentDirectionZ = 0
-    // A corpse never slides: any shotgun impulse still decaying dies with it.
-    this.knockbackSpeed = 0
-    this.knockbackRemaining = 0
-    this.root.checkCollisions = false
+    // The shotgun applies its aggregated impulse before damage is resolved.
+    // Preserve that direction/speed across a lethal hit instead of clearing it:
+    // the death animation continues while the collision-aware root is thrown.
+    if (this.knockbackSpeed > 0 && this.knockbackRemaining > 0) {
+      this.deathImpulseDirectionX = this.knockbackDirectionX
+      this.deathImpulseDirectionZ = this.knockbackDirectionZ
+      this.deathImpulseSpeed = Math.min(
+        Math.max(this.knockbackSpeed, this.pendingDeathImpulseMinimumSpeed),
+        SHOTGUN_COMBAT_CONFIG.knockback.deathMaxSpeed,
+      )
+      this.deathImpulseRemaining = SHOTGUN_COMBAT_CONFIG.knockback.deathDurationSeconds
+      this.root.checkCollisions = true
+    } else {
+      this.root.checkCollisions = false
+    }
     this.disableHitZones()
     onZombieDied()
     console.info(`[Night Breach] Zombie ${this.id} eliminated; hit detection disabled.`)
+  }
+
+  private updateDeathImpulse(deltaSeconds: number) {
+    if (this.deathImpulseRemaining <= 0 || this.deathImpulseSpeed <= 0) return
+    const movementSeconds = Math.min(deltaSeconds, this.deathImpulseRemaining)
+    this.movementDelta.set(
+      this.deathImpulseDirectionX * this.deathImpulseSpeed * movementSeconds,
+      0,
+      this.deathImpulseDirectionZ * this.deathImpulseSpeed * movementSeconds,
+    )
+    this.root.moveWithCollisions(this.movementDelta)
+    this.deathImpulseSpeed *= Math.exp(
+      -SHOTGUN_COMBAT_CONFIG.knockback.deathDecayPerSecond * movementSeconds,
+    )
+    this.deathImpulseRemaining = Math.max(
+      0,
+      this.deathImpulseRemaining - deltaSeconds,
+    )
+    if (this.deathImpulseRemaining > 0) return
+    this.deathImpulseSpeed = 0
+    this.knockbackSpeed = 0
+    this.knockbackRemaining = 0
+    this.pendingDeathImpulseMinimumSpeed = 0
+    this.root.checkCollisions = false
   }
 
   private getDeathAnimationDuration() {
@@ -3520,6 +3577,14 @@ const SHOTGUN_COMBAT_CONFIG = {
     durationSeconds: 0.72,
     decayPerSecond: 1.5,
     maxSpeed: 11.5,
+    // A close lethal hit keeps enough of the pre-applied blast to travel
+    // 3–5 units even at the four-pellet eligibility threshold.
+    deathLaunchRange: 6,
+    deathLaunchMinimumPellets: 4,
+    deathMinimumSpeed: 7.2,
+    deathDurationSeconds: 0.9,
+    deathDecayPerSecond: 2,
+    deathMaxSpeed: 11.2,
   },
   // Blood bursts per zombie per blast. Every pellet still deals damage; the cap
   // only keeps eight simultaneous bursts from churning the pooled particles.
@@ -5658,6 +5723,7 @@ interface ShotgunPelletBurst {
 
 interface ShotgunBlastImpact {
   pelletCount: number
+  closePelletCount: number
   totalDamage: number
   headshot: boolean
   knockbackImpulse: number
@@ -5778,6 +5844,7 @@ function fireShotgun() {
     if (!impact) {
       impact = {
         pelletCount: 0,
+        closePelletCount: 0,
         totalDamage: 0,
         headshot: false,
         knockbackImpulse: 0,
@@ -5787,6 +5854,9 @@ function fireShotgun() {
       impacts.set(zombieHit.zombie, impact)
     }
     impact.pelletCount += 1
+    if (result.distance <= SHOTGUN_COMBAT_CONFIG.knockback.deathLaunchRange) {
+      impact.closePelletCount += 1
+    }
     impact.totalDamage += pelletDamage
     impact.headshot ||= headshot
     impact.knockbackImpulse += SHOTGUN_COMBAT_CONFIG.knockback.forcePerPellet
@@ -5822,6 +5892,28 @@ function fireShotgun() {
       impact.flinchDirection.copyFrom(shotgunAimForward)
     }
     impact.flinchDirection.normalize()
+    const impulse = Math.min(
+      SHOTGUN_COMBAT_CONFIG.knockback.maxSpeed,
+      impact.knockbackImpulse,
+    )
+    if (impulse >= SHOTGUN_COMBAT_CONFIG.knockback.minimumForce) {
+      // Set horizontal momentum before damage can transition the zombie to
+      // dead. A qualifying lethal close blast will transfer this exact
+      // direction into the separate corpse impulse inside die().
+      zombie.applyKnockback(
+        zombie.root.position.x - camera.globalPosition.x,
+        zombie.root.position.z - camera.globalPosition.z,
+        impulse,
+        impact.closePelletCount
+          >= SHOTGUN_COMBAT_CONFIG.knockback.deathLaunchMinimumPellets
+          ? SHOTGUN_COMBAT_CONFIG.knockback.deathMinimumSpeed
+          : 0,
+      )
+      diagnostics.maxKnockbackImpulse = Math.max(
+        diagnostics.maxKnockbackImpulse,
+        impulse,
+      )
+    }
     const damaged = zombie.applyShotgunBlast(
       impact.totalDamage,
       impact.headshot,
@@ -5842,23 +5934,11 @@ function fireShotgun() {
     }
 
     if (zombie.eliminated) {
-      // Death handling stays exactly as authored: a killed zombie plays its
-      // death where it stands and never takes the impulse.
+      // Death counting and animation remain in the existing death path. The
+      // pre-applied blast now moves only the collision-aware corpse root.
       diagnostics.zombiesKilled += 1
       continue
     }
-    const impulse = Math.min(
-      SHOTGUN_COMBAT_CONFIG.knockback.maxSpeed,
-      impact.knockbackImpulse,
-    )
-    if (impulse < SHOTGUN_COMBAT_CONFIG.knockback.minimumForce) continue
-    // Push straight away from the shooter on the ground plane.
-    zombie.applyKnockback(
-      zombie.root.position.x - camera.globalPosition.x,
-      zombie.root.position.z - camera.globalPosition.z,
-      impulse,
-    )
-    diagnostics.maxKnockbackImpulse = Math.max(diagnostics.maxKnockbackImpulse, impulse)
   }
 
   // Shared feedback fires once per blast, not once per pellet.
@@ -6543,6 +6623,7 @@ if (import.meta.env.DEV) {
             state: zombie.state,
             upperBodyPush: zombie.upperBodyPushAmount,
             knockback: zombie.knockbackAmount,
+            deathKnockback: zombie.deathImpulseAmount,
           })),
         }
       },

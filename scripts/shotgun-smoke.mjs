@@ -456,24 +456,50 @@ async function runDesktopPass() {
     assert(cycled.shotgunActiveAnimation === IDLE_CLIP || cycled.shotgunActiveAnimation === WALK_CLIP,
       `The rest loop did not resume after the pump cycle: ${cycled.shotgunActiveAnimation}.`)
 
-    // -- Kill loop: repeat close blasts; corpse rules --------------------
-    let killBlasts = 0
-    while (killBlasts < 5) {
-      const current = await snapshot(cdp)
-      if (current.zombies[0].state === 'dead' || current.zombies[0].disposed) break
-      await cdp.evaluate(`(() => {
-        const api = window.__nightBreachTest
-        api.setPlayerPosition(0, -10)
-        api.setZombiePosition(0, 0, -5)
-        api.setCameraRotation(0.2, 0)
-      })()`)
-      await fireDesktop(cdp)
-      killBlasts += 1
-      await waitForPumpCycleComplete(cdp)
-    }
+    // -- Lethal close blast: moving death animation, then corpse rules ---
+    // Lower only the staged test zombie's remaining health with existing limb
+    // damage so this single eight-pellet blast deterministically becomes lethal.
+    await cdp.evaluate(`(() => {
+      const api = window.__nightBreachTest
+      while (api.snapshot().zombies[0].health > 20) api.hitZombie(0, 'limbs')
+      api.setPlayerPosition(0, -10)
+      api.setZombiePosition(0, 0, -8)
+      api.setCameraRotation(0.2, 0)
+    })()`)
+    const beforeLethalBlast = await snapshot(cdp)
+    await fireDesktop(cdp)
+    const lethalBlast = await snapshot(cdp)
+    assert(lethalBlast.lastShotgunBlast.pelletsIntoZombies === 8,
+      `The lethal close blast did not land all 8 pellets: ${JSON.stringify(lethalBlast.lastShotgunBlast)}.`)
+    assert(lethalBlast.lastShotgunBlast.zombiesKilled === 1
+      && lethalBlast.zombies[0].state === 'dead',
+    'The staged eight-pellet close blast was not lethal.')
+    assert(lethalBlast.zombies[0].deathKnockback > 0,
+      'The lethal blast did not hand momentum to the death impulse.')
+    assert(lethalBlast.zombies[0].animation.toLowerCase().includes('death'),
+      `The death animation was not playing during launch: ${lethalBlast.zombies[0].animation}.`)
+    await cdp.waitForExpression(
+      `${snapshotExpression}.zombies[0].position.z > ${beforeLethalBlast.zombies[0].position.z + 3}`,
+      3_000,
+      'lethal shotgun displacement',
+    )
+    await cdp.waitForExpression(
+      `${snapshotExpression}.zombies[0].deathKnockback === 0`,
+      3_000,
+      'death knockback settle',
+    )
     const killed = await snapshot(cdp)
-    assert(killed.zombies[0].state === 'dead', 'Repeated close blasts did not kill the zombie.')
-    assert(killed.zombies[0].knockback === 0, 'A corpse retained knockback velocity.')
+    const lethalDisplacement = killed.zombies[0].position.z
+      - beforeLethalBlast.zombies[0].position.z
+    assert(lethalDisplacement >= 3 && lethalDisplacement <= 5,
+      `Lethal close blast displacement was outside 3–5 units: ${lethalDisplacement}.`)
+    assert(killed.zombies[0].knockback === 0,
+      'The death impulse did not settle.')
+    console.log(
+      `shotgun-smoke: lethal 8-pellet blast displaced corpse `
+      + `${lethalDisplacement.toFixed(3)} units`,
+    )
+    await waitForPumpCycleComplete(cdp)
     const corpsePosition = killed.zombies[0].position
     await cdp.evaluate(`window.__nightBreachTest.setCameraRotation(0.2, 0)`)
     await fireDesktop(cdp)
