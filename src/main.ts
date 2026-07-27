@@ -4319,8 +4319,10 @@ console.info('[Night Breach][Rifle] Local GLB loading started with procedural fa
 // ---------------------------------------------------------------------------
 
 const MUZZLE_FLASH_DURATION = 0.058
+const SHOTGUN_MUZZLE_FLASH_DURATION = 0.046
 const MUZZLE_SMOKE_LIFETIME = 0.78
 const SHELL_CASING_LIFETIME = 1.3
+type MuzzleEffectProfile = 'rifle' | 'shotgun'
 
 type Canvas2dContext = ReturnType<DynamicTexture['getContext']>
 
@@ -4429,11 +4431,22 @@ interface MuzzleSmokePuff {
   active: boolean
   age: number
   lifetime: number
+  shotgunBurst: boolean
   spin: number
   startSize: number
   endSize: number
+  peakVisibility: number
   mesh: Mesh
   drift: Vector3
+}
+
+interface MuzzleSpark {
+  active: boolean
+  age: number
+  lifetime: number
+  mesh: Mesh
+  velocity: Vector3
+  spin: Vector3
 }
 
 interface EjectedShell {
@@ -4447,13 +4460,18 @@ interface EjectedShell {
 class WeaponFireEffects {
   private readonly core: Mesh
   private readonly star: Mesh
+  private readonly outerGlow: Mesh
   private readonly jet: Mesh
   private readonly coreMaterial: StandardMaterial
   private readonly starMaterial: StandardMaterial
+  private readonly glowMaterial: StandardMaterial
   private readonly jetMaterial: StandardMaterial
   private readonly smokeMaterial: StandardMaterial
+  private readonly shotgunSmokeMaterial: StandardMaterial
+  private readonly sparkMaterial: StandardMaterial
   private readonly light: PointLight
   private readonly smokePuffs: MuzzleSmokePuff[] = []
+  private readonly sparks: MuzzleSpark[] = []
   private readonly shells: EjectedShell[] = []
   private readonly baseExposure: number
   // Where the flash anchors on the view-model pivot. Weapon selection retargets
@@ -4464,16 +4482,21 @@ class WeaponFireEffects {
   private readonly ejectRight = Vector3.Zero()
   private readonly ejectUp = Vector3.Zero()
   private readonly smokeCapacity: number
+  private readonly sparkCapacity: number
   private readonly shellCapacity: number
   private flashRemaining = 0
+  private flashDuration = MUZZLE_FLASH_DURATION
   private flashStrength = 1
+  private flashProfile: MuzzleEffectProfile = 'rifle'
   private flashSpin = 0
   private exposureBoost = 0
   private nextSmokePuff = 0
+  private nextSpark = 0
   private nextShell = 0
 
   constructor() {
-    this.smokeCapacity = isLowEndMobile ? 4 : isMobile ? 6 : 8
+    this.smokeCapacity = isLowEndMobile ? 6 : isMobile ? 8 : 10
+    this.sparkCapacity = isLowEndMobile ? 3 : isMobile ? 4 : 5
     this.shellCapacity = isLowEndMobile ? 4 : isMobile ? 6 : 10
     this.baseExposure = scene.imageProcessingConfiguration.exposure
 
@@ -4483,9 +4506,20 @@ class WeaponFireEffects {
 
     this.coreMaterial = this.createAdditiveMaterial('muzzleFlashCoreMaterial', coreTexture)
     this.starMaterial = this.createAdditiveMaterial('muzzleFlashStarMaterial', starTexture)
+    this.glowMaterial = this.createAdditiveMaterial('muzzleFlashGlowMaterial', coreTexture)
     this.jetMaterial = this.createAdditiveMaterial('muzzleFlashJetMaterial', coreTexture)
     this.smokeMaterial = this.createAdditiveMaterial('muzzleSmokeMaterial', smokeTexture)
     this.smokeMaterial.emissiveColor = new Color3(0.3, 0.29, 0.27)
+    this.shotgunSmokeMaterial = this.createAdditiveMaterial(
+      'shotgunMuzzleSmokeMaterial',
+      smokeTexture,
+    )
+    this.shotgunSmokeMaterial.emissiveColor = new Color3(0.58, 0.55, 0.5)
+    this.sparkMaterial = new StandardMaterial('muzzleSparkMaterial', scene)
+    this.sparkMaterial.diffuseColor = Color3.Black()
+    this.sparkMaterial.emissiveColor = new Color3(1, 0.54, 0.16)
+    this.sparkMaterial.specularColor = Color3.Black()
+    this.sparkMaterial.disableLighting = true
 
     const muzzle = this.muzzleLocalPosition
 
@@ -4495,6 +4529,16 @@ class WeaponFireEffects {
     this.star.material = this.starMaterial
     this.star.isVisible = false
     configureFirstPersonMesh(this.star)
+
+    // Shotgun-only soft halo. It reuses the radial core texture and remains
+    // hidden for the AK, preserving the rifle's established flash profile.
+    this.outerGlow = MeshBuilder.CreatePlane('muzzleFlashOuterGlow', { size: 0.46 }, scene)
+    this.outerGlow.parent = viewModelPivot
+    this.outerGlow.position.copyFrom(muzzle)
+    this.outerGlow.position.z -= 0.002
+    this.outerGlow.material = this.glowMaterial
+    this.outerGlow.isVisible = false
+    configureFirstPersonMesh(this.outerGlow)
 
     this.core = MeshBuilder.CreatePlane('muzzleFlashCore', { size: 0.19 }, scene)
     this.core.parent = viewModelPivot
@@ -4530,11 +4574,33 @@ class WeaponFireEffects {
         active: false,
         age: 0,
         lifetime: MUZZLE_SMOKE_LIFETIME,
+        shotgunBurst: false,
         spin: 0,
         startSize: 0.05,
         endSize: 0.24,
+        peakVisibility: 0.34,
         mesh,
         drift: Vector3.Zero(),
+      })
+    }
+
+    for (let index = 0; index < this.sparkCapacity; index += 1) {
+      const mesh = MeshBuilder.CreateCylinder(`shotgunMuzzleSpark${index}`, {
+        height: 0.034,
+        diameter: 0.0035,
+        tessellation: 4,
+      }, scene)
+      mesh.parent = viewModelPivot
+      mesh.material = this.sparkMaterial
+      mesh.isVisible = false
+      configureFirstPersonMesh(mesh)
+      this.sparks.push({
+        active: false,
+        age: 0,
+        lifetime: 0.14,
+        mesh,
+        velocity: Vector3.Zero(),
+        spin: Vector3.Zero(),
       })
     }
 
@@ -4584,6 +4650,8 @@ class WeaponFireEffects {
   setMuzzlePosition(position: Vector3) {
     this.muzzleLocalPosition.copyFrom(position)
     this.star.position.copyFrom(position)
+    this.outerGlow.position.copyFrom(position)
+    this.outerGlow.position.z -= 0.002
     this.core.position.copyFrom(position)
     this.core.position.z += 0.006
     this.jet.position.copyFrom(position)
@@ -4592,19 +4660,46 @@ class WeaponFireEffects {
     this.light.position.z += 0.2
   }
 
-  trigger(strength: number, ejectRifleCasing = true) {
+  trigger(strength: number, profile: MuzzleEffectProfile = 'rifle') {
+    this.flashProfile = profile
     this.flashStrength = clamp(strength, 0.55, 1.25)
-    this.flashRemaining = MUZZLE_FLASH_DURATION
+    this.flashDuration = profile === 'shotgun'
+      ? SHOTGUN_MUZZLE_FLASH_DURATION
+      : MUZZLE_FLASH_DURATION
+    this.flashRemaining = this.flashDuration
     this.flashSpin = Math.random() * Math.PI * 2
-    this.exposureBoost = Math.max(this.exposureBoost, 0.2 * this.flashStrength)
+    this.exposureBoost = Math.max(
+      this.exposureBoost,
+      (profile === 'shotgun' ? 0.32 : 0.2) * this.flashStrength,
+    )
+
+    if (profile === 'shotgun') {
+      this.coreMaterial.emissiveColor.set(1, 0.76, 0.36)
+      this.starMaterial.emissiveColor.set(1, 0.58, 0.19)
+      this.glowMaterial.emissiveColor.set(1, 0.42, 0.1)
+      this.jetMaterial.emissiveColor.set(1, 0.64, 0.22)
+    } else {
+      this.coreMaterial.emissiveColor.set(1, 0.82, 0.5)
+      this.starMaterial.emissiveColor.set(1, 0.82, 0.5)
+      this.jetMaterial.emissiveColor.set(1, 0.82, 0.5)
+      this.outerGlow.isVisible = false
+    }
 
     // A short, mostly vertical kick. Deliberately small on the horizontal axis
     // so sustained fire climbs instead of wandering off target.
     camera.cameraRotation.x -= 0.0082 * this.flashStrength
     camera.cameraRotation.y += (Math.random() - 0.5) * 0.0056 * this.flashStrength
 
-    this.spawnSmokePuff()
-    if (ejectRifleCasing) this.ejectShell()
+    if (profile === 'shotgun') {
+      const smokeCount = isLowEndMobile ? 3 : isMobile ? 4 : 5
+      for (let index = 0; index < smokeCount; index += 1) {
+        this.spawnSmokePuff(true, index, smokeCount)
+      }
+      this.spawnShotgunSparks()
+    } else {
+      this.spawnSmokePuff(false, 0, 1)
+      this.ejectShell()
+    }
   }
 
   reset() {
@@ -4613,11 +4708,17 @@ class WeaponFireEffects {
     this.light.intensity = 0
     this.core.isVisible = false
     this.star.isVisible = false
+    this.outerGlow.isVisible = false
     this.jet.isVisible = false
     for (let index = 0; index < this.smokePuffs.length; index += 1) {
       const puff = this.smokePuffs[index]
       puff.active = false
       puff.mesh.isVisible = false
+    }
+    for (let index = 0; index < this.sparks.length; index += 1) {
+      const spark = this.sparks[index]
+      spark.active = false
+      spark.mesh.isVisible = false
     }
     for (let index = 0; index < this.shells.length; index += 1) {
       const shell = this.shells[index]
@@ -4642,26 +4743,84 @@ class WeaponFireEffects {
     return material
   }
 
-  private spawnSmokePuff() {
+  private spawnSmokePuff(
+    shotgunBurst: boolean,
+    burstIndex: number,
+    burstCount: number,
+  ) {
     const puff = this.smokePuffs[this.nextSmokePuff]
     this.nextSmokePuff = (this.nextSmokePuff + 1) % this.smokeCapacity
     const muzzle = this.muzzleLocalPosition
     puff.active = true
     puff.age = 0
-    puff.lifetime = MUZZLE_SMOKE_LIFETIME * (0.78 + Math.random() * 0.42)
-    puff.spin = (Math.random() - 0.5) * 2.4
-    puff.startSize = 0.045 + Math.random() * 0.02
-    puff.endSize = 0.2 + Math.random() * 0.12
-    puff.drift.set(
-      (Math.random() - 0.5) * 0.07,
-      0.11 + Math.random() * 0.07,
-      0.2 + Math.random() * 0.1,
-    )
+    puff.shotgunBurst = shotgunBurst
+    puff.mesh.material = shotgunBurst ? this.shotgunSmokeMaterial : this.smokeMaterial
+    const burstSpread = burstCount > 1 ? burstIndex / (burstCount - 1) - 0.5 : 0
+    if (shotgunBurst) {
+      puff.lifetime = 0.86 + Math.random() * 0.25
+      puff.spin = (Math.random() - 0.5) * 1.8
+      puff.startSize = 0.052 + Math.random() * 0.022
+      puff.endSize = 0.3 + Math.random() * 0.13
+      puff.peakVisibility = 0.24
+      puff.drift.set(
+        burstSpread * 0.14 + (Math.random() - 0.5) * 0.05,
+        0.12 + Math.random() * 0.09,
+        0.42 + Math.random() * 0.22,
+      )
+    } else {
+      puff.lifetime = MUZZLE_SMOKE_LIFETIME * (0.78 + Math.random() * 0.42)
+      puff.spin = (Math.random() - 0.5) * 2.4
+      puff.startSize = 0.045 + Math.random() * 0.02
+      puff.endSize = 0.2 + Math.random() * 0.12
+      puff.peakVisibility = 0.34
+      puff.drift.set(
+        (Math.random() - 0.5) * 0.07,
+        0.11 + Math.random() * 0.07,
+        0.2 + Math.random() * 0.1,
+      )
+    }
     puff.mesh.position.copyFrom(muzzle)
-    puff.mesh.position.z += 0.03
+    puff.mesh.position.x += shotgunBurst
+      ? burstSpread * 0.05 + (Math.random() - 0.5) * 0.014
+      : 0
+    puff.mesh.position.y += shotgunBurst ? (Math.random() - 0.5) * 0.025 : 0
+    puff.mesh.position.z += shotgunBurst
+      ? 0.025 + burstIndex * 0.014
+      : 0.03
     puff.mesh.rotation.z = Math.random() * Math.PI * 2
     puff.mesh.scaling.setAll(puff.startSize)
     puff.mesh.isVisible = true
+  }
+
+  private spawnShotgunSparks() {
+    const muzzle = this.muzzleLocalPosition
+    for (let index = 0; index < this.sparkCapacity; index += 1) {
+      const spark = this.sparks[this.nextSpark]
+      this.nextSpark = (this.nextSpark + 1) % this.sparkCapacity
+      spark.active = true
+      spark.age = 0
+      spark.lifetime = 0.1 + Math.random() * 0.07
+      spark.velocity.set(
+        (Math.random() - 0.5) * 0.38,
+        0.1 + Math.random() * 0.3,
+        0.75 + Math.random() * 0.65,
+      )
+      spark.spin.set(
+        (Math.random() - 0.5) * 18,
+        (Math.random() - 0.5) * 18,
+        (Math.random() - 0.5) * 20,
+      )
+      spark.mesh.position.copyFrom(muzzle)
+      spark.mesh.position.z += 0.025
+      spark.mesh.rotation.set(
+        Math.PI / 2 + (Math.random() - 0.5) * 0.45,
+        (Math.random() - 0.5) * 0.5,
+        Math.random() * Math.PI,
+      )
+      spark.mesh.scaling.setAll(0.82 + Math.random() * 0.35)
+      spark.mesh.visibility = 0.72
+      spark.mesh.isVisible = true
+    }
   }
 
   private ejectShell() {
@@ -4705,6 +4864,7 @@ class WeaponFireEffects {
   private update(deltaSeconds: number) {
     this.updateFlash(deltaSeconds)
     this.updateSmoke(deltaSeconds)
+    this.updateSparks(deltaSeconds)
     this.updateShells(deltaSeconds)
 
     if (this.exposureBoost > 0.0008) {
@@ -4722,13 +4882,14 @@ class WeaponFireEffects {
         this.light.intensity = 0
         this.core.isVisible = false
         this.star.isVisible = false
+        this.outerGlow.isVisible = false
         this.jet.isVisible = false
       }
       return
     }
 
     this.flashRemaining = Math.max(0, this.flashRemaining - deltaSeconds)
-    const progress = 1 - this.flashRemaining / MUZZLE_FLASH_DURATION
+    const progress = 1 - this.flashRemaining / this.flashDuration
     // Instant attack, sharp decay. A linear fade reads as a soft glow; this
     // curve reads as a detonation.
     const intensity = (1 - progress) ** 1.8
@@ -4736,6 +4897,7 @@ class WeaponFireEffects {
 
     this.core.isVisible = visible
     this.star.isVisible = visible
+    this.outerGlow.isVisible = visible && this.flashProfile === 'shotgun'
     this.jet.isVisible = visible
     if (!visible) {
       this.light.intensity = 0
@@ -4743,22 +4905,33 @@ class WeaponFireEffects {
     }
 
     // The burst expands as it dies, which is what sells the pressure wave.
-    const coreScale = this.flashStrength * (0.72 + progress * 0.7)
-    const starScale = this.flashStrength * (0.6 + progress * 1.15)
+    const shotgunFlash = this.flashProfile === 'shotgun'
+    const coreScale = this.flashStrength * (
+      shotgunFlash ? 1.08 + progress * 0.86 : 0.72 + progress * 0.7
+    )
+    const starScale = this.flashStrength * (
+      shotgunFlash ? 0.94 + progress * 1.35 : 0.6 + progress * 1.15
+    )
     this.core.scaling.set(coreScale, coreScale, 1)
     this.star.scaling.set(starScale, starScale, 1)
+    if (shotgunFlash) {
+      const glowScale = this.flashStrength * (0.92 + progress * 1.5)
+      this.outerGlow.scaling.set(glowScale, glowScale, 1)
+      this.outerGlow.rotation.z = -this.flashSpin * 0.3
+    }
     this.core.rotation.z = this.flashSpin * 1.7
     this.star.rotation.z = this.flashSpin
     this.jet.scaling.set(
-      this.flashStrength * (0.85 + progress * 0.3),
-      this.flashStrength * (1.05 - progress * 0.45),
-      this.flashStrength * (0.85 + progress * 0.3),
+      this.flashStrength * (shotgunFlash ? 1.18 + progress * 0.35 : 0.85 + progress * 0.3),
+      this.flashStrength * (shotgunFlash ? 1.38 - progress * 0.55 : 1.05 - progress * 0.45),
+      this.flashStrength * (shotgunFlash ? 1.18 + progress * 0.35 : 0.85 + progress * 0.3),
     )
 
     this.coreMaterial.alpha = intensity
-    this.starMaterial.alpha = intensity * 0.92
-    this.jetMaterial.alpha = intensity * 0.66
-    this.light.intensity = 26 * intensity * this.flashStrength
+    this.starMaterial.alpha = intensity * (shotgunFlash ? 0.82 : 0.92)
+    this.glowMaterial.alpha = intensity * 0.3
+    this.jetMaterial.alpha = intensity * (shotgunFlash ? 0.78 : 0.66)
+    this.light.intensity = (shotgunFlash ? 44 : 26) * intensity * this.flashStrength
   }
 
   private updateSmoke(deltaSeconds: number) {
@@ -4772,15 +4945,48 @@ class WeaponFireEffects {
         puff.mesh.isVisible = false
         continue
       }
+      const forwardFactor = puff.shotgunBurst
+        ? Math.max(0.08, (1 - progress) ** 1.8)
+        : 1
+      const upwardFactor = puff.shotgunBurst ? 0.24 + progress * 1.3 : 1
       puff.mesh.position.addInPlaceFromFloats(
         puff.drift.x * deltaSeconds,
-        puff.drift.y * deltaSeconds,
-        puff.drift.z * deltaSeconds,
+        puff.drift.y * upwardFactor * deltaSeconds,
+        puff.drift.z * forwardFactor * deltaSeconds,
       )
       puff.mesh.rotation.z += puff.spin * deltaSeconds
       const size = puff.startSize + (puff.endSize - puff.startSize) * progress
       puff.mesh.scaling.set(size, size, 1)
-      puff.mesh.visibility = Math.sin((1 - progress) * Math.PI * 0.5) * 0.34
+      const fadeIn = puff.shotgunBurst ? Math.min(1, progress / 0.1) : 1
+      const fadeOut = Math.sin((1 - progress) * Math.PI * 0.5)
+      puff.mesh.visibility = fadeIn * fadeOut * puff.peakVisibility
+    }
+  }
+
+  private updateSparks(deltaSeconds: number) {
+    for (let index = 0; index < this.sparks.length; index += 1) {
+      const spark = this.sparks[index]
+      if (!spark.active) continue
+      spark.age += deltaSeconds
+      const progress = spark.age / spark.lifetime
+      if (progress >= 1) {
+        spark.active = false
+        spark.mesh.isVisible = false
+        continue
+      }
+      spark.velocity.y -= 1.8 * deltaSeconds
+      spark.velocity.scaleInPlace(Math.max(0, 1 - 3.5 * deltaSeconds))
+      spark.mesh.position.addInPlaceFromFloats(
+        spark.velocity.x * deltaSeconds,
+        spark.velocity.y * deltaSeconds,
+        spark.velocity.z * deltaSeconds,
+      )
+      spark.mesh.rotation.addInPlaceFromFloats(
+        spark.spin.x * deltaSeconds,
+        spark.spin.y * deltaSeconds,
+        spark.spin.z * deltaSeconds,
+      )
+      spark.mesh.visibility = (1 - progress) ** 1.7 * 0.72
     }
   }
 
@@ -6384,10 +6590,14 @@ function fireShotgun() {
     recoilAmount + SHOTGUN_COMBAT_CONFIG.recoil.viewModelKick * recoilScale,
   )
   muzzleFlashRemaining = MUZZLE_FLASH_DURATION
-  // The generic fire effect owns AK brass. The shotgun's larger spent shell
-  // stays chambered until the authored pump frame below, so suppress the
-  // immediate rifle casing here.
-  weaponFireEffects.trigger(SHOTGUN_COMBAT_CONFIG.recoil.muzzleFlashStrength, false)
+  // Re-anchor at the measured barrel tip on every real blast, then select the
+  // shotgun-only flash/smoke/spark profile. This profile also leaves the spent
+  // shell chambered for the authored pump-frame ejection below.
+  weaponFireEffects.setMuzzlePosition(SHOTGUN_COMBAT_CONFIG.muzzleOffset)
+  weaponFireEffects.trigger(
+    SHOTGUN_COMBAT_CONFIG.recoil.muzzleFlashStrength,
+    'shotgun',
+  )
   // This call shares the exact trigger point with the visible muzzle flash and
   // the pellet raycasts immediately below. It also schedules the later pump
   // cue from the same audio clock as the shot, avoiding timer/frame drift.
