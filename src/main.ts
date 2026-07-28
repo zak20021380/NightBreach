@@ -138,6 +138,7 @@ let unlockShotgunAudio: () => void = () => undefined
 let cancelMobileInput: () => void = () => undefined
 let stopZombieWaveTimers: () => void = () => undefined
 let startZombieWave: () => void = () => undefined
+let releaseZombiePlayerTargets: () => void = () => undefined
 let portraitInputPaused = isTouchDevice && window.innerHeight > window.innerWidth
 
 function gameplayInputEnabled() {
@@ -439,6 +440,7 @@ function damagePlayer(amount: number, attackerPosition: Vector3) {
 
   gameOver = true
   stopZombieWaveTimers()
+  releaseZombiePlayerTargets()
   cancelMobileInput()
   stopAutomaticFire()
   releaseAds()
@@ -1882,7 +1884,6 @@ const ZOMBIE_ASSET_CONFIG = {
 
 const ZOMBIE_AI_CONFIG = {
   detectionRange: 28,
-  loseInterestRange: 32,
   attackDistance: 1.55,
   // The mover must stop INSIDE its own reach. Parking at exactly attackDistance
   // left every zombie balanced on the knife-edge of its own hit test, so any
@@ -2790,6 +2791,10 @@ class Zombie {
   private proceduralBaseRotationZ: number
   private thinkTimeRemaining: number
   private cachedDistanceSquared = Number.POSITIVE_INFINITY
+  // Wave zombies are assigned the player once, at successful spawn time. This
+  // target lock is independent of the proximity check used by an unassigned
+  // zombie, and lasts until death or disposal.
+  private playerTargetAcquired = false
   private desiredDirectionX = 0
   private desiredDirectionZ = 0
   private currentDirectionX = 0
@@ -2898,6 +2903,10 @@ class Zombie {
 
   get state(): ZombieState {
     return this._state
+  }
+
+  get hasPlayerTarget() {
+    return this.playerTargetAcquired
   }
 
   get currentHealth() {
@@ -3048,6 +3057,20 @@ class Zombie {
     else if (nextState === 'attacking') playZombieAttackSound(this.id)
   }
 
+  acquirePlayerTarget(playerPosition: Vector3) {
+    if (this.disposed || this._state === 'dead') return
+    this.playerTargetAcquired = true
+    // Do the first awareness/steering pass synchronously so a newly spawned
+    // zombie enters chase immediately rather than waiting for its staggered
+    // mobile-friendly think interval.
+    this.thinkTimeRemaining = 0
+    this.updateAwarenessAndSteering(playerPosition)
+  }
+
+  releasePlayerTarget() {
+    this.playerTargetAcquired = false
+  }
+
   setPaused(paused: boolean) {
     if (this.disposed || this.animationPaused === paused) return
     if (paused) this.activeAnimation?.pause()
@@ -3158,6 +3181,7 @@ class Zombie {
   dispose() {
     if (this.disposed) return
     this.disposed = true
+    this.releasePlayerTarget()
     // Covers zombies removed without dying (wave reset, teardown); die() has
     // already released, and the guard makes a second call a no-op.
     this.releaseApproachSlotIfHeld()
@@ -3318,6 +3342,7 @@ class Zombie {
 
   private die() {
     if (this._state === 'dead') return
+    this.releasePlayerTarget()
     this.health = 0
     this.deathElapsed = 0
     this.hitReactionRemaining = 0
@@ -3609,12 +3634,13 @@ class Zombie {
     const toPlayerZ = playerPosition.z - this.root.position.z
     this.cachedDistanceSquared = toPlayerX * toPlayerX + toPlayerZ * toPlayerZ
 
-    const awarenessRange = this._state === 'chasing'
-      ? ZOMBIE_AI_CONFIG.loseInterestRange
-      : ZOMBIE_AI_CONFIG.detectionRange
-    if (this.cachedDistanceSquared > awarenessRange * awarenessRange) {
-      this.setState('idle')
-      return
+    if (!this.playerTargetAcquired) {
+      if (this.cachedDistanceSquared
+        > ZOMBIE_AI_CONFIG.detectionRange * ZOMBIE_AI_CONFIG.detectionRange) {
+        this.setState('idle')
+        return
+      }
+      this.playerTargetAcquired = true
     }
 
     if (this.cachedDistanceSquared
@@ -3967,11 +3993,17 @@ interface ZombieHitZone {
 
 const zombieHitZones = new Map<Mesh, ZombieHitZone>()
 const zombies: Zombie[] = []
+releaseZombiePlayerTargets = () => {
+  for (let index = 0; index < zombies.length; index += 1) {
+    zombies[index].releasePlayerTarget()
+  }
+}
 let activeZombieFactory: ZombieVisualFactory | null = null
 let activeZombieCount = 0
 let nextZombieId = 1
 let zombieSpawnTimer: number | undefined
 let nextWaveTimer: number | undefined
+let forcedZombieSpawnDeferralsForTest = 0
 
 type WaveStatus = 'waiting' | 'active' | 'complete'
 
@@ -4064,6 +4096,11 @@ function isValidZombieSpawnPosition(position: Vector3) {
 }
 
 function selectZombieSpawnPosition(spawnIndex: number): Vector3 | null {
+  if (import.meta.env.DEV && forcedZombieSpawnDeferralsForTest > 0) {
+    forcedZombieSpawnDeferralsForTest -= 1
+    return null
+  }
+
   const candidateCount = ZOMBIE_SPAWN_POSITIONS.length
   for (let attempt = 0; attempt < ZOMBIE_WAVE_CONFIG.spawnPlacementAttempts; attempt += 1) {
     const position = ZOMBIE_SPAWN_POSITIONS[(spawnIndex + attempt) % candidateCount]
@@ -4164,6 +4201,10 @@ function spawnNextWaveZombie() {
     return
   }
   nextZombieId += 1
+  // Assignment belongs to the successful spawn transaction, so normal spawns,
+  // later waves, and a placement that was previously deferred all take the same
+  // activation path.
+  zombie.acquirePlayerTarget(camera.position)
   zombie.setPaused(!webViewActive || !deployed || gameOver)
   zombies.push(zombie)
   waveState.spawnedZombies += 1
@@ -8265,7 +8306,9 @@ if (import.meta.env.DEV) {
             animation: zombie.activeAnimationName,
             corpseGrounded: zombie.corpseGrounded,
             disposed: zombie.root.isDisposed(),
+            hasPlayerTarget: zombie.hasPlayerTarget,
             health: zombie.currentHealth,
+            id: zombie.id,
             position: {
               x: zombie.root.position.x,
               z: zombie.root.position.z,
@@ -8413,6 +8456,27 @@ if (import.meta.env.DEV) {
         }
       },
       restart: restartPrototype,
+      deferNextZombieSpawns(attempts = 1) {
+        const requestedAttempts = Number.isFinite(attempts) ? Math.floor(attempts) : 0
+        forcedZombieSpawnDeferralsForTest += Math.max(0, requestedAttempts)
+        return forcedZombieSpawnDeferralsForTest
+      },
+      eliminateLivingZombies() {
+        let eliminated = 0
+        const impactDirection = Vector3.Forward()
+        for (let index = 0; index < zombies.length; index += 1) {
+          const zombie = zombies[index]
+          if (zombie.eliminated) continue
+          zombie.applyShotgunBlast(
+            zombie.currentHealth,
+            false,
+            impactDirection,
+            ZOMBIE_COMBAT_CONFIG.hitReactionDuration,
+          )
+          eliminated += 1
+        }
+        return eliminated
+      },
       selectWeapon(weaponId: WeaponId) {
         return requestWeaponSelection(weaponId)
       },
