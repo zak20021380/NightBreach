@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test:runtime": "node scripts/runtime-smoke.mjs",
+    "test:melee-occlusion": "node scripts/melee-occlusion-smoke.mjs",
     "test:zombie-waves": "node scripts/zombie-wave-smoke.mjs",
     "test:winter": "node scripts/winter-smoke.mjs",
     "test:shotgun": "node scripts/shotgun-smoke.mjs"

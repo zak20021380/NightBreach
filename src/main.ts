@@ -2774,6 +2774,15 @@ function isZombieObstacle(mesh: AbstractMesh) {
     && mesh.metadata?.zombieCollider !== true
 }
 
+// Capture gameplay collision meshes once, after the complete arena and both
+// sheds have been built but before any zombies exist. Melee uses this explicit
+// registry instead of scene picking: invisible collision meshes are allowed to
+// remain non-pickable, while the moving door entry keeps the same live Mesh
+// reference and is tested with its current world transform.
+const zombieMeleeOccluders = scene.meshes.filter((mesh) => (
+  mesh.checkCollisions && mesh.metadata?.zombieCollider !== true
+))
+
 class Zombie {
   readonly id: number
   readonly root: Mesh
@@ -3749,23 +3758,25 @@ class Zombie {
     const verticalDistance = Math.abs(playerPosition.y - this.root.position.y)
     if (verticalDistance > ZOMBIE_AI_CONFIG.attackReachHeight) return false
 
-    return this.hasLineOfSightToPlayer(playerPosition, horizontalDistanceSquared)
+    return this.hasClearMeleePathToPlayer(playerPosition)
   }
 
   /**
-   * Blocks damage through walls. The probe runs between chest heights so a low
-   * kerb or debris never shields the player, while a real wall always does.
+   * Tests the exact upper-torso-to-capsule-centre segment at the damage frame.
+   * Direct mesh intersections deliberately ignore visibility and isPickable, so
+   * invisible gameplay collision (including the live door panel) still blocks
+   * a swing without participating in ordinary camera picking.
    */
-  private hasLineOfSightToPlayer(playerPosition: Vector3, horizontalDistanceSquared: number) {
-    const chestHeight = ZOMBIE_ASSET_CONFIG.height * 0.25
+  private hasClearMeleePathToPlayer(playerPosition: Vector3) {
+    const upperTorsoOffset = ZOMBIE_ASSET_CONFIG.height * 0.25
     this.meleeProbeOrigin.set(
       this.root.position.x,
-      this.root.position.y + chestHeight,
+      this.root.position.y + upperTorsoOffset,
       this.root.position.z,
     )
     this.meleeProbeDirection.set(
       playerPosition.x - this.meleeProbeOrigin.x,
-      playerPosition.y - this.meleeProbeOrigin.y,
+      playerPosition.y - PLAYER_COLLISION_HALF_HEIGHT - this.meleeProbeOrigin.y,
       playerPosition.z - this.meleeProbeOrigin.z,
     )
     const probeLength = this.meleeProbeDirection.length()
@@ -3774,14 +3785,24 @@ class Zombie {
 
     this.meleeProbeRay.origin.copyFrom(this.meleeProbeOrigin)
     this.meleeProbeRay.direction.copyFrom(this.meleeProbeDirection)
-    // Stop just short of the player so their own collider is never the blocker.
-    this.meleeProbeRay.length = Math.max(
-      0.05,
-      Math.min(probeLength, Math.sqrt(horizontalDistanceSquared)) - 0.15,
-    )
+    this.meleeProbeRay.length = probeLength
 
-    const blocker = scene.pickWithRay(this.meleeProbeRay, isZombieObstacle, true)
-    return !blocker?.hit
+    for (let index = 0; index < zombieMeleeOccluders.length; index += 1) {
+      const occluder = zombieMeleeOccluders[index]
+      if (!occluder.checkCollisions || !occluder.isEnabled()) continue
+
+      // Door animation already updates this matrix every frame. Force the live
+      // pose here as well so a hit that lands between render callbacks can
+      // never use a stale closed/open transform.
+      if (occluder === frontDoor.panel) occluder.computeWorldMatrix(true)
+
+      const intersection = this.meleeProbeRay.intersectsMesh(occluder, true)
+      if (
+        intersection.hit
+        && intersection.distance <= this.meleeProbeRay.length + 0.0001
+      ) return false
+    }
+    return true
   }
 
   private beginAttack() {
@@ -8342,6 +8363,37 @@ if (import.meta.env.DEV) {
           gameOver,
           gameplayInputEnabled: gameplayInputEnabled(),
         }
+      },
+      meleeOccluders() {
+        return zombieMeleeOccluders.map((mesh) => ({
+          checkCollisions: mesh.checkCollisions,
+          isPickable: mesh.isPickable,
+          name: mesh.name,
+        }))
+      },
+      advanceMeleeSimulation(seconds: number, zombieIndex = 0) {
+        if (!Number.isFinite(seconds) || seconds <= 0) return false
+        const firstZombieIndex = zombieIndex < 0 ? 0 : zombieIndex
+        const lastZombieIndex = zombieIndex < 0 ? zombies.length - 1 : zombieIndex
+        if (!zombies[firstZombieIndex] || !zombies[lastZombieIndex]) return false
+        let remaining = Math.min(seconds, 12)
+        while (remaining > 0) {
+          const step = Math.min(0.05, remaining)
+          // Matches registration order in the live frame: the moving door pose
+          // settles before the zombie reaches its damage event.
+          frontDoor.update(step)
+          for (let index = firstZombieIndex; index <= lastZombieIndex; index += 1) {
+            zombies[index].update(step, false, camera.position)
+          }
+          remaining -= step
+        }
+        return true
+      },
+      refreshZombieTarget(zombieIndex = 0) {
+        const zombie = zombies[zombieIndex]
+        if (!zombie) return false
+        zombie.acquirePlayerTarget(camera.position)
+        return true
       },
       // Reports the shotgun barrel tip in viewModelPivot space so the harness
       // can verify the configured muzzle flash anchor against the real posed
