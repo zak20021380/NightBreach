@@ -16,7 +16,6 @@ import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imagePro
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial'
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial'
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture'
-import { Texture } from '@babylonjs/core/Materials/Textures/texture'
 import { Space } from '@babylonjs/core/Maths/math.axis'
 import { Color3, Color4 } from '@babylonjs/core/Maths/math.color'
 import { Frustum } from '@babylonjs/core/Maths/math.frustum'
@@ -28,25 +27,72 @@ import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder'
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData'
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode'
 import { Scene } from '@babylonjs/core/scene'
-import {
-  type ArmMaterialMatchSettings,
-  ASSET_CONFIG,
-  type AssetMaterialSettings,
-  type Vector3Tuple,
-} from './assets/assetConfig'
+import { ASSET_CONFIG } from './assets/assetConfig'
 import {
   type AssetProgressSnapshot,
   LocalAssetManager,
 } from './assets/localAssetManager'
 import { createAbandonedStructures } from './abandonedStructures'
+import {
+  applyImportedMaterialSettings,
+  matchImportedArmMaterials,
+  vector3FromTuple,
+} from './assetMaterialUtils'
+import {
+  createZombieAiConfig,
+  DESKTOP_ADS_MOUSE_SENSITIVITY_MULTIPLIER,
+  DESKTOP_HIP_FIRE_MOUSE_SENSITIVITY,
+  MUZZLE_FLASH_DURATION,
+  MUZZLE_SMOKE_LIFETIME,
+  PROCEDURAL_RELOAD_DURATION_SECONDS,
+  RELOAD_AMMO_PROGRESS,
+  RELOAD_COMPLETION_GRACE_SECONDS,
+  SHELL_CASING_LIFETIME,
+  SHOTGUN_ANIMATION_CLIPS,
+  SHOTGUN_AUDIO_CONFIG,
+  SHOTGUN_MUZZLE_FLASH_DURATION,
+  TOUCH_CONFIG,
+  VIEW_MODEL_RENDER_LAYER_MASK,
+  WEAPON_ANIMATION_BLEND_SPEED,
+  WEAPON_LABELS,
+  WORLD_RENDER_LAYER_MASK,
+  ZOMBIE_COMBAT_CONFIG,
+  ZOMBIE_SWARM_CONFIG,
+  ZOMBIE_WAVE_CONFIG,
+  type MuzzleEffectProfile,
+  type ShotgunClipName,
+  type WeaponId,
+  type ZombieHitZoneType,
+  type ZombieState,
+} from './gameConfig'
+import { createHudController } from './hud'
+import { createPlayerHealthController } from './playerHealth'
+import {
+  createProceduralSurfaceHelpers,
+  type SurfaceMaterial,
+} from './proceduralSurfaces'
+import {
+  clamp,
+  damp,
+  getElement,
+  logRuntimeError,
+  logRuntimeWarning,
+} from './runtimeUtils'
+import { ShotgunAudioController } from './shotgunAudio'
+import {
+  createMuzzleCoreTexture,
+  createMuzzleSmokeTexture,
+  createMuzzleStarTexture,
+} from './weaponTextures'
 import { resolveInitialWinterMode } from './winterConfig'
 import { WinterEnvironment, type WinterSurface } from './winterEnvironment'
-
-function getElement<T extends Element>(selector: string): T {
-  const element = document.querySelector<T>(selector)
-  if (!element) throw new Error(`Missing required element: ${selector}`)
-  return element
-}
+import {
+  createZombieApproachSlots,
+  createZombieAudioHooks,
+  describeZombieAnimationMapping,
+  detectZombieAnimations,
+  type ZombieAnimationMap,
+} from './zombieHelpers'
 
 const canvas = getElement<HTMLCanvasElement>('#renderCanvas')
 const assetLoading = getElement<HTMLDivElement>('#assetLoading')
@@ -100,31 +146,12 @@ const hardwareThreadCount = navigator.hardwareConcurrency || 4
 const deviceMemoryGb = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 4
 const isLowEndMobile = isMobile && (hardwareThreadCount <= 4 || deviceMemoryGb <= 4)
 const performanceTier = isLowEndMobile ? 'mobile-low' : isMobile ? 'mobile' : 'desktop'
-const WORLD_RENDER_LAYER_MASK = 0x0fffffff
-const VIEW_MODEL_RENDER_LAYER_MASK = 0x10000000
 
 document.body.classList.toggle('touch-device', isTouchDevice)
 canvas.dataset.performanceTier = performanceTier
 if (isTouchDevice) {
   instructions.innerHTML = 'Tap to deploy<br /><span>Left stick to move &middot; swipe to aim</span>'
 }
-
-const TOUCH_CONFIG = {
-  lookSensitivity: 0.00215,
-  adsLookSensitivityMultiplier: 0.72,
-  joystickDeadZone: 0.08,
-  automaticFireInterval: 0.1,
-  hipFov: 72 * Math.PI / 180,
-  adsFov: 56 * Math.PI / 180,
-  hipSpread: 0.0035,
-  adsSpread: 0.00075,
-}
-
-// Babylon's angularSensibility is the inverse of radians per raw mouse movement
-// unit. Keep the configurable desktop values in direct, FPS-style terms so a
-// larger sensitivity remains faster and ADS can be expressed as a multiplier.
-const DESKTOP_HIP_FIRE_MOUSE_SENSITIVITY = 1 / 900
-const DESKTOP_ADS_MOUSE_SENSITIVITY_MULTIPLIER = 0.7
 
 let gameReady = false
 let deployed = false
@@ -191,24 +218,6 @@ document.addEventListener('dblclick', (event) => {
 document.addEventListener('gesturestart', (event) => {
   if (isTouchDevice) event.preventDefault()
 }, { passive: false })
-
-function describeRuntimeError(error: unknown) {
-  if (error instanceof Error) return error.stack ?? `${error.name}: ${error.message}`
-  if (typeof error === 'string') return error
-  try {
-    return JSON.stringify(error)
-  } catch {
-    return String(error)
-  }
-}
-
-function logRuntimeError(context: string, error: unknown) {
-  console.error(`[Night Breach] ${context}\n${describeRuntimeError(error)}`, error)
-}
-
-function logRuntimeWarning(context: string, error: unknown) {
-  console.warn(`[Night Breach] ${context}\n${describeRuntimeError(error)}`, error)
-}
 
 function requestPointerLockSafely() {
   if (!isDesktop || document.pointerLockElement === canvas) return
@@ -418,46 +427,23 @@ stopCameraControls = () => {
   }
 }
 
-const PLAYER_MAX_HEALTH = 100
-let playerHealth = PLAYER_MAX_HEALTH
-let damageIndicatorTimer: number | undefined
-
-function updateHealthDisplay() {
-  const healthPercent = playerHealth / PLAYER_MAX_HEALTH * 100
-  healthValue.textContent = String(playerHealth)
-  healthFill.style.width = `${healthPercent}%`
-  healthHud.setAttribute('aria-valuenow', String(playerHealth))
-  healthHud.classList.toggle('critical', playerHealth <= 30)
-}
+const playerHealthController = createPlayerHealthController({
+  camera,
+  elements: {
+    damageIndicator,
+    healthFill,
+    healthHud,
+    healthValue,
+  },
+  isGameOver: () => gameOver,
+  onPlayerKilled: handlePlayerKilled,
+})
 
 function damagePlayer(amount: number, attackerPosition: Vector3) {
-  if (gameOver || playerHealth <= 0) return
+  playerHealthController.damagePlayer(amount, attackerPosition)
+}
 
-  const attackerYaw = Math.atan2(
-    attackerPosition.x - camera.position.x,
-    attackerPosition.z - camera.position.z,
-  )
-  const relativeYaw = Math.atan2(
-    Math.sin(attackerYaw - camera.rotation.y),
-    Math.cos(attackerYaw - camera.rotation.y),
-  )
-
-  playerHealth = Math.max(0, playerHealth - amount)
-  updateHealthDisplay()
-
-  damageIndicator.style.setProperty('--damage-angle', `${relativeYaw}rad`)
-  damageIndicator.classList.remove('visible')
-  void damageIndicator.offsetWidth
-  damageIndicator.classList.add('visible')
-  if (damageIndicatorTimer !== undefined) window.clearTimeout(damageIndicatorTimer)
-  damageIndicatorTimer = window.setTimeout(hideDamageIndicator, 360)
-
-  // A restrained impulse gives the hit weight without disorienting aim.
-  camera.cameraRotation.x -= 0.006
-  camera.cameraRotation.y += clamp(Math.sin(relativeYaw) * 0.006, -0.006, 0.006)
-
-  if (playerHealth > 0) return
-
+function handlePlayerKilled() {
   gameOver = true
   stopZombieWaveTimers()
   releaseZombiePlayerTargets()
@@ -485,15 +471,11 @@ function damagePlayer(amount: number, attackerPosition: Vector3) {
   window.setTimeout(focusRetryButton, 0)
 }
 
-function hideDamageIndicator() {
-  damageIndicator.classList.remove('visible')
-}
-
 function focusRetryButton() {
   retryButton.focus()
 }
 
-updateHealthDisplay()
+playerHealthController.updateHealthDisplay()
 
 const skyLight = new HemisphericLight('overcastSkyLight', new Vector3(0, 1, 0), scene)
 skyLight.intensity = 0.82
@@ -552,413 +534,16 @@ if (enableSoftShadows) {
   }
 }
 
-type SurfaceMaterial = PBRMaterial | StandardMaterial
-const NO_EMISSIVE_COLOR = Color3.Black()
-
-function createMaterial(
-  name: string,
-  color: Color3,
-  roughness: number,
-  metallic = 0,
-): SurfaceMaterial {
-  try {
-    const material = new PBRMaterial(name, scene)
-    material.albedoColor = color.clone()
-    material.roughness = roughness
-    material.metallic = metallic
-    material.environmentIntensity = 0.45
-    return material
-  } catch (error) {
-    logRuntimeWarning(`PBR material "${name}" failed; using a standard fallback.`, error)
-    const fallback = new StandardMaterial(`${name}Fallback`, scene)
-    fallback.diffuseColor = color.clone()
-    fallback.specularColor = metallic > 0.5
-      ? new Color3(0.28, 0.28, 0.26)
-      : new Color3(0.04, 0.04, 0.04)
-    return fallback
-  }
-}
-
-function setMaterialColor(
-  material: SurfaceMaterial,
-  color: Color3,
-  emissive = NO_EMISSIVE_COLOR,
-) {
-  if (material instanceof PBRMaterial) {
-    material.albedoColor.copyFrom(color)
-  } else {
-    material.diffuseColor.copyFrom(color)
-  }
-  material.emissiveColor.copyFrom(emissive)
-}
-
-type ProceduralSurfaceKind = 'concrete' | 'ground' | 'wood' | 'metal' | 'canvas' | 'hazard'
-
-interface ProceduralSurfaceOptions {
-  kind: ProceduralSurfaceKind
-  baseColor: Color3
-  roughness: number
-  roughnessVariation: number
-  metallic: number
-  seed: number
-  size: number
-  textureScale: number
-  normalStrength: number
-}
-
-function proceduralHash(x: number, y: number, seed: number) {
-  let value = Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(seed, 144269)
-  value = Math.imul(value ^ (value >>> 13), 1274126177)
-  return ((value ^ (value >>> 16)) >>> 0) / 4294967295
-}
-
-function smoothNoise(x: number, y: number, seed: number) {
-  const x0 = Math.floor(x)
-  const y0 = Math.floor(y)
-  const tx = x - x0
-  const ty = y - y0
-  const sx = tx * tx * (3 - 2 * tx)
-  const sy = ty * ty * (3 - 2 * ty)
-  const top = proceduralHash(x0, y0, seed) * (1 - sx)
-    + proceduralHash(x0 + 1, y0, seed) * sx
-  const bottom = proceduralHash(x0, y0 + 1, seed) * (1 - sx)
-    + proceduralHash(x0 + 1, y0 + 1, seed) * sx
-  return top * (1 - sy) + bottom * sy
-}
-
-function fractalNoise(x: number, y: number, seed: number) {
-  let value = 0
-  let amplitude = 0.57
-  let frequency = 1
-  let weight = 0
-  for (let octave = 0; octave < 4; octave += 1) {
-    value += smoothNoise(x * frequency, y * frequency, seed + octave * 17) * amplitude
-    weight += amplitude
-    amplitude *= 0.48
-    frequency *= 2.03
-  }
-  return value / weight
-}
-
-function clampByte(value: number) {
-  return Math.round(Math.max(0, Math.min(255, value)))
-}
-
-function prepareProceduralTexture(texture: DynamicTexture, scale: number) {
-  texture.wrapU = Texture.WRAP_ADDRESSMODE
-  texture.wrapV = Texture.WRAP_ADDRESSMODE
-  texture.uScale = scale
-  texture.vScale = scale
-  texture.anisotropicFilteringLevel = isLowEndMobile ? 1 : isMobile ? 2 : 4
-}
-
-/**
- * Builds compact tileable albedo, normal and packed AO/roughness/metallic maps
- * once at startup. The largest set is 256px and all other surfaces are 128px,
- * keeping the complete environment texture allocation around 1.5 MB RGBA.
- */
-function applyProceduralSurface(
-  material: SurfaceMaterial,
-  name: string,
-  options: ProceduralSurfaceOptions,
-) {
-  const { size } = options
-  const albedo = new DynamicTexture(`${name}Albedo`, { width: size, height: size }, scene, true)
-  const normal = new DynamicTexture(`${name}Normal`, { width: size, height: size }, scene, true)
-  const packed = new DynamicTexture(`${name}PackedOrm`, { width: size, height: size }, scene, true)
-  const albedoContext = albedo.getContext()
-  const normalContext = normal.getContext()
-  const packedContext = packed.getContext()
-  const albedoPixels = albedoContext.getImageData(0, 0, size, size)
-  const normalPixels = normalContext.getImageData(0, 0, size, size)
-  const packedPixels = packedContext.getImageData(0, 0, size, size)
-  const height = new Float32Array(size * size)
-  const roughness = new Float32Array(size * size)
-  const ambientOcclusion = new Float32Array(size * size)
-  const baseRed = options.baseColor.r * 255
-  const baseGreen = options.baseColor.g * 255
-  const baseBlue = options.baseColor.b * 255
-
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const index = y * size + x
-      const pixel = index * 4
-      const u = x / size
-      const v = y / size
-      const fineNoise = fractalNoise(u * 13, v * 13, options.seed)
-      const broadNoise = fractalNoise(u * 3.2, v * 3.2, options.seed + 71)
-      let colorFactor = 0.78 + fineNoise * 0.34
-      let surfaceHeight = fineNoise * 0.62 + broadNoise * 0.38
-      let dirt = Math.max(0, broadNoise - 0.55)
-      let rust = 0
-
-      if (options.kind === 'ground') {
-        const dampPatch = Math.max(0, 0.58 - broadNoise) * 0.34
-        const crackWarp = fractalNoise(u * 4.4, v * 4.4, options.seed + 119)
-        const crackRidge = Math.abs(Math.sin(
-          (u * 2.7 + v * 1.45 + crackWarp * 0.92) * Math.PI,
-        ))
-        const crack = crackRidge < 0.027 ? (0.027 - crackRidge) / 0.027 : 0
-        colorFactor -= dampPatch + crack * 0.4
-        surfaceHeight -= crack * 0.55
-        dirt += dampPatch * 0.65
-      } else if (options.kind === 'concrete') {
-        const streakNoise = smoothNoise(u * 18, 0.5, options.seed + 211)
-        const streak = Math.max(0, streakNoise - 0.68) * (0.2 + v * 0.8)
-        const aggregatePit = proceduralHash(x, y, options.seed + 307) > 0.986 ? 1 : 0
-        colorFactor -= streak * 0.34 + aggregatePit * 0.18
-        surfaceHeight -= aggregatePit * 0.4
-        dirt += streak
-      } else if (options.kind === 'wood') {
-        const plankBand = size / 4
-        const seamDistance = Math.min(y % plankBand, plankBand - (y % plankBand))
-        const seam = seamDistance < 1.35 ? 1 - seamDistance / 1.35 : 0
-        const grain = Math.sin((u * 33 + fineNoise * 3.6) * Math.PI) * 0.045
-        const wornEdge = Math.max(0, 0.055 - Math.min(v % 0.25, 0.25 - (v % 0.25))) * 1.8
-        colorFactor += grain - seam * 0.32 - wornEdge
-        surfaceHeight += grain * 1.8 - seam * 0.34
-        dirt += seam * 0.28
-      } else if (options.kind === 'metal') {
-        rust = Math.max(0, broadNoise - 0.54) * 1.35
-        const scratch = Math.abs(Math.sin((u * 41 + v * 5) * Math.PI)) > 0.992 ? 1 : 0
-        colorFactor -= rust * 0.28
-        colorFactor += scratch * 0.12
-        surfaceHeight -= rust * 0.18
-      } else if (options.kind === 'canvas') {
-        const weave = (Math.sin(u * size * Math.PI) + Math.sin(v * size * Math.PI)) * 0.018
-        colorFactor += weave
-        surfaceHeight += weave * 2.3
-      } else {
-        const diagonal = ((x + y * 0.7) % (size * 0.32)) / (size * 0.32)
-        const darkStripe = diagonal > 0.5
-        colorFactor = darkStripe ? 0.28 + fineNoise * 0.08 : 0.78 + fineNoise * 0.18
-        surfaceHeight = fineNoise * 0.22
-        dirt += Math.max(0, broadNoise - 0.5) * 0.9
-      }
-
-      const red = baseRed * colorFactor + rust * 68
-      const green = baseGreen * colorFactor + rust * 26
-      const blue = baseBlue * colorFactor + rust * 8
-      albedoPixels.data[pixel] = clampByte(red)
-      albedoPixels.data[pixel + 1] = clampByte(green)
-      albedoPixels.data[pixel + 2] = clampByte(blue)
-      albedoPixels.data[pixel + 3] = 255
-      height[index] = surfaceHeight
-      roughness[index] = Math.max(
-        0.08,
-        Math.min(
-          1,
-          options.roughness
-            + (fineNoise - 0.5) * options.roughnessVariation
-            + dirt * 0.12
-            + rust * 0.08,
-        ),
-      )
-      ambientOcclusion[index] = Math.max(0.58, 0.94 - dirt * 0.34)
-    }
-  }
-
-  const wrappedIndex = (x: number, y: number) => {
-    const wrappedX = (x + size) % size
-    const wrappedY = (y + size) % size
-    return wrappedY * size + wrappedX
-  }
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const index = y * size + x
-      const pixel = index * 4
-      const dx = (
-        height[wrappedIndex(x - 1, y)] - height[wrappedIndex(x + 1, y)]
-      ) * options.normalStrength
-      const dy = (
-        height[wrappedIndex(x, y - 1)] - height[wrappedIndex(x, y + 1)]
-      ) * options.normalStrength
-      const inverseLength = 1 / Math.hypot(dx, dy, 1)
-      normalPixels.data[pixel] = clampByte((dx * inverseLength * 0.5 + 0.5) * 255)
-      normalPixels.data[pixel + 1] = clampByte((dy * inverseLength * 0.5 + 0.5) * 255)
-      normalPixels.data[pixel + 2] = clampByte((inverseLength * 0.5 + 0.5) * 255)
-      normalPixels.data[pixel + 3] = 255
-      packedPixels.data[pixel] = clampByte(ambientOcclusion[index] * 255)
-      packedPixels.data[pixel + 1] = clampByte(roughness[index] * 255)
-      packedPixels.data[pixel + 2] = clampByte(options.metallic * 255)
-      packedPixels.data[pixel + 3] = 255
-    }
-  }
-
-  albedoContext.putImageData(albedoPixels, 0, 0)
-  normalContext.putImageData(normalPixels, 0, 0)
-  packedContext.putImageData(packedPixels, 0, 0)
-  albedo.update(false)
-  normal.update(false)
-  packed.update(false)
-  prepareProceduralTexture(albedo, options.textureScale)
-  prepareProceduralTexture(normal, options.textureScale)
-  prepareProceduralTexture(packed, options.textureScale)
-  normal.level = 0.65
-
-  if (material instanceof PBRMaterial) {
-    material.albedoColor.copyFromFloats(1, 1, 1)
-    material.albedoTexture = albedo
-    material.bumpTexture = normal
-    material.metallicTexture = packed
-    material.metallic = 1
-    material.roughness = 1
-    material.useAmbientOcclusionFromMetallicTextureRed = true
-    material.useRoughnessFromMetallicTextureGreen = true
-    material.useMetallnessFromMetallicTextureBlue = true
-    material.ambientTextureStrength = 0.82
-    material.environmentIntensity = 0.28
-    material.maxSimultaneousLights = 4
-  } else {
-    material.diffuseColor.copyFromFloats(1, 1, 1)
-    material.diffuseTexture = albedo
-    material.bumpTexture = normal
-    material.specularPower = Math.max(2, (1 - options.roughness) * 96)
-    material.maxSimultaneousLights = 4
-  }
-}
-
-function vector3FromTuple(value: Vector3Tuple) {
-  return new Vector3(value[0], value[1], value[2])
-}
-
-function applyImportedMaterialSettings(
-  meshes: readonly AbstractMesh[],
-  settings: AssetMaterialSettings,
-) {
-  const materials = new Set(meshes.map((mesh) => mesh.material).filter((material) => material !== null))
-  for (const material of materials) {
-    if (settings.mode === 'source') {
-      if (material instanceof PBRMaterial) {
-        const isTransparentDetail = material.alpha < 0.999
-          || /glass|lens|optic|scope/i.test(material.name)
-        if (!isTransparentDetail && settings.minimumRoughness !== undefined) {
-          material.roughness = Math.max(
-            material.roughness ?? settings.minimumRoughness,
-            settings.minimumRoughness,
-          )
-        }
-        if (settings.maximumEnvironmentIntensity !== undefined) {
-          material.environmentIntensity = Math.min(
-            material.environmentIntensity,
-            settings.maximumEnvironmentIntensity,
-          )
-        }
-      }
-      continue
-    }
-
-    if (settings.alpha !== undefined) material.alpha = settings.alpha
-    if (settings.backFaceCulling !== undefined) {
-      material.backFaceCulling = settings.backFaceCulling
-    }
-
-    if (material instanceof PBRMaterial) {
-      if (settings.albedoColor) material.albedoColor = Color3.FromHexString(settings.albedoColor)
-      if (settings.emissiveColor) material.emissiveColor = Color3.FromHexString(settings.emissiveColor)
-      if (settings.roughness !== undefined) material.roughness = settings.roughness
-      if (settings.metallic !== undefined) material.metallic = settings.metallic
-      if (settings.environmentIntensity !== undefined) {
-        material.environmentIntensity = settings.environmentIntensity
-      }
-    } else if (material instanceof StandardMaterial) {
-      if (settings.albedoColor) material.diffuseColor = Color3.FromHexString(settings.albedoColor)
-      if (settings.emissiveColor) material.emissiveColor = Color3.FromHexString(settings.emissiveColor)
-      if (settings.roughness !== undefined) {
-        material.specularPower = Math.max(1, (1 - settings.roughness) * 128)
-      }
-    }
-  }
-}
-
-function describeArmMaterial(material: PBRMaterial) {
-  return `${material.name}: albedoColor=${material.albedoColor.toHexString()} roughness=${material.roughness?.toFixed(3) ?? 'null'} metallic=${material.metallic?.toFixed(3) ?? 'null'} metallicRoughnessMap=${material.metallicTexture?.name ?? 'none'}`
-}
-
-// Retunes only the named arm materials of an imported first-person weapon so its
-// authored hands read as the same player as the reference weapon's. Nothing but
-// those materials is written to: the meshes, their skeletons, bone weights,
-// animations and every other material in the same import are left exactly as
-// the loader produced them, and every guard below fails safe by leaving the
-// arms authored rather than by touching something it was not asked to.
-function matchImportedArmMaterials(
-  logTag: string,
-  meshes: readonly AbstractMesh[],
-  settings: ArmMaterialMatchSettings,
-) {
-  const armMeshes = meshes.filter((mesh) => settings.meshNames.includes(mesh.name)
-    && mesh.getTotalVertices() > 0)
-  if (armMeshes.length !== settings.meshNames.length) {
-    console.warn(
-      `[Night Breach][${logTag}] Arm meshes ${settings.meshNames.join(', ')} were not all found (${armMeshes.length}/${settings.meshNames.length}); the authored arm materials stay as imported.`,
-    )
-    return false
-  }
-
-  const armMaterials = new Set<PBRMaterial>()
-  for (const mesh of armMeshes) {
-    if (!(mesh.material instanceof PBRMaterial)) {
-      console.warn(
-        `[Night Breach][${logTag}] Arm mesh ${mesh.name} is not using a PBR material; the authored arm materials stay as imported.`,
-      )
-      return false
-    }
-    armMaterials.add(mesh.material)
-  }
-
-  // The weapon body and its shells share this import. If any of them were ever
-  // to share a material with the arms, retuning it would recolour the gun too,
-  // so that case is refused outright instead of half-applied.
-  const sharedWithWeapon = meshes.filter((mesh) => !armMeshes.includes(mesh)
-    && mesh.material instanceof PBRMaterial
-    && armMaterials.has(mesh.material))
-  if (sharedWithWeapon.length > 0) {
-    console.warn(
-      `[Night Breach][${logTag}] Arm materials are shared with ${sharedWithWeapon.map((mesh) => mesh.name).join(', ')}; the authored arm materials stay as imported so the weapon cannot be recoloured.`,
-    )
-    return false
-  }
-
-  // The measured values only describe the GLB they were measured on, so a
-  // re-exported model with different material names is left alone.
-  const foundNames = [...armMaterials].map((material) => material.name).sort()
-  const expectedNames = [...settings.materialNames].sort()
-  if (foundNames.join('|') !== expectedNames.join('|')) {
-    console.warn(
-      `[Night Breach][${logTag}] Arm materials changed (found ${foundNames.join(', ')}, expected ${expectedNames.join(', ')}); the authored arm materials stay as imported.`,
-    )
-    return false
-  }
-
-  const albedoTint = Color3.FromHexString(settings.albedoColor)
-  const before: string[] = []
-  const after: string[] = []
-  for (const material of armMaterials) {
-    before.push(describeArmMaterial(material))
-    // A multiply rather than an assignment: the authored albedo texture keeps
-    // every stitch, fold and wear pattern and is only brought down onto the
-    // reference brightness and hue.
-    material.albedoColor = material.albedoColor.multiply(albedoTint)
-    material.roughness = settings.roughness
-    material.metallic = settings.metallic
-    // Ambient occlusion is read out of the same map when the exporter packed it
-    // there, so the map is only dropped when nothing else still needs it.
-    if (settings.dropMetallicRoughnessTexture
-      && material.metallicTexture
-      && !material.useAmbientOcclusionFromMetallicTextureRed) {
-      material.metallicTexture = null
-    }
-    after.push(describeArmMaterial(material))
-  }
-
-  const untouched = meshes
-    .filter((mesh) => !armMeshes.includes(mesh) && mesh.getTotalVertices() > 0)
-    .map((mesh) => `${mesh.name}/${mesh.material?.name ?? 'none'}`)
-  console.info(
-    `[Night Breach][${logTag}] Arms matched to ${settings.reference}.\n  before: ${before.join('\n  before: ')}\n  after:  ${after.join('\n  after:  ')}\n  untouched meshes: ${untouched.join(', ') || 'none'}`,
-  )
-  return true
-}
+const {
+  applyProceduralSurface,
+  createMaterial,
+  setMaterialColor,
+} = createProceduralSurfaceHelpers({
+  isLowEndMobile,
+  isMobile,
+  logRuntimeWarning,
+  scene,
+})
 
 const concreteMaterial = createMaterial(
   'roughConcrete',
@@ -1824,50 +1409,13 @@ void initializeLocalEnvironment().catch((error) => {
   logRuntimeWarning('Environment source: procedural fallback active.', error)
 })
 
-type ZombieState = 'idle' | 'chasing' | 'attacking' | 'hit' | 'dead'
-type ZombieAnimationName = 'idle' | 'walk' | 'run' | 'attack' | 'hit' | 'death'
-type ZombieAnimationMap = Partial<Record<ZombieAnimationName, AnimationGroup>>
-
-type ZombieAudioName = 'idle' | 'chase' | 'attack' | 'hit' | 'death'
-type ZombieAudioHook = (zombieId: number) => void
-
-// These no-op callbacks are intentional integration points for future local audio.
-// They never create an Audio element, fetch a file, or fail when assets are absent.
-const zombieAudioHooks: Readonly<Record<ZombieAudioName, ZombieAudioHook>> = {
-  idle: () => undefined,
-  chase: () => undefined,
-  attack: () => undefined,
-  hit: () => undefined,
-  death: () => undefined,
-}
-
-function callZombieAudioHook(hook: ZombieAudioHook, zombieId: number) {
-  try {
-    hook(zombieId)
-  } catch (error) {
-    logRuntimeWarning(`Zombie ${zombieId} audio hook was skipped.`, error)
-  }
-}
-
-function playZombieIdleSound(zombieId: number) {
-  callZombieAudioHook(zombieAudioHooks.idle, zombieId)
-}
-
-function playZombieChaseSound(zombieId: number) {
-  callZombieAudioHook(zombieAudioHooks.chase, zombieId)
-}
-
-function playZombieAttackSound(zombieId: number) {
-  callZombieAudioHook(zombieAudioHooks.attack, zombieId)
-}
-
-function playZombieHitSound(zombieId: number) {
-  callZombieAudioHook(zombieAudioHooks.hit, zombieId)
-}
-
-function playZombieDeathSound(zombieId: number) {
-  callZombieAudioHook(zombieAudioHooks.death, zombieId)
-}
+const {
+  playZombieAttackSound,
+  playZombieChaseSound,
+  playZombieDeathSound,
+  playZombieHitSound,
+  playZombieIdleSound,
+} = createZombieAudioHooks(logRuntimeWarning)
 
 interface ProceduralZombieParts {
   head: Mesh
@@ -1904,144 +1452,14 @@ const ZOMBIE_ASSET_CONFIG = {
 const ZOMBIE_GROUNDED_ROOT_Y = ZOMBIE_ASSET_CONFIG.height * 0.5
 const ZOMBIE_INVALID_GROUND_DELTA = 0.2
 
-const ZOMBIE_AI_CONFIG = {
-  detectionRange: 28,
-  attackDistance: 1.55,
-  // The mover must stop INSIDE its own reach. Parking at exactly attackDistance
-  // left every zombie balanced on the knife-edge of its own hit test, so any
-  // sub-centimetre drift during the swing turned a contact hit into a miss.
-  attackStopDistance: 1.3,
-  // Melee reach at the damage frame. The grace over attackDistance covers the
-  // player's 0.45 collision ellipsoid plus the small amount of sliding a player
-  // can do along a zombie's side during the 0.82s attack animation.
-  attackReachDistance: 2.05,
-  // Vertical band around the zombie's centre. Melee is a horizontal check, but
-  // a player on a crate overhead should still be out of reach.
-  attackReachHeight: 2.1,
-  walkSpeed: 2.1,
-  runSpeed: 3.3,
-  runDistance: 3.5,
-  rotationSpeed: 6.5,
-  steeringResponse: 8,
-  obstacleProbeDistance: 1.45,
-  obstacleTurnAngle: 0.72,
-  nearThinkInterval: 0.14,
-  midThinkInterval: isMobile ? 0.3 : 0.24,
-  farThinkInterval: isMobile ? 0.52 : 0.38,
-  nearThinkDistance: 14,
-  midThinkDistance: 24,
-}
+const ZOMBIE_AI_CONFIG = createZombieAiConfig(isMobile)
 
-/**
- * Swarm shaping for the chase. Kept separate from ZOMBIE_AI_CONFIG so the way a
- * group spreads out can be tuned without touching speeds, melee, or waves.
- *
- * Every zombie used to seek the player's exact centre, so a pack solved for one
- * identical goal point and their paths converged by construction. Nothing pushed
- * them apart until their colliders actually touched, which is a contact response
- * rather than steering: the leader then blocked the follower and the group
- * resolved into a single-file line. These constants add the two missing terms --
- * a stable per-zombie approach lane, and lateral separation that runs for the
- * whole chase instead of only at melee range.
- */
-const ZOMBIE_SWARM_CONFIG = {
-  // Sectors around the player. Eight is coarse enough that claiming a lane costs
-  // a small course correction rather than a lap, while still reading as a
-  // surround once several zombies have arrived.
-  approachSlotCount: 8,
-  // How far off the player's centre a lane anchor sits. This is the standoff the
-  // pack fans out to on the way in; it is faded back out again before melee.
-  approachRingRadius: 1.5,
-  // The lane offset is at full strength beyond this distance from the player...
-  approachBlendFarDistance: 7,
-  // ...and gone entirely inside this one, where the zombie aims at the real
-  // player. Must stay above attackDistance (1.55) so a swing is never aimed at
-  // an offset point and the existing melee system sees an unchanged approach.
-  approachBlendNearDistance: 2.3,
-  // An already-claimed lane costs this much extra angular error, so a latecomer
-  // arriving on the same bearing is pushed into a neighbouring sector instead of
-  // doubling up. Waves can exceed the ring size, so lanes are never forbidden.
-  approachSlotOccupancyPenalty: Math.PI * 0.55,
-  // Neighbour radius for separation. Bodies are 0.72 wide, so reacting at 2.3
-  // starts the spread well before contact instead of after the collider has
-  // already blocked the path.
-  separationRadius: 2.3,
-  separationStrength: 1.15,
-  // Hard cap on the separation vector. The seek direction is unit length, so
-  // 0.85 bounds any deviation to ~40 degrees: enough to unstack a pack, never
-  // enough to turn the chase into a sidestep or an orbit.
-  separationMaxPush: 0.85,
-  // Separation is never switched off in melee -- that is where stacking is worst
-  // -- but it is eased so zombies cannot shove each other out of their own reach.
-  separationMeleeScale: 0.45,
-  // Converts a neighbour blocking the path head-on into a sidestep. Without it a
-  // follower's push points almost straight backwards, cancels against its own
-  // forward motion, and the pair stays nose-to-tail: the single-file case.
-  lineBreakGain: 0.9,
-} as const
-
-/**
- * Approach lane ledger. Each living zombie holds one sector for its whole life,
- * so the group commits to different sides of the player instead of converging on
- * one point. Claims happen once, on the first chase tick, and are never re-rolled
- * per frame -- re-picking a lane every tick is what makes swarms jitter.
- */
-const zombieApproachSlotUsage = new Uint8Array(ZOMBIE_SWARM_CONFIG.approachSlotCount)
-
-function getApproachSlotAngle(slotIndex: number) {
-  return (slotIndex / ZOMBIE_SWARM_CONFIG.approachSlotCount) * Math.PI * 2
-}
-
-function signedAngleDifference(from: number, to: number) {
-  const difference = to - from
-  return Math.atan2(Math.sin(difference), Math.cos(difference))
-}
-
-/**
- * Picks the cheapest lane for a zombie arriving on the given bearing: closest
- * free sector wins, and occupancy is a cost rather than a hard block so a wave
- * larger than the ring still spreads evenly instead of failing to place.
- */
-function claimApproachSlot(bearing: number) {
-  let bestSlot = 0
-  let bestCost = Number.POSITIVE_INFINITY
-  for (let slotIndex = 0; slotIndex < ZOMBIE_SWARM_CONFIG.approachSlotCount; slotIndex += 1) {
-    const angularError = Math.abs(
-      signedAngleDifference(bearing, getApproachSlotAngle(slotIndex)),
-    )
-    const cost = angularError
-      + zombieApproachSlotUsage[slotIndex] * ZOMBIE_SWARM_CONFIG.approachSlotOccupancyPenalty
-    if (cost < bestCost) {
-      bestCost = cost
-      bestSlot = slotIndex
-    }
-  }
-  zombieApproachSlotUsage[bestSlot] += 1
-  return bestSlot
-}
-
-function releaseApproachSlot(slotIndex: number) {
-  if (slotIndex < 0 || slotIndex >= zombieApproachSlotUsage.length) return
-  if (zombieApproachSlotUsage[slotIndex] > 0) zombieApproachSlotUsage[slotIndex] -= 1
-}
-
-type ZombieHitZoneType = 'head' | 'torso' | 'limbs'
-
-const ZOMBIE_COMBAT_CONFIG = {
-  maxHealth: 100,
-  headDamage: 65,
-  torsoDamage: 34,
-  limbDamage: 20,
-  hitReactionDuration: 0.18,
-  hitPushDistance: 0.045,
-  headHitPushMultiplier: 1.35,
-  attackDamage: 14,
-  attackCooldown: 1.15,
-  attackDuration: 0.82,
-  attackDamageMoment: 0.43,
-  fallbackDeathDuration: 0.95,
-  corpseHoldDuration: 3.5,
-}
+const {
+  claimApproachSlot,
+  getApproachSlotAngle,
+  releaseApproachSlot,
+  resetApproachSlots,
+} = createZombieApproachSlots()
 
 const zombieHitZoneMaterial = new StandardMaterial('zombieHitZoneMaterial', scene)
 zombieHitZoneMaterial.alpha = 0
@@ -2388,60 +1806,6 @@ const ZOMBIE_SPAWN_FALLBACK_POSITIONS = [
   new Vector3(22, 0, -22),
   new Vector3(-22, 0, 22),
 ] as const
-const ZOMBIE_WAVE_CONFIG = {
-  baseZombieCount: 4,
-  zombiesAddedPerWave: 1,
-  zombieHealthScalePerWave: 0.05,
-  zombieMovementSpeedScalePerWave: 0.1,
-  maximumZombieCount: 10,
-  maximumZombieHealth: 150,
-  maximumZombieMovementSpeed: 6.6,
-  minimumSpawnDistanceFromPlayer: 12,
-  spawnPlacementAttempts: 6,
-  spawnClearanceRadius: 0.7,
-  spawnInterval: 1_000,
-  timeBetweenWaves: 3_000,
-} as const
-
-const zombieAnimationAliases: Readonly<Record<ZombieAnimationName, readonly string[]>> = {
-  idle: ['idle'],
-  walk: ['walk'],
-  run: ['run', 'sprint'],
-  attack: ['attack', 'bite', 'claw'],
-  hit: ['hit', 'hurt', 'damage', 'impact'],
-  death: ['death', 'die', 'dying'],
-}
-
-function detectZombieAnimations(groups: AnimationGroup[]): ZombieAnimationMap {
-  const animations: ZombieAnimationMap = {}
-  const animationNames = Object.keys(zombieAnimationAliases) as ZombieAnimationName[]
-
-  for (const group of groups) {
-    const normalizedName = group.name.toLowerCase().replace(/[\s_-]+/g, '')
-    for (const animationName of animationNames) {
-      if (animations[animationName]) continue
-      const aliases = zombieAnimationAliases[animationName]
-      if (aliases.some((alias) => normalizedName.includes(alias))) {
-        animations[animationName] = group
-        break
-      }
-    }
-  }
-
-  // This asset has one locomotion clip. Reusing the independently cloned
-  // Walk1 group at a higher playback rate gives each zombie a run/chase state
-  // without altering the authored skeleton or any skinned mesh transforms.
-  animations.run ??= animations.walk
-  return animations
-}
-
-function describeZombieAnimationMapping(animations: ZombieAnimationMap) {
-  const animationNames = Object.keys(zombieAnimationAliases) as ZombieAnimationName[]
-  return animationNames.map((name) => (
-    `${name}:${animations[name]?.name ?? `${name}-root-fallback`}`
-  )).join(',')
-}
-
 function configureZombieVisualMesh(mesh: AbstractMesh, allowShadows: boolean) {
   mesh.isPickable = false
   mesh.checkCollisions = false
@@ -4467,7 +3831,7 @@ function resetZombieWave() {
   zombies.length = 0
   // Disposal already releases each lane; zeroing here guarantees a restart can
   // never inherit a stale count and skew the first wave's spread.
-  zombieApproachSlotUsage.fill(0)
+  resetApproachSlots()
   activeZombieCount = 0
   nextZombieId = 1
   waveState.currentWave = 0
@@ -4596,233 +3960,6 @@ const SHOTGUN_COMBAT_CONFIG = {
   reloadFallbackSeconds: 409 / 60,
 }
 
-type ShotgunSoundName = 'shot' | 'pump' | 'reload'
-
-// Audio offsets are authored-animation seconds at speed 1. The pump offset is
-// the first frame where Slide_059 leaves its rest position in SG_FPS_Shot.
-// Reload offsets are the four frames where a new 12ge_low_062 shell begins its
-// handling pass in SG_FPS_Reload. Both offsets and playback rate scale with the
-// animation speed, so changing the view-model speed preserves synchronization.
-const SHOTGUN_AUDIO_CONFIG = {
-  masterVolume: 1,
-  volumes: {
-    shot: 0.9,
-    pump: 0.72,
-    reload: 0.68,
-  } satisfies Readonly<Record<ShotgunSoundName, number>>,
-  files: {
-    shot: '/assets/audio/weapons/shotgun/shot.wav',
-    pump: '/assets/audio/weapons/shotgun/pump.wav',
-    reload: '/assets/audio/weapons/shotgun/reload.wav',
-  } satisfies Readonly<Record<ShotgunSoundName, string>>,
-  pumpOffsetSeconds: 23 / 60,
-  reloadOffsetsSeconds: [39 / 60, 120 / 60, 200 / 60, 279 / 60],
-} as const
-
-// One AudioContext, three decoded buffers and three persistent gain nodes keep
-// playback cheap on mobile. AudioBufferSourceNodes are intentionally one-shot,
-// but every live/scheduled source is tracked so an action can never duplicate
-// itself and weapon switches, death, restart or page suspension can stop it.
-class ShotgunAudioController {
-  private context: AudioContext | null = null
-  private masterGain: GainNode | null = null
-  private readonly gains: Partial<Record<ShotgunSoundName, GainNode>> = {}
-  private readonly buffers = new Map<ShotgunSoundName, AudioBuffer>()
-  private readonly activeSources: Record<ShotgunSoundName, Set<AudioBufferSourceNode>> = {
-    shot: new Set(),
-    pump: new Set(),
-    reload: new Set(),
-  }
-  private preloadPromise: Promise<void> | null = null
-  private audioUnavailableLogged = false
-
-  private ensureContext() {
-    if (this.context) return this.context
-    if (typeof AudioContext === 'undefined') {
-      if (!this.audioUnavailableLogged) {
-        this.audioUnavailableLogged = true
-        console.warn('[Night Breach][Shotgun Audio] Web Audio is unavailable in this browser.')
-      }
-      canvas.dataset.shotgunAudioReady = 'unavailable'
-      return null
-    }
-
-    this.context = new AudioContext({ latencyHint: 'interactive' })
-    this.masterGain = this.context.createGain()
-    this.masterGain.gain.value = SHOTGUN_AUDIO_CONFIG.masterVolume
-    this.masterGain.connect(this.context.destination)
-
-    for (const soundName of Object.keys(SHOTGUN_AUDIO_CONFIG.files) as ShotgunSoundName[]) {
-      const gain = this.context.createGain()
-      gain.gain.value = SHOTGUN_AUDIO_CONFIG.volumes[soundName]
-      gain.connect(this.masterGain)
-      this.gains[soundName] = gain
-    }
-    return this.context
-  }
-
-  preload() {
-    if (this.preloadPromise) return this.preloadPromise
-    const context = this.ensureContext()
-    if (!context) return Promise.resolve()
-
-    canvas.dataset.shotgunAudioReady = 'loading'
-    this.preloadPromise = Promise.all(
-      (Object.entries(SHOTGUN_AUDIO_CONFIG.files) as [ShotgunSoundName, string][])
-        .map(async ([soundName, path]) => {
-          try {
-            const response = await fetch(path, { cache: 'force-cache' })
-            if (!response.ok) {
-              throw new Error(`${response.status} ${response.statusText}`)
-            }
-            const buffer = await context.decodeAudioData(await response.arrayBuffer())
-            this.buffers.set(soundName, buffer)
-          } catch (error) {
-            logRuntimeWarning(`[Shotgun Audio] Could not preload ${path}.`, error)
-          }
-        }),
-    ).then(() => {
-      canvas.dataset.shotgunAudioReady = this.buffers.size === 3 ? 'ready' : 'partial'
-    })
-    return this.preloadPromise
-  }
-
-  async unlock() {
-    const context = this.ensureContext()
-    if (!context) return
-
-    // Resume immediately while the browser still considers this call part of
-    // the deployment gesture; decoding may finish asynchronously afterward.
-    if (context.state === 'suspended') {
-      try {
-        await context.resume()
-      } catch (error) {
-        logRuntimeWarning('[Shotgun Audio] AudioContext resume was unavailable.', error)
-      }
-    }
-    await this.preload()
-  }
-
-  private stop(soundName: ShotgunSoundName) {
-    const sources = this.activeSources[soundName]
-    for (const source of sources) {
-      source.onended = null
-      try {
-        source.stop()
-      } catch {
-        // A source that ended between iteration and stop is already harmless.
-      }
-      source.disconnect()
-    }
-    sources.clear()
-  }
-
-  private schedule(
-    soundName: ShotgunSoundName,
-    authoredOffsetsSeconds: readonly number[],
-    animationSpeed: number,
-    baseTime: number,
-  ) {
-    const context = this.context
-    const buffer = this.buffers.get(soundName)
-    const gain = this.gains[soundName]
-    if (!context || !buffer || !gain) return
-
-    const speed = Math.max(0.001, Math.abs(animationSpeed))
-    for (const authoredOffset of authoredOffsetsSeconds) {
-      const source = context.createBufferSource()
-      source.buffer = buffer
-      source.playbackRate.value = speed
-      source.connect(gain)
-      this.activeSources[soundName].add(source)
-      source.onended = () => {
-        this.activeSources[soundName].delete(source)
-        source.disconnect()
-      }
-      source.start(baseTime + authoredOffset / speed)
-    }
-  }
-
-  startShotCycle(animationSpeed: number) {
-    const context = this.context
-    if (!context) return
-    if (context.state === 'suspended') void context.resume()
-
-    // A single source per cue means held fire can never stack an old shot or
-    // pump tail on top of the next authored fire-and-pump cycle.
-    this.stop('reload')
-    this.stop('shot')
-    this.stop('pump')
-    const baseTime = context.currentTime
-    this.schedule('shot', [0], animationSpeed, baseTime)
-    this.schedule(
-      'pump',
-      [SHOTGUN_AUDIO_CONFIG.pumpOffsetSeconds],
-      animationSpeed,
-      baseTime,
-    )
-  }
-
-  startReload(animationSpeed: number) {
-    const context = this.context
-    if (!context) return
-    if (context.state === 'suspended') void context.resume()
-
-    // Reload cannot begin until the shot cycle gate clears, but explicitly
-    // retire any remaining shot/pump tail so mechanical cues never overlap.
-    this.stop('shot')
-    this.stop('pump')
-    this.stop('reload')
-    this.schedule(
-      'reload',
-      SHOTGUN_AUDIO_CONFIG.reloadOffsetsSeconds,
-      animationSpeed,
-      context.currentTime,
-    )
-  }
-
-  resumeShotCycle(elapsedSeconds: number, animationSpeed: number) {
-    const context = this.context
-    if (!context) return
-    if (context.state === 'suspended') void context.resume()
-
-    this.stop('pump')
-    const speed = Math.max(0.001, Math.abs(animationSpeed))
-    const authoredElapsed = elapsedSeconds * speed
-    if (authoredElapsed >= SHOTGUN_AUDIO_CONFIG.pumpOffsetSeconds) return
-    this.schedule(
-      'pump',
-      [SHOTGUN_AUDIO_CONFIG.pumpOffsetSeconds - authoredElapsed],
-      speed,
-      context.currentTime,
-    )
-  }
-
-  resumeReload(elapsedSeconds: number, animationSpeed: number) {
-    const context = this.context
-    if (!context) return
-    if (context.state === 'suspended') void context.resume()
-
-    this.stop('reload')
-    const speed = Math.max(0.001, Math.abs(animationSpeed))
-    const authoredElapsed = elapsedSeconds * speed
-    const remainingOffsets = SHOTGUN_AUDIO_CONFIG.reloadOffsetsSeconds
-      .filter((offset) => offset > authoredElapsed)
-      .map((offset) => offset - authoredElapsed)
-    this.schedule('reload', remainingOffsets, speed, context.currentTime)
-  }
-
-  stopReload() {
-    this.stop('reload')
-  }
-
-  stopAll() {
-    this.stop('shot')
-    this.stop('pump')
-    this.stop('reload')
-  }
-}
-
 canvas.dataset.shotgunAudioReady = 'loading'
 canvas.dataset.shotgunAudioTimings = [
   'shot:0.000000',
@@ -4831,31 +3968,19 @@ canvas.dataset.shotgunAudioTimings = [
     (offset, index) => `reload${index + 1}:${offset.toFixed(6)}`,
   ),
 ].join(',')
-const shotgunAudio = new ShotgunAudioController()
+const shotgunAudio = new ShotgunAudioController({
+  canvas,
+  logRuntimeWarning,
+})
 unlockShotgunAudio = () => {
   void shotgunAudio.unlock()
 }
 void shotgunAudio.preload()
 
-// The four authored clips this phase drives, exactly as exported in the GLB.
-const SHOTGUN_ANIMATION_CLIPS = {
-  idle: 'Armature|SG_FPS_Idle',
-  walk: 'Armature|SG_FPS_Walk',
-  shot: 'Armature|SG_FPS_Shot',
-  reload: 'Armature|SG_FPS_Reload',
-} as const
-
-type ShotgunClipName = keyof typeof SHOTGUN_ANIMATION_CLIPS
-
 // The rifle is the weapon the player starts with. Each weapon owns its own
 // ammo, firing, reload, recoil and animation state; selection routes every
 // fire/reload request to exactly one of them and never lets the other's
 // combat code run.
-type WeaponId = 'rifle' | 'shotgun'
-const WEAPON_LABELS: Readonly<Record<WeaponId, string>> = {
-  rifle: 'AK',
-  shotgun: 'SG',
-}
 let activeWeaponId: WeaponId = 'rifle'
 let weaponSwitchCount = 0
 canvas.dataset.activeWeapon = activeWeaponId
@@ -5226,115 +4351,6 @@ console.info('[Night Breach][Rifle] Local GLB loading started with procedural fa
 // permutation compiles during load instead of hitching on the first shot.
 // ---------------------------------------------------------------------------
 
-const MUZZLE_FLASH_DURATION = 0.058
-const SHOTGUN_MUZZLE_FLASH_DURATION = 0.046
-const MUZZLE_SMOKE_LIFETIME = 0.78
-const SHELL_CASING_LIFETIME = 1.3
-type MuzzleEffectProfile = 'rifle' | 'shotgun'
-
-type Canvas2dContext = ReturnType<DynamicTexture['getContext']>
-
-function paintRadialFalloff(
-  context: Canvas2dContext,
-  centerX: number,
-  centerY: number,
-  radius: number,
-  steps: number,
-  colors: readonly string[],
-  peakAlpha: number,
-) {
-  for (let step = steps; step >= 1; step -= 1) {
-    const progress = step / steps
-    context.globalAlpha = ((1 - progress) ** 1.5) * peakAlpha + 0.02
-    context.fillStyle = colors[Math.min(
-      colors.length - 1,
-      Math.floor(progress * colors.length),
-    )]
-    context.beginPath()
-    context.arc(centerX, centerY, Math.max(0.5, radius * progress), 0, Math.PI * 2)
-    context.fill()
-  }
-  context.globalAlpha = 1
-}
-
-function createMuzzleCoreTexture() {
-  const texture = new DynamicTexture(
-    'muzzleFlashCoreTexture',
-    { width: 128, height: 128 },
-    scene,
-    false,
-  )
-  const context = texture.getContext()
-  context.clearRect(0, 0, 128, 128)
-  paintRadialFalloff(context, 64, 64, 62, 30, [
-    '#ffffff',
-    '#fff8e2',
-    '#ffe3a2',
-    '#ffb851',
-    '#f0791a',
-    '#b53c06',
-  ], 0.96)
-  texture.update(false)
-  texture.hasAlpha = true
-  return texture
-}
-
-function createMuzzleStarTexture() {
-  const texture = new DynamicTexture(
-    'muzzleFlashStarTexture',
-    { width: 128, height: 128 },
-    scene,
-    false,
-  )
-  const context = texture.getContext()
-  context.clearRect(0, 0, 128, 128)
-  const petalCount = 7
-  for (let petal = 0; petal < petalCount; petal += 1) {
-    const angle = petal / petalCount * Math.PI * 2
-    const isMajor = petal % 2 === 0
-    const length = isMajor ? 61 : 41
-    const spread = isMajor ? 0.17 : 0.1
-    context.globalAlpha = isMajor ? 0.88 : 0.58
-    context.fillStyle = isMajor ? '#ffd989' : '#ffb347'
-    context.beginPath()
-    context.moveTo(64 + Math.cos(angle) * length, 64 + Math.sin(angle) * length)
-    context.lineTo(64 + Math.cos(angle + spread) * 15, 64 + Math.sin(angle + spread) * 15)
-    context.lineTo(64 + Math.cos(angle - spread) * 15, 64 + Math.sin(angle - spread) * 15)
-    context.closePath()
-    context.fill()
-  }
-  context.globalAlpha = 1
-  paintRadialFalloff(context, 64, 64, 27, 16, [
-    '#ffffff',
-    '#fff4cd',
-    '#ffc768',
-    '#f4841f',
-  ], 0.94)
-  texture.update(false)
-  texture.hasAlpha = true
-  return texture
-}
-
-function createMuzzleSmokeTexture() {
-  const texture = new DynamicTexture(
-    'muzzleSmokeTexture',
-    { width: 64, height: 64 },
-    scene,
-    false,
-  )
-  const context = texture.getContext()
-  context.clearRect(0, 0, 64, 64)
-  paintRadialFalloff(context, 32, 32, 31, 18, [
-    '#d8d4cb',
-    '#b3afa6',
-    '#8b8880',
-    '#5f5d57',
-  ], 0.52)
-  texture.update(false)
-  texture.hasAlpha = true
-  return texture
-}
-
 interface MuzzleSmokePuff {
   active: boolean
   age: number
@@ -5408,9 +4424,9 @@ class WeaponFireEffects {
     this.shellCapacity = isLowEndMobile ? 4 : isMobile ? 6 : 10
     this.baseExposure = scene.imageProcessingConfiguration.exposure
 
-    const coreTexture = createMuzzleCoreTexture()
-    const starTexture = createMuzzleStarTexture()
-    const smokeTexture = createMuzzleSmokeTexture()
+    const coreTexture = createMuzzleCoreTexture(scene)
+    const starTexture = createMuzzleStarTexture(scene)
+    const smokeTexture = createMuzzleSmokeTexture(scene)
 
     this.coreMaterial = this.createAdditiveMaterial('muzzleFlashCoreMaterial', coreTexture)
     this.starMaterial = this.createAdditiveMaterial('muzzleFlashStarMaterial', starTexture)
@@ -5930,11 +4946,6 @@ const weaponFireEffects = new WeaponFireEffects()
 
 type WeaponAnimationName = 'idle' | 'fire' | 'reload' | 'equip' | 'ads'
 type WeaponAnimationMap = Partial<Record<WeaponAnimationName, AnimationGroup>>
-
-const PROCEDURAL_RELOAD_DURATION_SECONDS = 1.05
-const RELOAD_AMMO_PROGRESS = 0.56
-const RELOAD_COMPLETION_GRACE_SECONDS = 0.15
-const WEAPON_ANIMATION_BLEND_SPEED = 0.16
 
 let importedAnimationGroups: AnimationGroup[] = []
 let importedWeaponAnimations: WeaponAnimationMap = {}
@@ -7251,9 +6262,36 @@ let muzzleFlashRemaining = 0
 let reloadElapsed = -1
 let reloadApplied = false
 let reloadDurationSeconds = PROCEDURAL_RELOAD_DURATION_SECONDS
-let crosshairTimer: number | undefined
-let hitMarkerTimer: number | undefined
-let headshotTimer: number | undefined
+const {
+  pulseCrosshair,
+  showHeadshotIndicator,
+  showHitMarker,
+  updateAmmoDisplay,
+} = createHudController({
+  ammoState: {
+    get activeWeaponId() {
+      return activeWeaponId
+    },
+    get magazineAmmo() {
+      return magazineAmmo
+    },
+    get reserveAmmo() {
+      return reserveAmmo
+    },
+    get shotgunLoadedShells() {
+      return shotgunLoadedShells
+    },
+    get shotgunReserveShells() {
+      return shotgunReserveShells
+    },
+  },
+  elements: {
+    ammoDisplay,
+    crosshair,
+    headshotIndicator,
+    hitMarker,
+  },
+})
 let movementPointerId: number | null = null
 let aimPointerId: number | null = null
 let firePointerId: number | null = null
@@ -7284,50 +6322,6 @@ engageAds = () => {
   playImportedWeaponAnimation('ads')
   adsButton.classList.add('active')
   document.body.classList.add('ads-active')
-}
-
-// The one ammo readout shows whichever weapon is in the player's hands, in the
-// HUD's existing loaded/reserve format.
-function updateAmmoDisplay() {
-  ammoDisplay.textContent = activeWeaponId === 'shotgun'
-    ? `${shotgunLoadedShells}/${shotgunReserveShells}`
-    : `${magazineAmmo}/${reserveAmmo}`
-}
-
-function pulseCrosshair() {
-  crosshair.classList.remove('firing')
-  void crosshair.offsetWidth
-  crosshair.classList.add('firing')
-  if (crosshairTimer !== undefined) window.clearTimeout(crosshairTimer)
-  crosshairTimer = window.setTimeout(hideCrosshairPulse, 75)
-}
-
-function hideCrosshairPulse() {
-  crosshair.classList.remove('firing')
-}
-
-function showHitMarker() {
-  hitMarker.classList.remove('visible')
-  void hitMarker.offsetWidth
-  hitMarker.classList.add('visible')
-  if (hitMarkerTimer !== undefined) window.clearTimeout(hitMarkerTimer)
-  hitMarkerTimer = window.setTimeout(hideHitMarker, 95)
-}
-
-function hideHitMarker() {
-  hitMarker.classList.remove('visible')
-}
-
-function showHeadshotIndicator() {
-  headshotIndicator.classList.remove('visible')
-  void headshotIndicator.offsetWidth
-  headshotIndicator.classList.add('visible')
-  if (headshotTimer !== undefined) window.clearTimeout(headshotTimer)
-  headshotTimer = window.setTimeout(hideHeadshotIndicator, 260)
-}
-
-function hideHeadshotIndicator() {
-  headshotIndicator.classList.remove('visible')
 }
 
 function hitZombieWithBullet(
@@ -7935,22 +6929,13 @@ let swayY = 0
 let bobBlend = 0
 let bobTime = 0
 
-function damp(current: number, target: number, speed: number, deltaSeconds: number) {
-  return current + (target - current) * (1 - Math.exp(-speed * deltaSeconds))
-}
-
-function clamp(value: number, minimum: number, maximum: number) {
-  return Math.min(maximum, Math.max(minimum, value))
-}
-
 function restartPrototype() {
   if (!gameOver) return
 
   shotgunAudio.stopAll()
   resetZombieWave()
   bloodEffectPool.reset()
-  playerHealth = PLAYER_MAX_HEALTH
-  updateHealthDisplay()
+  playerHealthController.resetHealth()
   magazineAmmo = 30
   reserveAmmo = 120
   reloadElapsed = -1
@@ -7974,8 +6959,7 @@ function restartPrototype() {
   selectWeapon('rifle')
   if (!playImportedWeaponAnimation('equip')) playImportedWeaponRestAnimation()
 
-  if (damageIndicatorTimer !== undefined) window.clearTimeout(damageIndicatorTimer)
-  damageIndicator.classList.remove('visible')
+  playerHealthController.clearDamageIndicator()
   hitMarker.classList.remove('visible')
   headshotIndicator.classList.remove('visible')
   crosshair.classList.remove('firing')
@@ -8356,7 +7340,7 @@ if (import.meta.env.DEV) {
           },
           firePointerId,
           gameOver,
-          health: playerHealth,
+          health: playerHealthController.health,
           wave: { ...waveState },
           movementPointerId,
           moveInputX,
