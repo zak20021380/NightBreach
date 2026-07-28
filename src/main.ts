@@ -3292,11 +3292,20 @@ class Zombie {
   }
 
   private moveHorizontallyWithCollisions() {
-    // Babylon may return a vertical slide while resolving contact even when the
-    // requested displacement has Y=0. Keep collision-aware X/Z movement, then
-    // restore the body-centred collider to its one absolute ground height.
+    // Resolve the cabin's small fixed wall set as a swept horizontal circle
+    // before the scene collision pass. This prevents a large knockback step or
+    // a corner slide from crossing a thin wall, while Babylon continues to own
+    // every other environment/player collision response.
     this.movementDelta.y = 0
+    abandonedStructures.enterableHouse.zombieCollision.resolveMovement(
+      this.root.position,
+      this.movementDelta,
+      this.root.ellipsoid.x,
+    )
     this.root.moveWithCollisions(this.movementDelta)
+    // Babylon may return a vertical slide while resolving contact even when the
+    // requested displacement has Y=0. Restore the body-centred collider to its
+    // one absolute ground height after retaining collision-aware X/Z movement.
     this.root.position.y = ZOMBIE_GROUNDED_ROOT_Y
   }
 
