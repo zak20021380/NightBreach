@@ -42,6 +42,10 @@ export interface ZombieCabinCollision {
     movement: Vector3,
     radius: number,
   ) => void
+  /**
+   * Keeps zombie steering in sync with the cabin's wall/door collision state.
+   */
+  blocksObstacleProbe: (mesh: AbstractMesh) => boolean
 }
 
 export interface EnterableHouseResult {
@@ -110,7 +114,6 @@ const DOOR_OPEN_ANGLE = -Math.PI * 0.53
 const DOOR_COLLIDER_WIDTH = 0.98
 const DOOR_COLLIDER_HEIGHT = 2.19
 const DOOR_COLLIDER_DEPTH = 0.12
-const ZOMBIE_DOORWAY_JAMB_CLEARANCE = 0.07
 const ZOMBIE_COLLISION_EPSILON = 0.002
 const ZOMBIE_COLLISION_DIRECTION_EPSILON = 0.00000001
 const ZOMBIE_COLLISION_MAX_SLIDES = 3
@@ -157,37 +160,9 @@ const CLOSED_DOORWAY_BOUNDS = horizontalBounds(
   DOOR_OPENING_RIGHT - DOOR_OPENING_LEFT,
   WALL_THICKNESS,
 )
-// The player shell keeps its established generous entrance clearance above.
-// Zombies use the authored slab width plus jamb clearance, which matches the
-// visible opening instead of treating the extra player shoulder room as door.
-const ZOMBIE_DOOR_OPENING_WIDTH =
-  DOOR_COLLIDER_WIDTH + ZOMBIE_DOORWAY_JAMB_CLEARANCE * 2
-const ZOMBIE_DOOR_OPENING_LEFT =
-  (DOOR_OPENING_LEFT + DOOR_OPENING_RIGHT - ZOMBIE_DOOR_OPENING_WIDTH) * 0.5
-const ZOMBIE_DOOR_OPENING_RIGHT =
-  ZOMBIE_DOOR_OPENING_LEFT + ZOMBIE_DOOR_OPENING_WIDTH
-const ZOMBIE_FRONT_LEFT_WALL_BOUNDS = horizontalBounds(
-  FRONT_LEFT_EDGE + (ZOMBIE_DOOR_OPENING_LEFT - FRONT_LEFT_EDGE) * 0.5,
-  FRONT_Z,
-  ZOMBIE_DOOR_OPENING_LEFT - FRONT_LEFT_EDGE,
-  WALL_THICKNESS,
-)
-const ZOMBIE_FRONT_RIGHT_WALL_BOUNDS = horizontalBounds(
-  ZOMBIE_DOOR_OPENING_RIGHT
-    + (FRONT_RIGHT_EDGE - ZOMBIE_DOOR_OPENING_RIGHT) * 0.5,
-  FRONT_Z,
-  FRONT_RIGHT_EDGE - ZOMBIE_DOOR_OPENING_RIGHT,
-  WALL_THICKNESS,
-)
-const CLOSED_ZOMBIE_DOORWAY_BOUNDS = horizontalBounds(
-  (DOOR_OPENING_LEFT + DOOR_OPENING_RIGHT) * 0.5,
-  FRONT_Z,
-  ZOMBIE_DOOR_OPENING_WIDTH,
-  WALL_THICKNESS,
-)
 const STATIC_ZOMBIE_WALL_BOUNDS: readonly HorizontalCollisionBounds[] = [
-  ZOMBIE_FRONT_LEFT_WALL_BOUNDS,
-  ZOMBIE_FRONT_RIGHT_WALL_BOUNDS,
+  FRONT_LEFT_WALL_BOUNDS,
+  FRONT_RIGHT_WALL_BOUNDS,
   REAR_WALL_BOUNDS,
   WEST_WALL_BOUNDS,
   EAST_WALL_BOUNDS,
@@ -259,6 +234,7 @@ export function createEnterableWoodenShed(
       interior,
       preserveWithImportedEnvironment: true,
       structure: 'oldWoodenShed',
+      zombieCabinObstacle: 'wall',
     }
     colliders.push(collider)
     if (interior) interiorCollisionMeshCount += 1
@@ -338,6 +314,7 @@ export function createEnterableWoodenShed(
     ),
   )
   closedDoorwayBlocker.metadata.closedDoorway = true
+  closedDoorwayBlocker.metadata.zombieCabinObstacle = 'door'
 
   const doorPanel = MeshBuilder.CreateBox(
     'oldWoodenShedDoorCollider',
@@ -361,6 +338,7 @@ export function createEnterableWoodenShed(
     interactiveDoor: true,
     preserveWithImportedEnvironment: true,
     structure: 'oldWoodenShed',
+    zombieCabinObstacle: 'door',
   }
   doorPanel.setParent(doorHinge, true)
   colliders.push(doorPanel)
@@ -390,6 +368,12 @@ export function createEnterableWoodenShed(
   const collisionCosine = Math.cos(HOUSE_TRANSFORM.rotationY)
   const collisionSine = Math.sin(HOUSE_TRANSFORM.rotationY)
   const zombieCollision: ZombieCabinCollision = {
+    blocksObstacleProbe(mesh) {
+      const obstacleKind = mesh.metadata?.zombieCabinObstacle
+      if (obstacleKind === 'wall') return true
+      if (obstacleKind === 'door') return doorState !== 'open'
+      return mesh.checkCollisions
+    },
     resolveMovement(position, movement, radius) {
       if (
         radius <= 0
@@ -424,7 +408,7 @@ export function createEnterableWoodenShed(
         for (let index = 0; index < barrierCount; index += 1) {
           const bounds = index < STATIC_ZOMBIE_WALL_BOUNDS.length
             ? STATIC_ZOMBIE_WALL_BOUNDS[index]
-            : CLOSED_ZOMBIE_DOORWAY_BOUNDS
+            : CLOSED_DOORWAY_BOUNDS
           const minimumX = bounds.minimumX - radius
           const maximumX = bounds.maximumX + radius
           const minimumZ = bounds.minimumZ - radius

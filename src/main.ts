@@ -2794,9 +2794,9 @@ function getZombieVisualFactory() {
 }
 
 function isZombieObstacle(mesh: AbstractMesh) {
-  return mesh.checkCollisions
-    && mesh.isEnabled()
+  return mesh.isEnabled()
     && mesh.metadata?.zombieCollider !== true
+    && abandonedStructures.enterableHouse.zombieCollision.blocksObstacleProbe(mesh)
 }
 
 // Capture gameplay collision meshes once, after the complete arena and both
