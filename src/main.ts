@@ -1,6 +1,7 @@
 import './style.css'
 import { type AnimationGroup } from '@babylonjs/core/Animations/animationGroup'
 import { type AssetContainer } from '@babylonjs/core/assetContainer'
+import { type Skeleton } from '@babylonjs/core/Bones/skeleton'
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer'
 import { TargetCamera } from '@babylonjs/core/Cameras/targetCamera'
 import { UniversalCamera } from '@babylonjs/core/Cameras/universalCamera'
@@ -4857,6 +4858,10 @@ canvas.dataset.shotgunReady = 'loading'
 let shotgunRoot: TransformNode | null = null
 let shotgunMeshes: AbstractMesh[] = []
 let shotgunAnimationGroups: AnimationGroup[] = []
+// The imported shotgun rig's skeleton(s). Held so every animation transition can
+// return the arm/hand bones to their authored rest pose, guaranteeing no blended
+// or overlapping clip can leave a non-uniform (stretched) scale on those bones.
+let shotgunSkeletons: Skeleton[] = []
 let shotgunRestAnimation: AnimationGroup | null = null
 let shotgunReady = false
 let weaponSwitchFeedbackTimer: number | undefined
@@ -5980,6 +5985,25 @@ function enableImportedAnimationBlending(animation: AnimationGroup) {
   }
 }
 
+// The shotgun rig shares its arm/hand bones across every clip, so blending is
+// what makes fire/pump/reload/idle transitions smooth. But blending a bone's
+// SCALE (or a bundled matrix track) is what stretches the forearm: the blend
+// origin is captured live, and when two clips momentarily co-target a bone the
+// late-binding pass MULTIPLIES their decomposed scalings, ratcheting the scale
+// away from 1. Arm bones are authored with uniform scale on every keyframe, so
+// there is nothing to gain from blending scale — we blend only the pose
+// (position + rotation) and let scale/matrix tracks snap straight to their
+// authored, uniformly-scaled keyframes. This keeps the visible blend identical
+// while making a non-uniform arm-bone scale impossible.
+function enableShotgunAnimationBlending(animation: AnimationGroup) {
+  for (const targetedAnimation of animation.targetedAnimations) {
+    const targetProperty = targetedAnimation.animation.targetProperty.toLowerCase()
+    const carriesScale = targetProperty.includes('scal') || targetProperty.includes('matrix')
+    targetedAnimation.animation.enableBlending = !carriesScale
+    targetedAnimation.animation.blendingSpeed = WEAPON_ANIMATION_BLEND_SPEED
+  }
+}
+
 async function loadLocalRifleModel(parent: TransformNode) {
   const result = await localAssetManager.load('rifle')
   if (result.status === 'fallback') {
@@ -6655,7 +6679,27 @@ function stopShotgunAnimations() {
   for (const animation of shotgunAnimationGroups) {
     if (animation.isStarted) animation.stop(true)
   }
+  // Every stopped clip is removed from the active animatables synchronously, but
+  // the arm/hand bones are left wherever that clip's last-evaluated (and possibly
+  // still-blending) frame put them. Snap the whole rig back to its authored rest
+  // pose so the next clip's per-bone blend origin is captured from a clean,
+  // uniformly-scaled matrix. Without this, a clip started mid-blend inherits the
+  // drifted live pose as its blend origin and repeated fire/pump/reload/ADS
+  // transitions ratchet the forearm bone's decomposed scale away from 1 — the
+  // stretch. returnToRest only rewrites bone local matrices; it never touches the
+  // view-model root transform, so weapon position, recoil and ADS are unaffected.
+  restoreShotgunRigRestPose()
   activeShotgunAnimation = null
+}
+
+// Returns every shotgun skeleton bone to its authored rest (bind) matrix. The
+// rest pose is authored with uniform scale, so this is the guarantee that the
+// arm and hand bones can never retain a non-uniform (stretched) scale between
+// animation transitions.
+function restoreShotgunRigRestPose() {
+  for (const skeleton of shotgunSkeletons) {
+    skeleton.returnToRest()
+  }
 }
 
 // Exact-name resolution first; the normalized fallback only absorbs harmless
@@ -6759,6 +6803,9 @@ function cancelShotgunShotCycle() {
   const shot = shotgunClips.shot
   if (activeShotgunAnimation === shot) activeShotgunAnimation = null
   if (shot?.isStarted) shot.stop(true)
+  // A cancelled pump leaves the rig on a partial frame; return the bones to
+  // authored rest so no half-played, blend-drifted pose can survive.
+  restoreShotgunRigRestPose()
 }
 
 function beginShotgunReload() {
@@ -6809,6 +6856,9 @@ function cancelShotgunReload() {
   if (activeShotgunAnimation === reload) activeShotgunAnimation = null
   if (reload?.isStarted) reload.stop(true)
   reloadButton.disabled = false
+  // A cancelled reload leaves the rig on a partial frame; return the bones to
+  // authored rest so no half-played, blend-drifted pose can survive.
+  restoreShotgunRigRestPose()
 }
 
 function setShotgunViewModelEnabled(enabled: boolean) {
@@ -6843,6 +6893,7 @@ function discardShotgunViewModel(context: string, error: unknown) {
   shotgunRoot = null
   shotgunMeshes = []
   shotgunAnimationGroups = []
+  shotgunSkeletons = []
   shotgunRestAnimation = null
   shotgunClips = { idle: null, walk: null, shot: null, reload: null }
   activeShotgunAnimation = null
@@ -6932,7 +6983,7 @@ async function loadLocalShotgunModel(parent: TransformNode) {
     const animationGroups = [...entries.animationGroups]
     for (const animation of animationGroups) {
       animation.speedRatio = SHOTGUN_ASSET_CONFIG.animationSpeed
-      enableImportedAnimationBlending(animation)
+      enableShotgunAnimationBlending(animation)
       // The one permanent completion observer per clip. It dispatches into the
       // shotgun's own handlers only, so nothing here can ever reach the
       // rifle's reload or fire completion paths.
@@ -6972,6 +7023,7 @@ async function loadLocalShotgunModel(parent: TransformNode) {
     shotgunRoot = activatedRoot
     shotgunMeshes = [...modelMeshes]
     shotgunAnimationGroups = animationGroups
+    shotgunSkeletons = [...entries.skeletons]
     shotgunRestAnimation = restAnimation
     shotgunClips = resolvedClips
     // Cycle durations come straight off the authored clips; the fallbacks only
@@ -7048,6 +7100,7 @@ async function loadLocalShotgunModel(parent: TransformNode) {
       shotgunRoot = null
       shotgunMeshes = []
       shotgunAnimationGroups = []
+      shotgunSkeletons = []
       shotgunRestAnimation = null
       shotgunClips = { idle: null, walk: null, shot: null, reload: null }
       activeShotgunAnimation = null
