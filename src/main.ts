@@ -119,6 +119,12 @@ const TOUCH_CONFIG = {
   adsSpread: 0.00075,
 }
 
+// Babylon's angularSensibility is the inverse of radians per raw mouse movement
+// unit. Keep the configurable desktop values in direct, FPS-style terms so a
+// larger sensitivity remains faster and ADS can be expressed as a multiplier.
+const DESKTOP_HIP_FIRE_MOUSE_SENSITIVITY = 1 / 900
+const DESKTOP_ADS_MOUSE_SENSITIVITY_MULTIPLIER = 0.7
+
 let gameReady = false
 let deployed = false
 let deployRequested = false
@@ -135,6 +141,8 @@ let useDoorInteraction: () => boolean = () => false
 let equipWeapon: () => void = () => undefined
 let switchWeaponSlot: (weaponId: 'rifle' | 'shotgun') => boolean = () => false
 let unlockShotgunAudio: () => void = () => undefined
+let engageAds: () => void = () => undefined
+let releaseAds: (pointerId?: number) => void = () => undefined
 let cancelMobileInput: () => void = () => undefined
 let stopZombieWaveTimers: () => void = () => undefined
 let startZombieWave: () => void = () => undefined
@@ -252,14 +260,25 @@ instructions.addEventListener('pointerup', (event) => {
 }, { passive: false })
 
 canvas.addEventListener('pointerdown', (event) => {
-  if (!isDesktop || !gameplayInputEnabled() || event.button !== 0) return
+  if (!isDesktop || !gameplayInputEnabled()) return
+  if (event.button !== 0 && event.button !== 2) return
   canvas.focus()
   requestPointerLockSafely()
-  fireWeapon()
+  if (event.button === 0) fireWeapon()
+  else engageAds()
+})
+
+canvas.addEventListener('pointerup', (event) => {
+  if (!isDesktop || event.button !== 2) return
+  releaseAds()
 })
 
 document.addEventListener('pointerlockchange', () => {
-  if (document.pointerLockElement === canvas) canvas.focus()
+  if (document.pointerLockElement === canvas) {
+    canvas.focus()
+  } else if (isDesktop) {
+    releaseAds()
+  }
 })
 
 window.addEventListener('keydown', (event) => {
@@ -358,7 +377,7 @@ camera.maxZ = 100
 camera.fov = TOUCH_CONFIG.hipFov
 camera.speed = 0.32
 camera.inertia = 0.18
-camera.angularSensibility = 3400
+camera.angularSensibility = 1 / DESKTOP_HIP_FIRE_MOUSE_SENSITIVITY
 camera.applyGravity = true
 camera.checkCollisions = true
 camera.ellipsoid = new Vector3(
@@ -7101,6 +7120,21 @@ let adsHeld = false
 let adsBlend = 0
 const weaponRay = new Ray(Vector3.Zero(), Vector3.Forward(), 100)
 
+function applyDesktopMouseSensitivity() {
+  if (!isDesktop) return
+  const adsMultiplier = adsHeld ? DESKTOP_ADS_MOUSE_SENSITIVITY_MULTIPLIER : 1
+  camera.angularSensibility = 1 / (DESKTOP_HIP_FIRE_MOUSE_SENSITIVITY * adsMultiplier)
+}
+
+engageAds = () => {
+  if (adsHeld) return
+  adsHeld = true
+  applyDesktopMouseSensitivity()
+  playImportedWeaponAnimation('ads')
+  adsButton.classList.add('active')
+  document.body.classList.add('ads-active')
+}
+
 // The one ammo readout shows whichever weapon is in the player's hands, in the
 // HUD's existing loaded/reserve format.
 function updateAmmoDisplay() {
@@ -7609,10 +7643,11 @@ function stopAutomaticFire(pointerId?: number) {
   fireButton.classList.remove('active')
 }
 
-function releaseAds(pointerId?: number) {
+releaseAds = (pointerId?: number) => {
   if (pointerId !== undefined && pointerId !== adsPointerId) return
   adsPointerId = null
   adsHeld = false
+  applyDesktopMouseSensitivity()
   playImportedWeaponAnimation('ads', false, true)
   adsButton.classList.remove('active')
   document.body.classList.remove('ads-active')
@@ -7716,10 +7751,7 @@ adsButton.addEventListener('pointerdown', (event) => {
   event.preventDefault()
   event.stopPropagation()
   adsPointerId = event.pointerId
-  adsHeld = true
-  playImportedWeaponAnimation('ads')
-  adsButton.classList.add('active')
-  document.body.classList.add('ads-active')
+  engageAds()
   capturePointerSafely(adsButton, event.pointerId)
 }, { passive: false })
 
