@@ -1275,22 +1275,37 @@ sandbagLayouts.slice(1).forEach((position, index) => {
   sandbag.receiveShadows = true
 })
 
+const shedAssetResult = await localAssetManager.load('shed')
+if (shedAssetResult.status !== 'loaded') {
+  throw new Error(
+    `Required Old Wooden Shed GLB failed to load: ${shedAssetResult.reason}`,
+  )
+}
+
 const abandonedStructures = createAbandonedStructures({
   scene,
+  shedContainer: shedAssetResult.container,
   shadowGenerator,
   worldLayerMask: WORLD_RENDER_LAYER_MASK,
-  materials: {
-    concrete: concreteMaterial,
-    hazard: hazardMaterial,
-    metal: darkMetalMaterial,
-    wall: wallConcreteMaterial,
-    wood: wornBrownMaterial,
-  },
   registerEnvironmentMesh(mesh) {
     proceduralEnvironmentMeshes.push(mesh)
   },
 })
 canvas.dataset.structureCount = String(abandonedStructures.structures.length)
+canvas.dataset.shedSource = 'glb'
+canvas.dataset.shedMeshNames =
+  abandonedStructures.enterableHouse.asset.meshNames.join(',')
+canvas.dataset.shedDoorMeshNames =
+  abandonedStructures.enterableHouse.asset.doorMeshNames.join(',')
+canvas.dataset.shedScale = String(
+  abandonedStructures.enterableHouse.asset.uniformScale,
+)
+canvas.dataset.shedInstanceCount = '2'
+canvas.dataset.secondaryShedMeshNames =
+  abandonedStructures.secondaryHouse.asset.meshNames.join(',')
+canvas.dataset.secondaryShedScale = String(
+  abandonedStructures.secondaryHouse.asset.uniformScale,
+)
 canvas.dataset.structureNames = abandonedStructures.structures
   .map(({ name }) => name)
   .join(',')
@@ -1311,6 +1326,8 @@ const frontDoor = abandonedStructures.enterableHouse.frontDoor
 frontDoor.reset()
 const doorwayPosition = Vector3.Zero()
 frontDoor.getDoorwayPositionToRef(doorwayPosition)
+canvas.dataset.shedDoorwayPosition =
+  `${doorwayPosition.x.toFixed(3)},${doorwayPosition.z.toFixed(3)}`
 const DOOR_INTERACTION_DISTANCE = 2.2
 const DOOR_INTERACTION_DISTANCE_SQUARED =
   DOOR_INTERACTION_DISTANCE * DOOR_INTERACTION_DISTANCE
@@ -8083,6 +8100,11 @@ if (import.meta.env.DEV) {
             collisionEnabled: frontDoor.panel.checkCollisions,
             interactionAvailable: doorInteractionAvailable,
             mobileUseVisible: useButton.classList.contains('visible'),
+            position: {
+              x: doorwayPosition.x,
+              y: doorwayPosition.y,
+              z: doorwayPosition.z,
+            },
             promptText: doorPrompt.textContent ?? '',
             promptVisible: doorPrompt.classList.contains('visible'),
             state: frontDoor.state,
@@ -8104,6 +8126,68 @@ if (import.meta.env.DEV) {
               position: [...structure.position],
             })),
             visibleMeshCount: abandonedStructures.visibleMeshCount,
+            shed: {
+              ...abandonedStructures.enterableHouse.asset,
+              bounds: {
+                maximum: [...abandonedStructures.enterableHouse.asset.bounds.maximum],
+                minimum: [...abandonedStructures.enterableHouse.asset.bounds.minimum],
+                size: [...abandonedStructures.enterableHouse.asset.bounds.size],
+              },
+              colliderNames: [...abandonedStructures.enterableHouse.colliderNames],
+              doorMeshNames: [
+                ...abandonedStructures.enterableHouse.asset.doorMeshNames,
+              ],
+              hierarchyNodeNames: [
+                ...abandonedStructures.enterableHouse.asset.hierarchyNodeNames,
+              ],
+              meshNames: [...abandonedStructures.enterableHouse.asset.meshNames],
+              rootTransform: {
+                position: [
+                  ...abandonedStructures.enterableHouse.asset.rootTransform.position,
+                ],
+                rotation: [
+                  ...abandonedStructures.enterableHouse.asset.rootTransform.rotation,
+                ],
+                scale: [
+                  ...abandonedStructures.enterableHouse.asset.rootTransform.scale,
+                ],
+              },
+            },
+            secondaryShed: {
+              ...abandonedStructures.secondaryHouse.asset,
+              bounds: {
+                maximum: [
+                  ...abandonedStructures.secondaryHouse.asset.bounds.maximum,
+                ],
+                minimum: [
+                  ...abandonedStructures.secondaryHouse.asset.bounds.minimum,
+                ],
+                size: [...abandonedStructures.secondaryHouse.asset.bounds.size],
+              },
+              colliderNames: [
+                ...abandonedStructures.secondaryHouse.colliderNames,
+              ],
+              doorMeshNames: [
+                ...abandonedStructures.secondaryHouse.asset.doorMeshNames,
+              ],
+              hierarchyNodeNames: [
+                ...abandonedStructures.secondaryHouse.asset.hierarchyNodeNames,
+              ],
+              meshNames: [
+                ...abandonedStructures.secondaryHouse.asset.meshNames,
+              ],
+              rootTransform: {
+                position: [
+                  ...abandonedStructures.secondaryHouse.asset.rootTransform.position,
+                ],
+                rotation: [
+                  ...abandonedStructures.secondaryHouse.asset.rootTransform.rotation,
+                ],
+                scale: [
+                  ...abandonedStructures.secondaryHouse.asset.rootTransform.scale,
+                ],
+              },
+            },
           },
           interior: {
             ...abandonedStructures.enterableHouse.interior,
@@ -8426,6 +8510,160 @@ if (import.meta.env.DEV) {
     `[Night Breach][Scene] Ready: ${scene.meshes.length} meshes, ${scene.lights.length} lights, map=${canvas.dataset.mapReady}, zombies=${canvas.dataset.zombieSource ?? 'loading'}, rifle=${canvas.dataset.weaponSource}.`,
   )
   if (deployRequested) deployGame()
+
+  // Local screenshot/validation harness. It is compiled out of production and
+  // lets the repository's headless browser capture the real player camera at
+  // audited shed viewpoints without exposing scene controls in the shipped app.
+  if (import.meta.env.DEV) {
+    const captureParameters = new URLSearchParams(window.location.search)
+    if (captureParameters.has('shedCapture')) {
+      const waitForFrames = (milliseconds: number) =>
+        new Promise<void>((resolveWait) => window.setTimeout(resolveWait, milliseconds))
+      const assetDeadline = performance.now() + 30_000
+      while (
+        (!assetLoading.hidden || canvas.dataset.rifleReady !== 'glb')
+        && performance.now() < assetDeadline
+      ) {
+        await waitForFrames(100)
+      }
+      if (!assetLoading.hidden || canvas.dataset.rifleReady !== 'glb') {
+        throw new Error('Shed capture timed out waiting for the imported game assets.')
+      }
+      deployGame()
+      const captureMode = captureParameters.get('shedMode') ?? 'view'
+      const pressForwardFor = async (milliseconds: number) => {
+        // Drive the same mobile movement vector consumed by the render loop.
+        // Collision response still runs through the real UniversalCamera.
+        moveInputY = 1
+        const desktopMovementObserver = isTouchDevice
+          ? null
+          : scene.onBeforeRenderObservable.add(() => {
+              const yawSine = Math.sin(camera.rotation.y)
+              const yawCosine = Math.cos(camera.rotation.y)
+              // Headless software rendering can run well below game frame rate.
+              // A stronger dev-only impulse keeps this collision traversal
+              // deterministic without changing the live camera speed.
+              camera.cameraDirection.x = yawSine * 0.18
+              camera.cameraDirection.z = yawCosine * 0.18
+            })
+        await waitForFrames(milliseconds)
+        if (desktopMovementObserver) {
+          scene.onBeforeRenderObservable.remove(desktopMovementObserver)
+        }
+        moveInputY = 0
+        camera.cameraDirection.x = 0
+        camera.cameraDirection.z = 0
+        await waitForFrames(150)
+      }
+
+      if (captureMode === 'open' || captureMode === 'entry') {
+        camera.position.set(
+          doorwayPosition.x,
+          PLAYER_START_POSITION.y,
+          doorwayPosition.z - 1.35,
+        )
+        camera.rotation.set(0, 0, 0)
+        camera.computeWorldMatrix()
+        await waitForFrames(75)
+        updateDoorInteractionUi()
+        if (!useDoorInteraction()) {
+          throw new Error('Shed capture could not activate the existing door interaction.')
+        }
+        frontDoor.update(10)
+        if (captureMode === 'entry') {
+          await pressForwardFor(2_200)
+          canvas.dataset.shedColliderAudit = JSON.stringify(
+            scene.meshes
+              .filter((mesh) => mesh.checkCollisions)
+              .map((mesh) => {
+                mesh.computeWorldMatrix(true)
+                const bounds = mesh.getBoundingInfo().boundingBox
+                return {
+                  maximum: [
+                    bounds.maximumWorld.x,
+                    bounds.maximumWorld.y,
+                    bounds.maximumWorld.z,
+                  ].map((value) => Number(value.toFixed(3))),
+                  minimum: [
+                    bounds.minimumWorld.x,
+                    bounds.minimumWorld.y,
+                    bounds.minimumWorld.z,
+                  ].map((value) => Number(value.toFixed(3))),
+                  name: mesh.name,
+                }
+              })
+              .filter(({ maximum, minimum }) =>
+                maximum[0] >= camera.position.x - 0.65
+                && minimum[0] <= camera.position.x + 0.65
+                && maximum[2] >= camera.position.z - 0.65
+                && minimum[2] <= camera.position.z + 0.65
+              ),
+          )
+          canvas.dataset.shedEntryPosition =
+            `${camera.position.x.toFixed(3)},${camera.position.z.toFixed(3)}`
+          canvas.dataset.shedEntryValidation =
+            camera.position.z > doorwayPosition.z + 0.1 ? 'passed' : 'failed'
+          if (canvas.dataset.shedEntryValidation !== 'passed') {
+            throw new Error('The actual player camera did not enter the open shed.')
+          }
+        }
+      } else if (captureMode === 'closed-block') {
+        camera.position.set(
+          doorwayPosition.x,
+          PLAYER_START_POSITION.y,
+          doorwayPosition.z - 1.35,
+        )
+        camera.rotation.set(0, 0, 0)
+        await pressForwardFor(2_200)
+        canvas.dataset.shedDoorBlockPosition =
+          `${camera.position.x.toFixed(3)},${camera.position.z.toFixed(3)}`
+        canvas.dataset.shedDoorBlockValidation =
+          camera.position.z < doorwayPosition.z - 0.32 ? 'passed' : 'failed'
+        if (canvas.dataset.shedDoorBlockValidation !== 'passed') {
+          throw new Error('The closed shed door did not block the actual player camera.')
+        }
+      } else if (captureMode === 'wall-block') {
+        camera.position.set(
+          -15.6,
+          PLAYER_START_POSITION.y,
+          19.7,
+        )
+        camera.rotation.set(0, -Math.PI * 0.5, 0)
+        await pressForwardFor(2_200)
+        canvas.dataset.shedWallBlockPosition =
+          `${camera.position.x.toFixed(3)},${camera.position.z.toFixed(3)}`
+        canvas.dataset.shedWallBlockValidation =
+          camera.position.x > -17.7 ? 'passed' : 'failed'
+        if (canvas.dataset.shedWallBlockValidation !== 'passed') {
+          throw new Error('The shed wall did not block the actual player camera.')
+        }
+      }
+
+      const optionalNumber = (key: string) => {
+        const value = captureParameters.get(key)
+        return value === null ? null : Number(value)
+      }
+      const captureX = optionalNumber('x')
+      const captureZ = optionalNumber('z')
+      const targetX = optionalNumber('targetX')
+      const targetZ = optionalNumber('targetZ')
+      const capturePitch = Number(captureParameters.get('pitch') ?? 0)
+      if (captureX !== null && captureZ !== null
+        && Number.isFinite(captureX) && Number.isFinite(captureZ)) {
+        camera.position.set(captureX, PLAYER_START_POSITION.y, captureZ)
+      }
+      if (targetX !== null && targetZ !== null
+        && Number.isFinite(targetX) && Number.isFinite(targetZ)) {
+        camera.rotation.set(
+          capturePitch,
+          Math.atan2(targetX - camera.position.x, targetZ - camera.position.z),
+          0,
+        )
+      }
+      await waitForFrames(450)
+      canvas.dataset.shedCaptureReady = 'true'
+    }
+  }
 } catch (error) {
   logRuntimeError('Startup failed:', error)
   instructions.disabled = true

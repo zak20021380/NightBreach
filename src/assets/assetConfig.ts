@@ -1,4 +1,9 @@
-export type LocalAssetKey = 'rifle' | 'shotgun' | 'zombie' | 'environment'
+export type LocalAssetKey =
+  | 'rifle'
+  | 'shotgun'
+  | 'zombie'
+  | 'environment'
+  | 'shed'
 
 export type LocalGlbPath = `/assets/${string}.glb`
 export type LocalTexturePath = `/assets/${string}/`
@@ -94,11 +99,14 @@ export interface EnvironmentAssetDefinition extends LocalGlbAssetDefinition<'env
   readonly preserveProceduralCollisions: true
 }
 
+export interface ShedAssetDefinition extends LocalGlbAssetDefinition<'shed'> {}
+
 export interface LocalAssetDefinitions {
   readonly rifle: RifleAssetDefinition
   readonly shotgun: ShotgunAssetDefinition
   readonly zombie: ZombieAssetDefinition
   readonly environment: EnvironmentAssetDefinition
+  readonly shed: ShedAssetDefinition
 }
 
 export interface LocalAssetConfiguration {
@@ -244,6 +252,20 @@ export const ASSET_CONFIG = {
       animation: { speed: 1, autoplay: true, loop: true },
       material: { mode: 'source' },
       preserveProceduralCollisions: true,
+    },
+    shed: {
+      key: 'shed',
+      label: 'Old Wooden Shed',
+      path: '/assets/environment/old-wooden-shed/old_wooden_shed.glb',
+      transform: {
+        // The enterable default is recorded here; both live placements are
+        // applied by their own parent roots in the two house modules.
+        position: [-15.6, 0, 19.7],
+        rotation: [0, 3.101592653589793, 0],
+        scale: [0.0132, 0.0132, 0.0132],
+      },
+      animation: { speed: 1, autoplay: false, loop: false },
+      material: { mode: 'source' },
     },
   },
 } as const satisfies LocalAssetConfiguration

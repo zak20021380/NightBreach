@@ -1,8 +1,4 @@
-import { PointLight } from '@babylonjs/core/Lights/pointLight'
-import { type ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator'
-import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial'
-import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial'
-import { Color3 } from '@babylonjs/core/Maths/math.color'
+import { type AssetContainer } from '@babylonjs/core/assetContainer'
 import { Vector3 } from '@babylonjs/core/Maths/math.vector'
 import { type AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh'
 import { Mesh } from '@babylonjs/core/Meshes/mesh'
@@ -13,23 +9,15 @@ import {
   type WeatherShelter,
   type WinterSurface,
 } from './winterEnvironment'
+import {
+  instantiateAuditedWoodenShed,
+  type WoodenShedAssetSummary,
+} from './woodenShedAsset'
 
-type HouseMaterial = PBRMaterial | StandardMaterial
-
-interface EnterableHouseMaterials {
-  concrete: HouseMaterial
-  hazard: HouseMaterial
-  metal: HouseMaterial
-  wall: HouseMaterial
-  wood: HouseMaterial
-}
-
-interface EnterableHouseOptions {
+interface EnterableShedOptions {
   scene: Scene
-  shadowGenerator: ShadowGenerator | null
-  materials: EnterableHouseMaterials
+  shedContainer: AssetContainer
   worldLayerMask: number
-  registerEnvironmentMesh: (mesh: AbstractMesh) => void
 }
 
 export type InteractiveDoorState = 'closed' | 'opening' | 'open' | 'closing'
@@ -45,6 +33,8 @@ export interface InteractiveHouseDoor {
 }
 
 export interface EnterableHouseResult {
+  asset: WoodenShedAssetSummary
+  colliderNames: readonly string[]
   collisionMeshCount: number
   frontDoor: InteractiveHouseDoor
   interior: {
@@ -67,196 +57,72 @@ interface HouseTransform {
   rotationY: number
 }
 
-interface BoxRotation {
-  x?: number
-  y?: number
-  z?: number
-}
-
 const HOUSE_TRANSFORM: HouseTransform = {
-  // This is the exact pre-existing damaged operations-building transform.
+  // Exact center and orientation of the building this asset replaces.
   x: -15.6,
   z: 19.7,
   rotationY: -0.04,
 }
-const HOUSE_WIDTH = 7.4
-const HOUSE_DEPTH = 5.8
-const WALL_THICKNESS = 0.24
-const WALL_HEIGHT = 3.12
-const FRONT_Z = -HOUSE_DEPTH * 0.5 + WALL_THICKNESS * 0.5
-const DOOR_CENTER_X = 1.48
-const DOOR_OPENING_WIDTH = 1.46
-const DOOR_WIDTH = DOOR_OPENING_WIDTH
-const DOOR_HEIGHT = 2.34
-const DOOR_PANEL_DEPTH = 0.15
-const DOOR_LEFT_X = DOOR_CENTER_X - DOOR_WIDTH * 0.5
-const DOOR_RECESS_Z = FRONT_Z - WALL_THICKNESS * 0.5 + 0.13
+// Babylon's glTF conversion leaves this asset's entrance on +Z. A half-turn
+// aligns it with the former building's -Z-facing entrance.
+const SHED_ROTATION_Y = HOUSE_TRANSFORM.rotationY + Math.PI
+
+// The source is authored at 338.87 x 327.97 x 305.91 units with a
+// 165.48-unit-tall door. This one uniform scale preserves its proportions while
+// producing a believable 4.47 x 4.33 x 4.04 metre enterable building.
+const SHED_UNIFORM_SCALE = 0.0132
+const SHED_WIDTH = 4.47
+const SHED_DEPTH = 4.04
+const SHED_INTERIOR_WIDTH = 3.72
+const SHED_INTERIOR_DEPTH = 3.34
+const SHED_WALL_HEIGHT = 3.05
+
 const DOOR_ANIMATION_SECONDS = 0.46
 const DOOR_OPEN_ANGLE = -Math.PI * 0.53
-const FRONT_WINDOW_CENTER_X = -1.35
-const FRONT_WINDOW_CENTER_Y = 1.86
-const FRONT_WINDOW_OPENING_WIDTH = 1.82
-const FRONT_WINDOW_OPENING_HEIGHT = 1.02
-
-function worldPosition(
-  transform: HouseTransform,
-  localX: number,
-  y: number,
-  localZ: number,
-) {
-  const cosine = Math.cos(transform.rotationY)
-  const sine = Math.sin(transform.rotationY)
-  return new Vector3(
-    transform.x + localX * cosine - localZ * sine,
-    y,
-    transform.z + localX * sine + localZ * cosine,
-  )
-}
-
-function makeAccentMaterial(
-  scene: Scene,
-  name: string,
-  color: Color3,
-  emissive = Color3.Black(),
-) {
-  const material = new StandardMaterial(name, scene)
-  material.diffuseColor.copyFrom(color)
-  material.emissiveColor.copyFrom(emissive)
-  material.specularColor.set(0.025, 0.025, 0.025)
-  return material
-}
+const DOOR_COLLIDER_WIDTH = 0.98
+const DOOR_COLLIDER_HEIGHT = 2.19
+const DOOR_COLLIDER_DEPTH = 0.12
 
 /**
- * Builds the original operations house at its original transform, but turns its
- * former solid footprint into a room-aware shell. Visual details are merged by
- * shared material; gameplay uses a small set of simple invisible box colliders.
+ * Instantiates the downloaded Old Wooden Shed as the complete enterable
+ * building. No procedural shell, floor, roof, window, trim, interior prop,
+ * light, or decorative mesh is created here.
  */
-export function createEnterableOperationsHouse(
-  options: EnterableHouseOptions,
+export function createEnterableWoodenShed(
+  options: EnterableShedOptions,
 ): EnterableHouseResult {
-  const {
-    materials,
-    registerEnvironmentMesh,
+  const { scene, shedContainer, worldLayerMask } = options
+  const shed = instantiateAuditedWoodenShed({
+    instanceName: 'enterableOldWoodenShed',
+    rotationY: SHED_ROTATION_Y,
     scene,
-    shadowGenerator,
+    shedContainer,
+    targetX: HOUSE_TRANSFORM.x,
+    targetZ: HOUSE_TRANSFORM.z,
+    uniformScale: SHED_UNIFORM_SCALE,
     worldLayerMask,
-  } = options
-  let collisionMeshCount = 0
+  })
+  const {
+    asset,
+    doorBounds: placedDoorBounds,
+    importedMeshes,
+    movingDoorMeshes,
+    movingDoorNode,
+  } = shed
+
+  movingDoorNode.computeWorldMatrix(true)
+  const doorHingeWorld = movingDoorNode.getAbsolutePosition().clone()
+  const doorHinge = new TransformNode('oldWoodenShedDoorHinge', scene)
+  doorHinge.position.copyFrom(doorHingeWorld)
+  movingDoorNode.setParent(doorHinge, true)
+
+  // Simple meter-scale gameplay collision, independent of the detailed GLB.
+  // The local collider frame uses the same center and yaw as the old house.
+  const collisionRoot = new TransformNode('oldWoodenShedCollisionRoot', scene)
+  collisionRoot.position.set(HOUSE_TRANSFORM.x, 0, HOUSE_TRANSFORM.z)
+  collisionRoot.rotation.y = HOUSE_TRANSFORM.rotationY
+  const colliders: Mesh[] = []
   let interiorCollisionMeshCount = 0
-  let visibleMeshCount = 0
-  let interiorVisibleMeshCount = 0
-
-  const shellConcrete: Mesh[] = []
-  const shellWall: Mesh[] = []
-  const woodDetails: Mesh[] = []
-  const metalDetails: Mesh[] = []
-  const hazardDetails: Mesh[] = []
-  const stainDetails: Mesh[] = []
-  const snowDetails: Mesh[] = []
-  const lampDetails: Mesh[] = []
-  const windowCavityDetails: Mesh[] = []
-
-  const stainMaterial = makeAccentMaterial(
-    scene,
-    'operationsInteriorStains',
-    Color3.FromHexString('#272a26'),
-  )
-  const trackedSnowMaterial = makeAccentMaterial(
-    scene,
-    'operationsTrackedSnow',
-    Color3.FromHexString('#c5d0d2'),
-  )
-  const warmLampMaterial = makeAccentMaterial(
-    scene,
-    'operationsWarmLampGlass',
-    Color3.FromHexString('#8f6d3c'),
-    Color3.FromHexString('#e6a64f').scale(0.76),
-  )
-  const windowCavityMaterial = makeAccentMaterial(
-    scene,
-    'operationsWindowCavity',
-    Color3.FromHexString('#101617'),
-    Color3.FromHexString('#080c0d'),
-  )
-  const windowGlassMaterial = new PBRMaterial('operationsDirtyWindowGlass', scene)
-  windowGlassMaterial.albedoColor = Color3.FromHexString('#1d2a2c')
-  windowGlassMaterial.emissiveColor = Color3.FromHexString('#080e0f')
-  windowGlassMaterial.metallic = 0.06
-  windowGlassMaterial.roughness = 0.8
-  windowGlassMaterial.alpha = 0.84
-  windowGlassMaterial.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND
-  windowGlassMaterial.environmentIntensity = 0.3
-
-  const doorCoatingMaterial = new PBRMaterial('operationsDoorCoating', scene)
-  doorCoatingMaterial.albedoColor = Color3.FromHexString('#202825')
-  doorCoatingMaterial.metallic = 0.28
-  doorCoatingMaterial.roughness = 0.9
-  const doorWearMaterial = makeAccentMaterial(
-    scene,
-    'operationsDoorWear',
-    Color3.FromHexString('#514538'),
-  )
-
-  function detailBox(
-    name: string,
-    localPosition: Vector3,
-    size: Vector3,
-    material: HouseMaterial,
-    rotation: BoxRotation = {},
-  ) {
-    const mesh = MeshBuilder.CreateBox(
-      name,
-      { width: size.x, height: size.y, depth: size.z },
-      scene,
-    )
-    mesh.position.copyFrom(worldPosition(
-      HOUSE_TRANSFORM,
-      localPosition.x,
-      localPosition.y,
-      localPosition.z,
-    ))
-    mesh.rotation.set(
-      rotation.x ?? 0,
-      HOUSE_TRANSFORM.rotationY + (rotation.y ?? 0),
-      rotation.z ?? 0,
-    )
-    mesh.material = material
-    mesh.checkCollisions = false
-    mesh.isPickable = true
-    mesh.receiveShadows = true
-    mesh.layerMask = worldLayerMask
-    return mesh
-  }
-
-  function mergeDetails(
-    name: string,
-    pieces: Mesh[],
-    material: HouseMaterial,
-    interior = false,
-  ) {
-    if (pieces.length === 0) return
-    const merged = Mesh.MergeMeshes(pieces, true, true)
-    if (merged) {
-      merged.name = name
-      merged.material = material
-      merged.checkCollisions = false
-      merged.isPickable = true
-      merged.receiveShadows = true
-      merged.layerMask = worldLayerMask
-      shadowGenerator?.addShadowCaster(merged)
-      registerEnvironmentMesh(merged)
-      visibleMeshCount += 1
-      if (interior) interiorVisibleMeshCount += 1
-      return
-    }
-
-    for (const piece of pieces) {
-      shadowGenerator?.addShadowCaster(piece)
-      registerEnvironmentMesh(piece)
-      visibleMeshCount += 1
-      if (interior) interiorVisibleMeshCount += 1
-    }
-  }
 
   function collisionBox(
     name: string,
@@ -264,1112 +130,151 @@ export function createEnterableOperationsHouse(
     size: Vector3,
     interior = false,
   ) {
-    const collider = detailBox(
-      name,
-      localPosition,
-      size,
-      materials.concrete,
-    )
-    collider.visibility = 0
-    collider.isPickable = true
-    collider.checkCollisions = true
-    collider.receiveShadows = false
-    collider.metadata = {
-      abandonedStructureCollider: true,
-      enterableHouse: true,
-      interior,
-    }
-    registerEnvironmentMesh(collider)
-    collisionMeshCount += 1
-    if (interior) interiorCollisionMeshCount += 1
-    return collider
-  }
-
-  // The slab stays visually faithful to the old exterior, but its collision top
-  // is flush with the arena ground so neither capsule catches on a doorstep.
-  shellConcrete.push(
-    detailBox(
-      'operationsFoundation',
-      new Vector3(0, 0.035, 0),
-      new Vector3(HOUSE_WIDTH, 0.07, HOUSE_DEPTH),
-      materials.concrete,
-    ),
-    detailBox(
-      'operationsRubble1',
-      new Vector3(3.78, 0.2, 1.95),
-      new Vector3(0.54, 0.4, 0.68),
-      materials.concrete,
-      { y: 0.26, z: 0.12 },
-    ),
-    detailBox(
-      'operationsRubble2',
-      new Vector3(3.95, 0.14, 1.25),
-      new Vector3(0.42, 0.28, 0.5),
-      materials.concrete,
-      { y: -0.17, z: -0.08 },
-    ),
-  )
-
-  const doorOpeningLeft = DOOR_CENTER_X - DOOR_OPENING_WIDTH * 0.5
-  const doorOpeningRight = DOOR_CENTER_X + DOOR_OPENING_WIDTH * 0.5
-  const frontLeftWidth = doorOpeningLeft + HOUSE_WIDTH * 0.5
-  const frontRightWidth = HOUSE_WIDTH * 0.5 - doorOpeningRight
-  const frontLeftCenter = -HOUSE_WIDTH * 0.5 + frontLeftWidth * 0.5
-  const frontRightCenter = doorOpeningRight + frontRightWidth * 0.5
-  const lintelHeight = WALL_HEIGHT - DOOR_HEIGHT
-  const lintelY = DOOR_HEIGHT + lintelHeight * 0.5
-  const frontWindowLeft =
-    FRONT_WINDOW_CENTER_X - FRONT_WINDOW_OPENING_WIDTH * 0.5
-  const frontWindowRight =
-    FRONT_WINDOW_CENTER_X + FRONT_WINDOW_OPENING_WIDTH * 0.5
-  const frontWindowBottom =
-    FRONT_WINDOW_CENTER_Y - FRONT_WINDOW_OPENING_HEIGHT * 0.5
-  const frontWindowTop =
-    FRONT_WINDOW_CENTER_Y + FRONT_WINDOW_OPENING_HEIGHT * 0.5
-  const frontWindowFarLeftWidth = frontWindowLeft + HOUSE_WIDTH * 0.5
-  const frontWindowDoorSideWidth = doorOpeningLeft - frontWindowRight
-
-  // Exterior shell. The front is segmented around a real, collider-free opening.
-  shellWall.push(
-    detailBox(
-      'operationsFrontWallWindowLeft',
-      new Vector3(
-        -HOUSE_WIDTH * 0.5 + frontWindowFarLeftWidth * 0.5,
-        WALL_HEIGHT * 0.5,
-        FRONT_Z,
-      ),
-      new Vector3(frontWindowFarLeftWidth, WALL_HEIGHT, WALL_THICKNESS),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsFrontWallWindowRight',
-      new Vector3(
-        frontWindowRight + frontWindowDoorSideWidth * 0.5,
-        WALL_HEIGHT * 0.5,
-        FRONT_Z,
-      ),
-      new Vector3(frontWindowDoorSideWidth, WALL_HEIGHT, WALL_THICKNESS),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsFrontWallWindowBelow',
-      new Vector3(
-        FRONT_WINDOW_CENTER_X,
-        frontWindowBottom * 0.5,
-        FRONT_Z,
-      ),
-      new Vector3(
-        FRONT_WINDOW_OPENING_WIDTH,
-        frontWindowBottom,
-        WALL_THICKNESS,
-      ),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsFrontWallWindowAbove',
-      new Vector3(
-        FRONT_WINDOW_CENTER_X,
-        frontWindowTop + (WALL_HEIGHT - frontWindowTop) * 0.5,
-        FRONT_Z,
-      ),
-      new Vector3(
-        FRONT_WINDOW_OPENING_WIDTH,
-        WALL_HEIGHT - frontWindowTop,
-        WALL_THICKNESS,
-      ),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsFrontWallRight',
-      new Vector3(frontRightCenter, WALL_HEIGHT * 0.5, FRONT_Z),
-      new Vector3(frontRightWidth, WALL_HEIGHT, WALL_THICKNESS),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsFrontDoorLintel',
-      new Vector3(DOOR_CENTER_X, lintelY, FRONT_Z),
-      new Vector3(DOOR_OPENING_WIDTH, lintelHeight, WALL_THICKNESS),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsNorthWall',
-      new Vector3(0, WALL_HEIGHT * 0.5, HOUSE_DEPTH * 0.5 - WALL_THICKNESS * 0.5),
-      new Vector3(HOUSE_WIDTH, WALL_HEIGHT, WALL_THICKNESS),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsWestWall',
-      new Vector3(-HOUSE_WIDTH * 0.5 + WALL_THICKNESS * 0.5, 1.61, 0),
-      new Vector3(WALL_THICKNESS, 3.22, HOUSE_DEPTH - WALL_THICKNESS * 2),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsEastWall',
-      new Vector3(HOUSE_WIDTH * 0.5 - WALL_THICKNESS * 0.5, 1.34, -0.18),
-      new Vector3(WALL_THICKNESS, 2.68, HOUSE_DEPTH - WALL_THICKNESS * 2),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsBrokenParapet',
-      new Vector3(3.48, 2.85, 1.72),
-      new Vector3(0.32, 0.52, 1.5),
-      materials.wall,
-      { z: -0.06 },
-    ),
-  )
-
-  // A wide internal doorway connects the entry room to the operations room. A
-  // short second partition defines a storage/radio alcove without creating a
-  // narrow dead end for player or zombie collision movers.
-  const entryPartitionZ = -0.58
-  const entryOpeningLeft = 0.08
-  const entryOpeningRight = 1.92
-  const entryLeftWidth = entryOpeningLeft + HOUSE_WIDTH * 0.5 - WALL_THICKNESS
-  const entryRightWidth = HOUSE_WIDTH * 0.5 - WALL_THICKNESS - entryOpeningRight
-  shellWall.push(
-    detailBox(
-      'operationsEntryPartitionLeft',
-      new Vector3(
-        -HOUSE_WIDTH * 0.5 + WALL_THICKNESS + entryLeftWidth * 0.5,
-        1.43,
-        entryPartitionZ,
-      ),
-      new Vector3(entryLeftWidth, 2.86, 0.18),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsEntryPartitionRight',
-      new Vector3(entryOpeningRight + entryRightWidth * 0.5, 1.43, entryPartitionZ),
-      new Vector3(entryRightWidth, 2.86, 0.18),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsEntryDoorwayLintel',
-      new Vector3(
-        (entryOpeningLeft + entryOpeningRight) * 0.5,
-        2.65,
-        entryPartitionZ,
-      ),
-      new Vector3(entryOpeningRight - entryOpeningLeft, 0.42, 0.18),
-      materials.wall,
-    ),
-    detailBox(
-      'operationsStoragePartition',
-      new Vector3(-0.95, 1.37, 1.71),
-      new Vector3(0.18, 2.74, 2.12),
-      materials.wall,
-    ),
-  )
-
-  // The front window is a true opening through the visible shell. A deep,
-  // low-part-count frame, inset dirty glass, and opaque cavity backing give it
-  // believable parallax without rendering the room through transparent glass.
-  const exteriorFrontZ = -HOUSE_DEPTH * 0.5 - 0.045
-  const windowFrameDepth = WALL_THICKNESS + 0.1
-  const windowFrameZ = FRONT_Z - 0.01
-  const windowFrameBar = 0.09
-  const windowGlassZ = FRONT_Z + 0.065
-  const windowClearWidth = FRONT_WINDOW_OPENING_WIDTH - windowFrameBar * 2
-  const windowClearHeight = FRONT_WINDOW_OPENING_HEIGHT - windowFrameBar * 2
-  metalDetails.push(
-    detailBox(
-      'operationsFrontWindowFrameLeft',
-      new Vector3(
-        frontWindowLeft + windowFrameBar * 0.5,
-        FRONT_WINDOW_CENTER_Y,
-        windowFrameZ,
-      ),
-      new Vector3(windowFrameBar, FRONT_WINDOW_OPENING_HEIGHT, windowFrameDepth),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontWindowFrameRight',
-      new Vector3(
-        frontWindowRight - windowFrameBar * 0.5,
-        FRONT_WINDOW_CENTER_Y,
-        windowFrameZ,
-      ),
-      new Vector3(windowFrameBar, FRONT_WINDOW_OPENING_HEIGHT, windowFrameDepth),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontWindowFrameTop',
-      new Vector3(
-        FRONT_WINDOW_CENTER_X,
-        frontWindowTop - windowFrameBar * 0.5,
-        windowFrameZ,
-      ),
-      new Vector3(
-        FRONT_WINDOW_OPENING_WIDTH - windowFrameBar * 2,
-        windowFrameBar,
-        windowFrameDepth,
-      ),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontWindowFrameBottom',
-      new Vector3(
-        FRONT_WINDOW_CENTER_X,
-        frontWindowBottom + windowFrameBar * 0.5,
-        windowFrameZ,
-      ),
-      new Vector3(
-        FRONT_WINDOW_OPENING_WIDTH - windowFrameBar * 2,
-        windowFrameBar,
-        windowFrameDepth,
-      ),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontWindowMullion',
-      new Vector3(FRONT_WINDOW_CENTER_X, FRONT_WINDOW_CENTER_Y, windowFrameZ),
-      new Vector3(0.055, windowClearHeight, windowFrameDepth),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsRearWindowRecess',
-      new Vector3(0.1, 1.88, HOUSE_DEPTH * 0.5 + 0.09),
-      new Vector3(1.85, 0.94, 0.1),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsRearWindowInteriorRecess',
-      new Vector3(0.1, 1.88, HOUSE_DEPTH * 0.5 - WALL_THICKNESS - 0.015),
-      new Vector3(1.85, 0.94, 0.035),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsRoofMain',
-      new Vector3(-1.3, 3.24, -0.04),
-      new Vector3(4.95, 0.16, HOUSE_DEPTH + 0.28),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsRoofCollapsed',
-      new Vector3(2.45, 2.97, 0.7),
-      new Vector3(2.52, 0.14, 3.9),
-      materials.metal,
-      { z: -0.13 },
-    ),
-    detailBox(
-      'operationsRoofBeam1',
-      new Vector3(2.12, 2.93, -1.92),
-      new Vector3(0.14, 0.16, 2.15),
-      materials.metal,
-      { x: 0.04, z: -0.11 },
-    ),
-    detailBox(
-      'operationsRoofBeam2',
-      new Vector3(3.04, 2.82, -1.78),
-      new Vector3(0.14, 0.16, 1.7),
-      materials.metal,
-      { x: -0.03, z: -0.17 },
-    ),
-  )
-
-  shellConcrete.push(detailBox(
-    'operationsFrontWindowSill',
-    new Vector3(
-      FRONT_WINDOW_CENTER_X,
-      frontWindowBottom - 0.025,
-      exteriorFrontZ - 0.045,
-    ),
-    new Vector3(FRONT_WINDOW_OPENING_WIDTH + 0.18, 0.11, 0.37),
-    materials.concrete,
-  ))
-
-  windowCavityDetails.push(detailBox(
-    'operationsFrontWindowDarkBacking',
-    new Vector3(
-      FRONT_WINDOW_CENTER_X,
-      FRONT_WINDOW_CENTER_Y,
-      FRONT_Z + WALL_THICKNESS * 0.5 + 0.018,
-    ),
-    new Vector3(windowClearWidth, windowClearHeight, 0.035),
-    windowCavityMaterial,
-  ))
-  const frontWindowGlass = detailBox(
-    'operationsFrontWindowDirtyGlass',
-    new Vector3(FRONT_WINDOW_CENTER_X, FRONT_WINDOW_CENTER_Y, windowGlassZ),
-    new Vector3(windowClearWidth, windowClearHeight, 0.024),
-    windowGlassMaterial,
-  )
-  frontWindowGlass.isPickable = false
-  frontWindowGlass.receiveShadows = true
-  registerEnvironmentMesh(frontWindowGlass)
-  visibleMeshCount += 1
-
-  // A few matte deposits sit just above the glass. They merge into the existing
-  // stain draw group, avoiding another transparent grime layer.
-  stainDetails.push(
-    detailBox(
-      'operationsFrontWindowBottomGrime',
-      new Vector3(
-        FRONT_WINDOW_CENTER_X - 0.04,
-        FRONT_WINDOW_CENTER_Y - windowClearHeight * 0.42,
-        windowGlassZ - 0.019,
-      ),
-      new Vector3(windowClearWidth * 0.88, 0.045, 0.01),
-      stainMaterial,
-      { z: -0.015 },
-    ),
-    detailBox(
-      'operationsFrontWindowCornerGrime',
-      new Vector3(
-        FRONT_WINDOW_CENTER_X - windowClearWidth * 0.39,
-        FRONT_WINDOW_CENTER_Y + windowClearHeight * 0.34,
-        windowGlassZ - 0.02,
-      ),
-      new Vector3(0.17, 0.15, 0.01),
-      stainMaterial,
-      { z: 0.08 },
-    ),
-    detailBox(
-      'operationsFrontWindowRainStreak',
-      new Vector3(
-        FRONT_WINDOW_CENTER_X + windowClearWidth * 0.31,
-        FRONT_WINDOW_CENTER_Y + 0.03,
-        windowGlassZ - 0.02,
-      ),
-      new Vector3(0.035, windowClearHeight * 0.54, 0.01),
-      stainMaterial,
-      { z: -0.035 },
-    ),
-  )
-
-  // Metal returns line the complete structural opening. Exterior casing and
-  // inset door stops overlap the closed slab, removing straight sightlines at
-  // both corners while leaving the full doorway clear once the slab swings in.
-  const doorJambDepth = WALL_THICKNESS + 0.12
-  const doorJambWidth = 0.1
-  const doorCasingZ = FRONT_Z - WALL_THICKNESS * 0.5 - 0.04
-  const doorStopZ = DOOR_RECESS_Z + DOOR_PANEL_DEPTH * 0.5 + 0.026
-  metalDetails.push(
-    detailBox(
-      'operationsFrontDoorLeftJamb',
-      new Vector3(
-        doorOpeningLeft + doorJambWidth * 0.5,
-        DOOR_HEIGHT * 0.5,
-        FRONT_Z,
-      ),
-      new Vector3(doorJambWidth, DOOR_HEIGHT, doorJambDepth),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontDoorRightJamb',
-      new Vector3(
-        doorOpeningRight - doorJambWidth * 0.5,
-        DOOR_HEIGHT * 0.5,
-        FRONT_Z,
-      ),
-      new Vector3(doorJambWidth, DOOR_HEIGHT, doorJambDepth),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontDoorUpperJamb',
-      new Vector3(DOOR_CENTER_X, DOOR_HEIGHT - 0.045, FRONT_Z),
-      new Vector3(
-        DOOR_OPENING_WIDTH - doorJambWidth * 2,
-        0.09,
-        doorJambDepth,
-      ),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontDoorLeftCasing',
-      new Vector3(doorOpeningLeft - 0.075, 1.2, doorCasingZ),
-      new Vector3(0.15, 2.4, 0.08),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontDoorRightCasing',
-      new Vector3(doorOpeningRight + 0.075, 1.2, doorCasingZ),
-      new Vector3(0.15, 2.4, 0.08),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontDoorHeaderCasing',
-      new Vector3(DOOR_CENTER_X, 2.42, doorCasingZ),
-      new Vector3(DOOR_OPENING_WIDTH + 0.3, 0.16, 0.08),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontDoorLeftStop',
-      new Vector3(
-        doorOpeningLeft + doorJambWidth + 0.025,
-        1.17,
-        doorStopZ,
-      ),
-      new Vector3(0.05, 2.22, 0.052),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontDoorRightStop',
-      new Vector3(
-        doorOpeningRight - doorJambWidth - 0.025,
-        1.17,
-        doorStopZ,
-      ),
-      new Vector3(0.05, 2.22, 0.052),
-      materials.metal,
-    ),
-    detailBox(
-      'operationsFrontDoorUpperStop',
-      new Vector3(DOOR_CENTER_X, DOOR_HEIGHT - 0.115, doorStopZ),
-      new Vector3(DOOR_OPENING_WIDTH - doorJambWidth * 2, 0.05, 0.052),
-      materials.metal,
-    ),
-  )
-
-  woodDetails.push(
-    detailBox(
-      'operationsRearWindowBoard1',
-      new Vector3(0.1, 1.7, HOUSE_DEPTH * 0.5 + 0.15),
-      new Vector3(1.65, 0.16, 0.1),
-      materials.wood,
-      { z: -0.05 },
-    ),
-    detailBox(
-      'operationsRearWindowBoard2',
-      new Vector3(0.1, 2.05, HOUSE_DEPTH * 0.5 + 0.15),
-      new Vector3(1.65, 0.16, 0.1),
-      materials.wood,
-      { z: 0.04 },
-    ),
-    detailBox(
-      'operationsRearWindowInteriorBoard1',
-      new Vector3(-0.08, 1.7, HOUSE_DEPTH * 0.5 - WALL_THICKNESS - 0.04),
-      new Vector3(1.58, 0.14, 0.06),
-      materials.wood,
-      { z: -0.04 },
-    ),
-    detailBox(
-      'operationsRearWindowInteriorBoard2',
-      new Vector3(0.2, 2.04, HOUSE_DEPTH * 0.5 - WALL_THICKNESS - 0.04),
-      new Vector3(1.62, 0.14, 0.06),
-      materials.wood,
-      { z: 0.055 },
-    ),
-    detailBox(
-      'operationsCeilingBeam1',
-      new Vector3(-0.16, 2.92, -0.22),
-      new Vector3(6.55, 0.13, 0.15),
-      materials.wood,
-      { z: 0.018 },
-    ),
-    detailBox(
-      'operationsCeilingBeam2',
-      new Vector3(-0.32, 2.88, 1.72),
-      new Vector3(6.18, 0.13, 0.15),
-      materials.wood,
-      { z: -0.035 },
-    ),
-  )
-  hazardDetails.push(detailBox(
-    'operationsWarningPlate',
-    new Vector3(2.72, 1.74, exteriorFrontZ - 0.025),
-    new Vector3(0.62, 0.46, 0.08),
-    materials.hazard,
-    { z: -0.03 },
-  ))
-  hazardDetails.push(detailBox(
-    'operationsInteriorMapBoard',
-    new Vector3(-2.12, 1.52, HOUSE_DEPTH * 0.5 - WALL_THICKNESS - 0.03),
-    new Vector3(0.9, 0.62, 0.04),
-    materials.hazard,
-    { z: -0.035 },
-  ))
-
-  // Uneven planks, missing sections, and exposed concrete sell a damaged floor
-  // while remaining visual-only over the single flush gameplay floor collider.
-  const plankDepth = 0.44
-  for (let index = 0; index < 11; index += 1) {
-    if (index === 3 || index === 8) continue
-    const z = -2.42 + index * 0.49
-    const shortened = index === 5 || index === 9
-    woodDetails.push(detailBox(
-      `operationsFloorPlank${index + 1}`,
-      new Vector3(shortened ? -0.42 : 0, 0.075, z),
-      new Vector3(shortened ? 6.18 : 7.02, 0.045, plankDepth),
-      materials.wood,
-      { y: index % 4 === 0 ? 0.008 : -0.006, z: index === 6 ? 0.012 : 0 },
-    ))
-  }
-  shellConcrete.push(
-    detailBox(
-      'operationsExposedFloorPatch1',
-      new Vector3(2.05, 0.068, -0.86),
-      new Vector3(1.35, 0.035, 0.78),
-      materials.concrete,
-      { y: -0.09 },
-    ),
-    detailBox(
-      'operationsExposedFloorPatch2',
-      new Vector3(-1.85, 0.07, 1.61),
-      new Vector3(1.1, 0.04, 0.68),
-      materials.concrete,
-      { y: 0.13 },
-    ),
-  )
-
-  // Entrance bench.
-  woodDetails.push(
-    detailBox(
-      'operationsBenchSeat',
-      new Vector3(-2.52, 0.53, -1.77),
-      new Vector3(1.75, 0.14, 0.5),
-      materials.wood,
-      { z: 0.035 },
-    ),
-    detailBox(
-      'operationsBenchLeg1',
-      new Vector3(-3.1, 0.27, -1.77),
-      new Vector3(0.12, 0.52, 0.42),
-      materials.wood,
-      { z: 0.03 },
-    ),
-    detailBox(
-      'operationsBenchLeg2',
-      new Vector3(-1.93, 0.27, -1.77),
-      new Vector3(0.12, 0.52, 0.42),
-      materials.wood,
-      { z: -0.04 },
-    ),
-  )
-
-  // Storage shelves and two reusable crate forms tucked against the back wall.
-  for (let shelf = 0; shelf < 3; shelf += 1) {
-    woodDetails.push(detailBox(
-      `operationsShelfBoard${shelf + 1}`,
-      new Vector3(-3.18, 0.42 + shelf * 0.62, 1.57),
-      new Vector3(0.62, 0.09, 1.62),
-      materials.wood,
-    ))
-  }
-  for (const [index, z] of [0.92, 2.22].entries()) {
-    for (const x of [-3.42, -2.96]) {
-      metalDetails.push(detailBox(
-        `operationsShelfPost${index}-${x}`,
-        new Vector3(x, 1.02, z),
-        new Vector3(0.06, 1.94, 0.06),
-        materials.metal,
-      ))
-    }
-  }
-  woodDetails.push(
-    detailBox(
-      'operationsCrateLower',
-      new Vector3(-2.18, 0.42, 2.25),
-      new Vector3(1.22, 0.82, 0.9),
-      materials.wood,
-      { y: -0.05 },
-    ),
-    detailBox(
-      'operationsCrateUpper',
-      new Vector3(-2.45, 1.08, 2.28),
-      new Vector3(0.72, 0.58, 0.68),
-      materials.wood,
-      { y: 0.13, z: -0.05 },
-    ),
-  )
-
-  // Damaged field desk and chair occupy the east wall, clear of the central lane.
-  woodDetails.push(
-    detailBox(
-      'operationsDeskTop',
-      new Vector3(2.72, 0.83, 1.63),
-      new Vector3(1.55, 0.13, 0.67),
-      materials.wood,
-      { z: -0.025 },
-    ),
-    detailBox(
-      'operationsDeskSide1',
-      new Vector3(2.13, 0.43, 1.63),
-      new Vector3(0.12, 0.8, 0.58),
-      materials.wood,
-      { z: -0.04 },
-    ),
-    detailBox(
-      'operationsDeskSide2',
-      new Vector3(3.25, 0.38, 1.63),
-      new Vector3(0.12, 0.68, 0.58),
-      materials.wood,
-      { z: 0.08 },
-    ),
-    detailBox(
-      'operationsBrokenChairSeat',
-      new Vector3(2.12, 0.35, 0.64),
-      new Vector3(0.56, 0.1, 0.53),
-      materials.wood,
-      { y: 0.25, z: 0.18 },
-    ),
-    detailBox(
-      'operationsBrokenChairBack',
-      new Vector3(2.34, 0.7, 0.78),
-      new Vector3(0.48, 0.72, 0.09),
-      materials.wood,
-      { y: 0.25, z: 0.3 },
-    ),
-  )
-
-  // Low, non-colliding clutter keeps feet readable and avoids snagging either
-  // collision mover during close-quarters combat.
-  const debrisLayouts = [
-    [-2.1, 0.12, -0.94, 0.42, 0.18, 0.22, 0.3],
-    [-0.45, 0.1, 2.38, 0.55, 0.14, 0.18, -0.4],
-    [3.05, 0.11, -0.18, 0.38, 0.16, 0.26, 0.16],
-    [0.72, 0.09, 1.52, 0.66, 0.12, 0.16, -0.22],
-    [-2.82, 0.1, 0.35, 0.48, 0.15, 0.19, 0.48],
-  ] as const
-  debrisLayouts.forEach(([x, y, z, width, height, depth, rotation], index) => {
-    const material = index % 2 === 0 ? materials.wood : materials.concrete
-    const collection = index % 2 === 0 ? woodDetails : shellConcrete
-    collection.push(detailBox(
-      `operationsDebris${index + 1}`,
-      new Vector3(x, y, z),
-      new Vector3(width, height, depth),
-      material,
-      { y: rotation, z: index % 2 === 0 ? 0.09 : -0.06 },
-    ))
-  })
-
-  // Cables are kept as thin rectangular runs so they merge into one metal draw
-  // group instead of adding curved high-segment geometry.
-  metalDetails.push(
-    detailBox(
-      'operationsCableRun1',
-      new Vector3(1.23, 0.107, 2.25),
-      new Vector3(2.25, 0.026, 0.045),
-      materials.metal,
-      { y: -0.24 },
-    ),
-    detailBox(
-      'operationsCableRun2',
-      new Vector3(0.32, 0.11, 1.58),
-      new Vector3(1.35, 0.03, 0.05),
-      materials.metal,
-      { y: 0.68 },
-    ),
-    detailBox(
-      'operationsWallCable',
-      new Vector3(-3.54, 1.18, -0.12),
-      new Vector3(0.035, 1.92, 0.055),
-      materials.metal,
-      { z: 0.06 },
-    ),
-  )
-
-  // Dark damp marks, a desk-ring stain, and boot tracks use one shared matte
-  // material and sit slightly proud of their receiving surfaces.
-  stainDetails.push(
-    detailBox(
-      'operationsWallStain1',
-      new Vector3(-3.555, 1.02, -0.58),
-      new Vector3(0.018, 0.84, 0.92),
-      stainMaterial,
-      { z: 0.08 },
-    ),
-    detailBox(
-      'operationsWallStain2',
-      new Vector3(2.55, 1.31, 2.765),
-      new Vector3(1.08, 0.62, 0.018),
-      stainMaterial,
-      { z: -0.04 },
-    ),
-    detailBox(
-      'operationsFloorStain',
-      new Vector3(1.86, 0.102, 1.54),
-      new Vector3(0.92, 0.018, 0.58),
-      stainMaterial,
-      { y: -0.18 },
-    ),
-  )
-  for (let index = 0; index < 4; index += 1) {
-    stainDetails.push(detailBox(
-      `operationsBootTrack${index + 1}`,
-      new Vector3(1.32 + (index % 2) * 0.2, 0.104, -2.35 + index * 0.45),
-      new Vector3(0.14, 0.02, 0.26),
-      stainMaterial,
-      { y: index % 2 === 0 ? -0.14 : 0.12 },
-    ))
-  }
-
-  // A restrained amount of tracked snow reaches only the entry tiles.
-  snowDetails.push(
-    detailBox(
-      'operationsEntranceSnow1',
-      new Vector3(1.48, 0.11, -2.55),
-      new Vector3(1.18, 0.025, 0.48),
-      trackedSnowMaterial,
-      { y: -0.04 },
-    ),
-    detailBox(
-      'operationsEntranceSnow2',
-      new Vector3(1.15, 0.112, -2.05),
-      new Vector3(0.62, 0.022, 0.35),
-      trackedSnowMaterial,
-      { y: 0.18 },
-    ),
-    detailBox(
-      'operationsEntranceSnow3',
-      new Vector3(1.58, 0.113, -1.69),
-      new Vector3(0.32, 0.02, 0.28),
-      trackedSnowMaterial,
-      { y: -0.22 },
-    ),
-  )
-
-  // Two modest warm practicals lift the main lanes and contrast with the cold
-  // sky. They do not cast their own shadows, keeping mobile cost predictable.
-  const practicalLights = [
-    { name: 'operationsEntryPractical', x: 1.04, y: 2.55, z: -1.62, intensity: 0.94, range: 7.8 },
-    { name: 'operationsRoomPractical', x: 0.72, y: 2.62, z: 1.38, intensity: 1.16, range: 9.2 },
-  ] as const
-  practicalLights.forEach((definition) => {
-    metalDetails.push(detailBox(
-      `${definition.name}Housing`,
-      new Vector3(definition.x, definition.y + 0.11, definition.z),
-      new Vector3(0.62, 0.14, 0.34),
-      materials.metal,
-    ))
-    lampDetails.push(detailBox(
-      `${definition.name}Lens`,
-      new Vector3(definition.x, definition.y - 0.005, definition.z),
-      new Vector3(0.42, 0.045, 0.22),
-      warmLampMaterial,
-    ))
-    const light = new PointLight(
-      definition.name,
-      worldPosition(
-        HOUSE_TRANSFORM,
-        definition.x,
-        definition.y - 0.16,
-        definition.z,
-      ),
-      scene,
-    )
-    light.diffuse = Color3.FromHexString('#ffbd6a')
-    light.specular = Color3.FromHexString('#8f6a3e')
-    light.intensity = definition.intensity
-    light.range = definition.range
-    light.shadowEnabled = false
-    light.includeOnlyWithLayerMask = worldLayerMask
-  })
-
-  // Perimeter, internal walls, flush floor, and ceiling are independent simple
-  // colliders. This lets both collision movers traverse the open doorways while
-  // still preventing shots, players, or zombies from slipping through the shell.
-  collisionBox(
-    'operationsFloorCollider',
-    new Vector3(0, -0.035, 0),
-    new Vector3(HOUSE_WIDTH - WALL_THICKNESS * 2, 0.07, HOUSE_DEPTH - WALL_THICKNESS * 2),
-    true,
-  )
-  collisionBox(
-    'operationsCeilingCollider',
-    new Vector3(-0.45, 3.21, 0),
-    new Vector3(HOUSE_WIDTH - 0.6, 0.18, HOUSE_DEPTH - 0.18),
-    true,
-  )
-  collisionBox(
-    'operationsFrontLeftCollider',
-    new Vector3(frontLeftCenter, WALL_HEIGHT * 0.5, FRONT_Z),
-    new Vector3(frontLeftWidth, WALL_HEIGHT, WALL_THICKNESS),
-  )
-  collisionBox(
-    'operationsFrontRightCollider',
-    new Vector3(frontRightCenter, WALL_HEIGHT * 0.5, FRONT_Z),
-    new Vector3(frontRightWidth, WALL_HEIGHT, WALL_THICKNESS),
-  )
-  collisionBox(
-    'operationsFrontLintelCollider',
-    new Vector3(DOOR_CENTER_X, lintelY, FRONT_Z),
-    new Vector3(DOOR_OPENING_WIDTH, lintelHeight, WALL_THICKNESS),
-  )
-  collisionBox(
-    'operationsNorthCollider',
-    new Vector3(0, WALL_HEIGHT * 0.5, HOUSE_DEPTH * 0.5 - WALL_THICKNESS * 0.5),
-    new Vector3(HOUSE_WIDTH, WALL_HEIGHT, WALL_THICKNESS),
-  )
-  collisionBox(
-    'operationsWestCollider',
-    new Vector3(-HOUSE_WIDTH * 0.5 + WALL_THICKNESS * 0.5, WALL_HEIGHT * 0.5, 0),
-    new Vector3(WALL_THICKNESS, WALL_HEIGHT, HOUSE_DEPTH - WALL_THICKNESS * 2),
-  )
-  collisionBox(
-    'operationsEastCollider',
-    new Vector3(HOUSE_WIDTH * 0.5 - WALL_THICKNESS * 0.5, WALL_HEIGHT * 0.5, 0),
-    new Vector3(WALL_THICKNESS, WALL_HEIGHT, HOUSE_DEPTH - WALL_THICKNESS * 2),
-  )
-  collisionBox(
-    'operationsEntryLeftCollider',
-    new Vector3(
-      -HOUSE_WIDTH * 0.5 + WALL_THICKNESS + entryLeftWidth * 0.5,
-      1.43,
-      entryPartitionZ,
-    ),
-    new Vector3(entryLeftWidth, 2.86, 0.18),
-    true,
-  )
-  collisionBox(
-    'operationsEntryRightCollider',
-    new Vector3(entryOpeningRight + entryRightWidth * 0.5, 1.43, entryPartitionZ),
-    new Vector3(entryRightWidth, 2.86, 0.18),
-    true,
-  )
-  collisionBox(
-    'operationsEntryLintelCollider',
-    new Vector3((entryOpeningLeft + entryOpeningRight) * 0.5, 2.65, entryPartitionZ),
-    new Vector3(entryOpeningRight - entryOpeningLeft, 0.42, 0.18),
-    true,
-  )
-  collisionBox(
-    'operationsStoragePartitionCollider',
-    new Vector3(-0.95, 1.37, 1.71),
-    new Vector3(0.18, 2.74, 2.12),
-    true,
-  )
-  collisionBox(
-    'operationsBenchCollider',
-    new Vector3(-2.52, 0.35, -1.77),
-    new Vector3(1.82, 0.7, 0.56),
-    true,
-  )
-  collisionBox(
-    'operationsShelfCollider',
-    new Vector3(-3.18, 1.02, 1.57),
-    new Vector3(0.68, 2.04, 1.7),
-    true,
-  )
-  collisionBox(
-    'operationsCratesCollider',
-    new Vector3(-2.18, 0.7, 2.25),
-    new Vector3(1.34, 1.4, 0.98),
-    true,
-  )
-  collisionBox(
-    'operationsDeskCollider',
-    new Vector3(2.72, 0.45, 1.63),
-    new Vector3(1.66, 0.9, 0.75),
-    true,
-  )
-
-  // Real hinged front door. The visible slab is also the single moving collider,
-  // so collision and obstacle-picking always follow the exact animated pose.
-  const doorwayPosition = worldPosition(
-    HOUSE_TRANSFORM,
-    DOOR_CENTER_X,
-    0,
-    // Keep the established interaction anchor and 2.2 m trigger distance even
-    // though the visible slab now sits correctly inside the jamb.
-    FRONT_Z - WALL_THICKNESS * 0.5 - 0.018,
-  )
-  const doorPivot = new TransformNode('operationsFrontDoorHinge', scene)
-  doorPivot.position.copyFrom(worldPosition(
-    HOUSE_TRANSFORM,
-    DOOR_LEFT_X,
-    0.035,
-    DOOR_RECESS_Z,
-  ))
-  doorPivot.rotation.y = HOUSE_TRANSFORM.rotationY
-
-  const doorPanel = MeshBuilder.CreateBox(
-    'operationsFrontDoor',
-    { width: DOOR_WIDTH, height: DOOR_HEIGHT, depth: DOOR_PANEL_DEPTH },
-    scene,
-  )
-  doorPanel.parent = doorPivot
-  doorPanel.position.set(DOOR_WIDTH * 0.5, DOOR_HEIGHT * 0.5, 0)
-  doorPanel.material = materials.metal
-  doorPanel.checkCollisions = true
-  doorPanel.isPickable = true
-  doorPanel.receiveShadows = true
-  doorPanel.layerMask = worldLayerMask
-  doorPanel.metadata = {
-    abandonedStructureCollider: true,
-    interactiveDoor: true,
-    structure: 'damagedOperationsBuilding',
-  }
-  shadowGenerator?.addShadowCaster(doorPanel)
-  registerEnvironmentMesh(doorPanel)
-  collisionMeshCount += 1
-  visibleMeshCount += 1
-
-  const movingDoorMeshes: Mesh[] = [doorPanel]
-
-  function configureMovingDoorMesh(mesh: Mesh, material: HouseMaterial) {
-    mesh.parent = doorPivot
-    mesh.material = material
-    mesh.isPickable = false
-    mesh.checkCollisions = false
-    mesh.receiveShadows = true
-    mesh.layerMask = worldLayerMask
-    shadowGenerator?.addShadowCaster(mesh)
-    registerEnvironmentMesh(mesh)
-    movingDoorMeshes.push(mesh)
-    visibleMeshCount += 1
-    return mesh
-  }
-
-  function mergeMovingDoorPieces(
-    name: string,
-    pieces: Mesh[],
-    material: HouseMaterial,
-  ) {
-    const merged = Mesh.MergeMeshes(pieces, true, true)
-    if (merged) {
-      merged.name = name
-      return configureMovingDoorMesh(merged, material)
-    }
-    pieces.forEach((piece) => configureMovingDoorMesh(piece, material))
-    return null
-  }
-
-  function localDoorBox(
-    name: string,
-    position: Vector3,
-    size: Vector3,
-    rotation: BoxRotation = {},
-  ) {
-    const mesh = MeshBuilder.CreateBox(
+    const collider = MeshBuilder.CreateBox(
       name,
       { width: size.x, height: size.y, depth: size.z },
       scene,
     )
-    mesh.position.copyFrom(position)
-    mesh.rotation.set(rotation.x ?? 0, rotation.y ?? 0, rotation.z ?? 0)
-    return mesh
+    collider.parent = collisionRoot
+    collider.position.copyFrom(localPosition)
+    collider.visibility = 0
+    collider.isPickable = true
+    collider.checkCollisions = true
+    collider.receiveShadows = false
+    collider.layerMask = worldLayerMask
+    collider.metadata = {
+      abandonedStructureCollider: true,
+      importedOldWoodenShed: true,
+      enterableHouse: true,
+      interior,
+      preserveWithImportedEnvironment: true,
+      structure: 'oldWoodenShed',
+    }
+    colliders.push(collider)
+    if (interior) interiorCollisionMeshCount += 1
+    return collider
   }
 
-  const doorFaceZ = -DOOR_PANEL_DEPTH * 0.5 - 0.014
-  mergeMovingDoorPieces(
-    'operationsFrontDoorReinforcedPanels',
-    [
-      localDoorBox(
-        'operationsFrontDoorUpperPanel',
-        new Vector3(DOOR_WIDTH * 0.5, 1.7, doorFaceZ),
-        new Vector3(DOOR_WIDTH - 0.22, 0.82, 0.028),
-      ),
-      localDoorBox(
-        'operationsFrontDoorLowerPanel',
-        new Vector3(DOOR_WIDTH * 0.5, 0.63, doorFaceZ),
-        new Vector3(DOOR_WIDTH - 0.22, 0.82, 0.028),
-      ),
-    ],
-    doorCoatingMaterial,
+  const wallThickness = 0.18
+  const frontZ = -1.73
+  const rearZ = 1.66
+  const westX = -1.99
+  const eastX = 2.02
+  // Babylon's handedness conversion keeps the off-centre doorway on positive
+  // local X after the entrance-facing half-turn.
+  // Give the first-person collision ellipsoid clear shoulder room around the
+  // authored off-centre doorway. These are invisible frame boxes; the visible
+  // opening and every imported plank remain untouched.
+  const doorOpeningLeft = -0.15
+  const doorOpeningRight = 1.8
+  const frontLeftEdge = -2.05
+  const frontRightEdge = 2.08
+  const frontLeftWidth = doorOpeningLeft - frontLeftEdge
+  const frontRightWidth = frontRightEdge - doorOpeningRight
+  const lintelBottom = 2.28
+
+  collisionBox(
+    'oldWoodenShedFrontLeftWallCollider',
+    new Vector3(
+      frontLeftEdge + frontLeftWidth * 0.5,
+      SHED_WALL_HEIGHT * 0.5,
+      frontZ,
+    ),
+    new Vector3(frontLeftWidth, SHED_WALL_HEIGHT, wallThickness),
+  )
+  collisionBox(
+    'oldWoodenShedFrontRightWallCollider',
+    new Vector3(
+      doorOpeningRight + frontRightWidth * 0.5,
+      SHED_WALL_HEIGHT * 0.5,
+      frontZ,
+    ),
+    new Vector3(frontRightWidth, SHED_WALL_HEIGHT, wallThickness),
+  )
+  collisionBox(
+    'oldWoodenShedFrontLintelCollider',
+    new Vector3(
+      (doorOpeningLeft + doorOpeningRight) * 0.5,
+      lintelBottom + (SHED_WALL_HEIGHT - lintelBottom) * 0.5,
+      frontZ,
+    ),
+    new Vector3(
+      doorOpeningRight - doorOpeningLeft,
+      SHED_WALL_HEIGHT - lintelBottom,
+      wallThickness,
+    ),
+  )
+  collisionBox(
+    'oldWoodenShedRearWallCollider',
+    new Vector3(0, SHED_WALL_HEIGHT * 0.5, rearZ),
+    new Vector3(4.12, SHED_WALL_HEIGHT, wallThickness),
+  )
+  collisionBox(
+    'oldWoodenShedWestWallCollider',
+    new Vector3(westX, SHED_WALL_HEIGHT * 0.5, -0.035),
+    new Vector3(wallThickness, SHED_WALL_HEIGHT, 3.57),
+  )
+  collisionBox(
+    'oldWoodenShedEastWallCollider',
+    new Vector3(eastX, SHED_WALL_HEIGHT * 0.5, -0.035),
+    new Vector3(wallThickness, SHED_WALL_HEIGHT, 3.57),
   )
 
-  const doorMetalPieces = [
-    localDoorBox(
-      'operationsFrontDoorLeftEdge',
-      new Vector3(0.055, DOOR_HEIGHT * 0.5, doorFaceZ - 0.012),
-      new Vector3(0.07, DOOR_HEIGHT - 0.08, 0.052),
-    ),
-    localDoorBox(
-      'operationsFrontDoorRightEdge',
-      new Vector3(DOOR_WIDTH - 0.055, DOOR_HEIGHT * 0.5, doorFaceZ - 0.012),
-      new Vector3(0.07, DOOR_HEIGHT - 0.08, 0.052),
-    ),
-    localDoorBox(
-      'operationsFrontDoorTopEdge',
-      new Vector3(DOOR_WIDTH * 0.5, DOOR_HEIGHT - 0.055, doorFaceZ - 0.012),
-      new Vector3(DOOR_WIDTH - 0.12, 0.07, 0.052),
-    ),
-    localDoorBox(
-      'operationsFrontDoorBottomEdge',
-      new Vector3(DOOR_WIDTH * 0.5, 0.055, doorFaceZ - 0.012),
-      new Vector3(DOOR_WIDTH - 0.12, 0.07, 0.052),
-    ),
-    localDoorBox(
-      'operationsFrontDoorCenterRib',
-      new Vector3(DOOR_WIDTH * 0.5, 1.165, doorFaceZ - 0.014),
-      new Vector3(DOOR_WIDTH - 0.16, 0.075, 0.055),
-      { z: -0.018 },
-    ),
-    localDoorBox(
-      'operationsFrontDoorHandlePlate',
-      new Vector3(DOOR_WIDTH - 0.2, 1.16, doorFaceZ - 0.036),
-      new Vector3(0.14, 0.3, 0.055),
-    ),
-    localDoorBox(
-      'operationsFrontDoorLever',
-      new Vector3(DOOR_WIDTH - 0.27, 1.16, doorFaceZ - 0.092),
-      new Vector3(0.2, 0.045, 0.065),
-      { z: -0.06 },
-    ),
-    localDoorBox(
-      'operationsFrontDoorLatchEdge',
-      new Vector3(DOOR_WIDTH - 0.018, 1.16, 0),
-      new Vector3(0.035, 0.29, DOOR_PANEL_DEPTH + 0.018),
-    ),
-  ]
-  for (const [index, y] of [0.4, 1.17, 1.94].entries()) {
-    const hinge = MeshBuilder.CreateCylinder(
-      `operationsFrontDoorHinge${index + 1}`,
-      { diameter: 0.095, height: 0.24, tessellation: 8 },
-      scene,
-    )
-    hinge.position.set(0.018, y, -0.035)
-    doorMetalPieces.push(hinge)
-  }
-  const handleSpindle = MeshBuilder.CreateCylinder(
-    'operationsFrontDoorHandleSpindle',
-    { diameter: 0.065, height: 0.13, tessellation: 8 },
+  const doorPanel = MeshBuilder.CreateBox(
+    'oldWoodenShedDoorCollider',
+    {
+      width: DOOR_COLLIDER_WIDTH,
+      height: DOOR_COLLIDER_HEIGHT,
+      depth: DOOR_COLLIDER_DEPTH,
+    },
     scene,
   )
-  handleSpindle.position.set(DOOR_WIDTH - 0.2, 1.16, doorFaceZ - 0.07)
-  handleSpindle.rotation.x = Math.PI * 0.5
-  doorMetalPieces.push(handleSpindle)
-  mergeMovingDoorPieces(
-    'operationsFrontDoorHardware',
-    doorMetalPieces,
-    materials.metal,
-  )
-  mergeMovingDoorPieces(
-    'operationsFrontDoorWear',
-    [
-      localDoorBox(
-        'operationsFrontDoorUpperWear',
-        new Vector3(DOOR_WIDTH * 0.63, 1.84, doorFaceZ - 0.037),
-        new Vector3(0.3, 0.014, 0.012),
-        { z: -0.12 },
-      ),
-      localDoorBox(
-        'operationsFrontDoorUpperScratch',
-        new Vector3(DOOR_WIDTH * 0.43, 1.55, doorFaceZ - 0.037),
-        new Vector3(0.24, 0.012, 0.012),
-        { z: 0.16 },
-      ),
-      localDoorBox(
-        'operationsFrontDoorLowerWear',
-        new Vector3(DOOR_WIDTH * 0.34, 0.42, doorFaceZ - 0.037),
-        new Vector3(0.22, 0.014, 0.012),
-        { z: 0.08 },
-      ),
-      localDoorBox(
-        'operationsFrontDoorLowerScrape',
-        new Vector3(DOOR_WIDTH * 0.7, 0.37, doorFaceZ - 0.037),
-        new Vector3(0.015, 0.25, 0.012),
-        { z: -0.06 },
-      ),
-      localDoorBox(
-        'operationsFrontDoorBottomDirt',
-        new Vector3(DOOR_WIDTH * 0.48, 0.17, doorFaceZ - 0.037),
-        new Vector3(0.55, 0.032, 0.012),
-        { z: -0.025 },
-      ),
-    ],
-    doorWearMaterial,
-  )
+  doorPanel.position.copyFrom(placedDoorBounds.center)
+  doorPanel.rotation.y = HOUSE_TRANSFORM.rotationY
+  doorPanel.visibility = 0
+  doorPanel.isPickable = true
+  doorPanel.checkCollisions = true
+  doorPanel.receiveShadows = false
+  doorPanel.layerMask = worldLayerMask
+  doorPanel.metadata = {
+    abandonedStructureCollider: true,
+    importedOldWoodenShed: true,
+    interactiveDoor: true,
+    preserveWithImportedEnvironment: true,
+    structure: 'oldWoodenShed',
+  }
+  doorPanel.setParent(doorHinge, true)
+  colliders.push(doorPanel)
 
+  // Freeze only meshes outside the moving Door subtree. The door, hinge wrapper,
+  // and moving collider deliberately remain dynamic.
+  const movingDoorSet = new Set<AbstractMesh>(movingDoorMeshes)
+  for (const mesh of importedMeshes) {
+    if (movingDoorSet.has(mesh)) continue
+    mesh.computeWorldMatrix(true)
+    mesh.freezeWorldMatrix()
+  }
+  for (const collider of colliders) {
+    if (collider === doorPanel) continue
+    collider.computeWorldMatrix(true)
+    collider.freezeWorldMatrix()
+  }
+
+  const doorwayPosition = new Vector3(
+    placedDoorBounds.center.x,
+    0,
+    placedDoorBounds.center.z,
+  )
   let doorState: InteractiveDoorState = 'closed'
   let doorProgress = 0
 
   function applyDoorPose() {
     const eased = doorProgress * doorProgress * (3 - 2 * doorProgress)
-    doorPivot.rotation.y = HOUSE_TRANSFORM.rotationY + DOOR_OPEN_ANGLE * eased
-    doorPivot.computeWorldMatrix(true)
-    movingDoorMeshes.forEach((mesh) => mesh.computeWorldMatrix(true))
+    doorHinge.rotation.y = DOOR_OPEN_ANGLE * eased
+    doorHinge.computeWorldMatrix(true)
+    movingDoorNode.computeWorldMatrix(true)
+    for (const mesh of movingDoorMeshes) mesh.computeWorldMatrix(true)
+    doorPanel.computeWorldMatrix(true)
   }
 
   const frontDoor: InteractiveHouseDoor = {
@@ -1404,76 +309,45 @@ export function createEnterableOperationsHouse(
       } else {
         return
       }
-      // Collision never disappears; it follows the panel through the whole arc.
-      doorPanel.checkCollisions = true
+      // The authored door is fully clear of the opening at this point. Keep its
+      // invisible blocker active through motion and while closed, then disable
+      // it only in the fully-open state so player entry cannot catch on the
+      // hinge-side edge of the lightweight box.
+      doorPanel.checkCollisions = doorState !== 'open'
       applyDoorPose()
     },
   }
   applyDoorPose()
 
-  mergeDetails('damagedOperationsBuildingConcrete', shellConcrete, materials.concrete, true)
-  mergeDetails('damagedOperationsBuildingShell', shellWall, materials.wall, true)
-  mergeDetails('damagedOperationsBuildingWood', woodDetails, materials.wood, true)
-  mergeDetails('damagedOperationsBuildingMetalwork', metalDetails, materials.metal, true)
-  mergeDetails('damagedOperationsBuildingWarning', hazardDetails, materials.hazard)
-  mergeDetails('damagedOperationsBuildingStains', stainDetails, stainMaterial, true)
-  mergeDetails('damagedOperationsBuildingTrackedSnow', snowDetails, trackedSnowMaterial, true)
-  mergeDetails('damagedOperationsBuildingLampGlass', lampDetails, warmLampMaterial, true)
-  mergeDetails(
-    'damagedOperationsBuildingWindowBacking',
-    windowCavityDetails,
-    windowCavityMaterial,
-    true,
-  )
-
-  const roofSnowPosition = worldPosition(HOUSE_TRANSFORM, -1.3, 3.33, -0.04)
-  const winterSurfaces: WinterSurface[] = [{
-    name: 'damagedOperationsBuildingRoof',
-    x: roofSnowPosition.x,
-    y: roofSnowPosition.y,
-    z: roofSnowPosition.z,
-    width: 4.82,
-    depth: HOUSE_DEPTH + 0.12,
-    rotationY: HOUSE_TRANSFORM.rotationY,
-  }]
-
   return {
-    collisionMeshCount,
+    asset,
+    colliderNames: colliders.map((collider) => collider.name),
+    collisionMeshCount: colliders.length,
     frontDoor,
-    footprint: [HOUSE_WIDTH, HOUSE_DEPTH],
+    footprint: [SHED_WIDTH, SHED_DEPTH],
     interior: {
       collisionMeshCount: interiorCollisionMeshCount,
-      lightCount: practicalLights.length,
+      lightCount: 0,
       objects: [
-        'entrance room',
-        'operations room',
-        'storage alcove',
-        'damaged plank floor',
-        'bench',
-        'field desk',
-        'broken chair',
-        'shelves',
-        'crates',
-        'debris',
-        'cables',
-        'stains',
-        'tracked snow',
+        'original wall planks and exposed framing',
+        'original roof structure',
+        'original door hardware',
       ],
-      visibleMeshCount: interiorVisibleMeshCount,
+      visibleMeshCount: importedMeshes.length,
     },
     position: [HOUSE_TRANSFORM.x, HOUSE_TRANSFORM.z],
-    rotationY: HOUSE_TRANSFORM.rotationY,
-    visibleMeshCount,
+    rotationY: SHED_ROTATION_Y,
+    visibleMeshCount: importedMeshes.length,
     weatherShelters: [{
-      name: 'damagedOperationsBuildingInterior',
+      name: 'oldWoodenShedInterior',
       x: HOUSE_TRANSFORM.x,
       z: HOUSE_TRANSFORM.z,
-      width: HOUSE_WIDTH - WALL_THICKNESS * 2,
-      depth: HOUSE_DEPTH - WALL_THICKNESS * 2,
+      width: SHED_INTERIOR_WIDTH,
+      depth: SHED_INTERIOR_DEPTH,
       rotationY: HOUSE_TRANSFORM.rotationY,
       minimumY: 0,
-      maximumY: 3.18,
+      maximumY: 3.3,
     }],
-    winterSurfaces,
+    winterSurfaces: [],
   }
 }

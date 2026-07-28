@@ -1,30 +1,21 @@
+import { type AssetContainer } from '@babylonjs/core/assetContainer'
 import { type ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator'
-import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial'
-import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial'
 import { type AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh'
 import { type Scene } from '@babylonjs/core/scene'
 import {
-  createEnterableOperationsHouse,
+  createEnterableWoodenShed,
   type EnterableHouseResult,
 } from './enterableHouse'
-import { createGuardShack } from './guardShack'
+import { createGuardShack, type GuardShackResult } from './guardShack'
 import {
   type WeatherShelter,
   type WinterSurface,
 } from './winterEnvironment'
 
-type StructureMaterial = PBRMaterial | StandardMaterial
-
 interface AbandonedStructureOptions {
   scene: Scene
+  shedContainer: AssetContainer
   shadowGenerator: ShadowGenerator | null
-  materials: {
-    concrete: StructureMaterial
-    hazard: StructureMaterial
-    metal: StructureMaterial
-    wall: StructureMaterial
-    wood: StructureMaterial
-  }
   worldLayerMask: number
   registerEnvironmentMesh: (mesh: AbstractMesh) => void
 }
@@ -39,6 +30,7 @@ export interface AbandonedStructureSummary {
 export interface AbandonedStructureResult {
   collisionMeshCount: number
   enterableHouse: EnterableHouseResult
+  secondaryHouse: GuardShackResult
   visibleMeshCount: number
   structures: readonly AbandonedStructureSummary[]
   weatherShelters: readonly WeatherShelter[]
@@ -46,32 +38,34 @@ export interface AbandonedStructureResult {
 }
 
 /**
- * Creates the two established arena structures without moving either footprint.
- * The larger operations house owns room-aware collision and interaction, while
- * the non-enterable guard shack retains its original single convex collider.
+ * Creates the two established arena structures without moving either location.
+ * Both visible house hierarchies come from the exact imported wooden-shed GLB.
+ * The enterable instance owns room-aware collision and interaction, while the
+ * second instance retains its original single convex collider.
  */
 export function createAbandonedStructures(
   options: AbandonedStructureOptions,
 ): AbandonedStructureResult {
-  const enterableHouse = createEnterableOperationsHouse(options)
+  const enterableHouse = createEnterableWoodenShed(options)
   const guardShack = createGuardShack(options)
 
   return {
     collisionMeshCount:
       enterableHouse.collisionMeshCount + guardShack.collisionMeshCount,
     enterableHouse,
+    secondaryHouse: guardShack,
     visibleMeshCount:
       enterableHouse.visibleMeshCount + guardShack.visibleMeshCount,
     structures: [
       {
-        name: 'damagedOperationsBuilding',
-        label: 'Damaged operations building',
+        name: 'enterableOldWoodenShed',
+        label: 'Enterable old wooden shed',
         position: enterableHouse.position,
         footprint: enterableHouse.footprint,
       },
       {
-        name: 'guardShack',
-        label: 'Guard shack',
+        name: 'secondaryOldWoodenShed',
+        label: 'Secondary old wooden shed',
         position: guardShack.position,
         footprint: guardShack.footprint,
       },
