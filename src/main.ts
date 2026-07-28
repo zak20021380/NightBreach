@@ -1900,6 +1900,8 @@ const ZOMBIE_ASSET_CONFIG = {
   animationSpeed: ZOMBIE_ASSET_DEFINITION.animation.speed,
   material: ZOMBIE_ASSET_DEFINITION.material,
 }
+const ZOMBIE_GROUNDED_ROOT_Y = ZOMBIE_ASSET_CONFIG.height * 0.5
+const ZOMBIE_INVALID_GROUND_DELTA = 0.2
 
 const ZOMBIE_AI_CONFIG = {
   detectionRange: 28,
@@ -2553,8 +2555,11 @@ function createGlbZombieFactory(
         // freshly cloned skeleton held, so the pack drifted in size, and it
         // grounded against the bind pose, which stands higher than the
         // character actually does and buried the soles in the floor.
-        root.position.set(0, -calibration.groundOffsetY, 0)
-        root.position.addInPlace(ZOMBIE_ASSET_CONFIG.position)
+        root.position.set(
+          ZOMBIE_ASSET_CONFIG.position.x,
+          ZOMBIE_ASSET_CONFIG.position.y - calibration.groundOffsetY,
+          ZOMBIE_ASSET_CONFIG.position.z,
+        )
         root.computeWorldMatrix(true)
         modelMeshes.forEach((mesh) => mesh.computeWorldMatrix(true))
 
@@ -2841,9 +2846,14 @@ class Zombie {
   // Reused every steering tick so separation allocates nothing per frame.
   private readonly separationResult = { x: 0, z: 0 }
   private readonly hitZoneMeshes: Mesh[] = []
+  private readonly hitZoneBasePositions: Vector3[] = []
   private readonly upperBodyImpactRoot: TransformNode
   private readonly upperBodyImpactBasePosition = Vector3.Zero()
   private readonly upperBodyImpactDirection = Vector3.Forward()
+  private readonly visualBasePosition = Vector3.Zero()
+  private readonly visualBaseRotation = Vector3.Zero()
+  private readonly visualBaseScaling = Vector3.One()
+  private readonly visualBaseRotationQuaternion: Quaternion | null
   private upperBodyImpactDistance = 0
   private resumeStateAfterHit: 'idle' | 'chasing' = 'idle'
   private hitReactionRemaining = 0
@@ -2896,11 +2906,6 @@ class Zombie {
       },
       scene,
     )
-    this.root.position.set(
-      spawnPosition.x,
-      ZOMBIE_ASSET_CONFIG.height * 0.5,
-      spawnPosition.z,
-    )
     this.root.visibility = 0
     this.root.isPickable = false
     this.root.checkCollisions = true
@@ -2910,8 +2915,17 @@ class Zombie {
     this.root.metadata = { zombieCollider: true }
 
     this.visual = factory.create(`zombie${id}`)
+    const factoryVisualPosition = this.visual.root.position.clone()
     this.visual.root.parent = this.root
-    this.visual.root.position.y -= ZOMBIE_ASSET_CONFIG.height * 0.5
+    this.visual.root.position.set(
+      factoryVisualPosition.x,
+      factoryVisualPosition.y - ZOMBIE_GROUNDED_ROOT_Y,
+      factoryVisualPosition.z,
+    )
+    this.visualBasePosition.copyFrom(this.visual.root.position)
+    this.visualBaseRotation.copyFrom(this.visual.root.rotation)
+    this.visualBaseScaling.copyFrom(this.visual.root.scaling)
+    this.visualBaseRotationQuaternion = this.visual.root.rotationQuaternion?.clone() ?? null
     this.upperBodyImpactRoot = this.createUpperBodyImpactRoot()
     this.upperBodyImpactBasePosition.copyFrom(this.upperBodyImpactRoot.position)
     this.proceduralBaseY = this.visual.root.position.y
@@ -2925,6 +2939,7 @@ class Zombie {
       ZOMBIE_AI_CONFIG.obstacleProbeDistance,
     )
     this.createHitZones()
+    this.resetSpatialStateForSpawn(spawnPosition)
     this.playStateAnimation()
     playZombieIdleSound(this.id)
   }
@@ -3111,6 +3126,7 @@ class Zombie {
 
   update(deltaSeconds: number, paused: boolean, playerPosition: Vector3) {
     if (this.disposed) return
+    this.restoreGroundHeightIfInvalid()
 
     if (paused) {
       this.setPaused(true)
@@ -3146,7 +3162,7 @@ class Zombie {
         0,
         this.knockbackDirectionZ * this.knockbackSpeed * movementSeconds,
       )
-      this.root.moveWithCollisions(this.movementDelta)
+      this.moveHorizontallyWithCollisions()
       this.knockbackSpeed *= Math.exp(
         -SHOTGUN_COMBAT_CONFIG.knockback.decayPerSecond * movementSeconds,
       )
@@ -3218,6 +3234,78 @@ class Zombie {
     this.visual.dispose()
     this.root.dispose()
     unregisterActiveZombie()
+  }
+
+  private resetSpatialStateForSpawn(spawnPosition: Vector3) {
+    // Spawn/reuse is an absolute reset. None of these transforms are derived
+    // from their current values, so visual grounding, hit offsets, and corpse
+    // fall transforms can never accumulate across a lifecycle.
+    this.root.parent = null
+    this.root.position.set(spawnPosition.x, ZOMBIE_GROUNDED_ROOT_Y, spawnPosition.z)
+    this.root.rotationQuaternion = null
+    this.root.rotation.set(0, 0, 0)
+    this.root.scaling.setAll(1)
+    this.root.ellipsoidOffset.set(0, 0, 0)
+    this.root.checkCollisions = true
+
+    this.visual.root.parent = this.root
+    this.visual.root.position.copyFrom(this.visualBasePosition)
+    this.visual.root.rotation.copyFrom(this.visualBaseRotation)
+    this.visual.root.scaling.copyFrom(this.visualBaseScaling)
+    this.visual.root.rotationQuaternion = this.visualBaseRotationQuaternion?.clone() ?? null
+
+    this.upperBodyImpactRoot.position.copyFrom(this.upperBodyImpactBasePosition)
+    this.upperBodyImpactRoot.rotationQuaternion = null
+    this.upperBodyImpactRoot.rotation.set(0, 0, 0)
+    this.upperBodyImpactRoot.scaling.setAll(1)
+    this.upperBodyImpactDirection.set(0, 0, 1)
+    this.upperBodyImpactDistance = 0
+    this.hitReactionRemaining = 0
+    this.activeHitReactionDuration = ZOMBIE_COMBAT_CONFIG.hitReactionDuration
+
+    for (let index = 0; index < this.hitZoneMeshes.length; index += 1) {
+      const mesh = this.hitZoneMeshes[index]
+      mesh.parent = this.root
+      mesh.position.copyFrom(this.hitZoneBasePositions[index])
+      mesh.rotationQuaternion = null
+      mesh.rotation.set(0, 0, 0)
+      mesh.scaling.setAll(1)
+    }
+
+    this.movementDelta.set(0, 0, 0)
+    this.knockbackDirectionX = 0
+    this.knockbackDirectionZ = 0
+    this.knockbackSpeed = 0
+    this.knockbackRemaining = 0
+    this.deathImpulseDirectionX = 0
+    this.deathImpulseDirectionZ = 0
+    this.deathImpulseSpeed = 0
+    this.deathImpulseRemaining = 0
+    this.pendingDeathImpulseMinimumSpeed = 0
+    this.deathBackFallActive = false
+    this.deathBackFallElapsed = 0
+    this.deathBackFallAppliedAngle = 0
+
+    this.root.computeWorldMatrix(true)
+    this.visual.root.computeWorldMatrix(true)
+  }
+
+  private moveHorizontallyWithCollisions() {
+    // Babylon may return a vertical slide while resolving contact even when the
+    // requested displacement has Y=0. Keep collision-aware X/Z movement, then
+    // restore the body-centred collider to its one absolute ground height.
+    this.movementDelta.y = 0
+    this.root.moveWithCollisions(this.movementDelta)
+    this.root.position.y = ZOMBIE_GROUNDED_ROOT_Y
+  }
+
+  private restoreGroundHeightIfInvalid() {
+    const currentY = this.root.position.y
+    if (
+      Number.isFinite(currentY)
+      && Math.abs(currentY - ZOMBIE_GROUNDED_ROOT_Y) <= ZOMBIE_INVALID_GROUND_DELTA
+    ) return
+    this.root.position.y = ZOMBIE_GROUNDED_ROOT_Y
   }
 
   private createHitZones() {
@@ -3295,6 +3383,7 @@ class Zombie {
     mesh.checkCollisions = false
     mesh.receiveShadows = false
     this.hitZoneMeshes.push(mesh)
+    this.hitZoneBasePositions.push(mesh.position.clone())
     zombieHitZones.set(mesh, { zombie: this, zone })
   }
 
@@ -3414,7 +3503,7 @@ class Zombie {
       0,
       this.deathImpulseDirectionZ * this.deathImpulseSpeed * movementSeconds,
     )
-    this.root.moveWithCollisions(this.movementDelta)
+    this.moveHorizontallyWithCollisions()
     this.deathImpulseSpeed *= Math.exp(
       -SHOTGUN_COMBAT_CONFIG.knockback.deathDecayPerSecond * movementSeconds,
     )
@@ -3753,7 +3842,7 @@ class Zombie {
       0,
       this.currentDirectionZ * movementDistance,
     )
-    this.root.moveWithCollisions(this.movementDelta)
+    this.moveHorizontallyWithCollisions()
   }
 
   /**
