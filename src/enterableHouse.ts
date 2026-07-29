@@ -93,6 +93,12 @@ export interface ZombieCabinDoorwayState {
   /** True only after the door has completed its opening animation. */
   readonly passable: boolean
   /**
+   * Number of non-overlapping body lanes that fit through this cabin's real
+   * collision opening. The wider primary cabin admits two abreast; the scaled
+   * secondary cabin remains single-file.
+   */
+  readonly entrySlotCount: number
+  /**
    * Tests the walkable interior in the cabin's collision frame. `clearance`
    * shrinks that area by a body radius, so a zombie is not considered through
    * the doorway until its whole collider has cleared the frame.
@@ -105,6 +111,21 @@ export interface ZombieCabinDoorwayState {
   getApproachPositionToRef: (result: Vector3) => void
   /** Stable centreline point far enough inside to clear both jamb corners. */
   getInsidePositionToRef: (result: Vector3) => void
+  /**
+   * Lane-specific point outside the opening. `queueIndex` adds longitudinal
+   * spacing away from the door, so followers advance through distinct places
+   * instead of pressing into the front body.
+   */
+  getApproachSlotPositionToRef: (
+    result: Vector3,
+    slotIndex: number,
+    queueIndex: number,
+  ) => void
+  /** Matching lane-specific point beyond the inside of the frame. */
+  getInsideSlotPositionToRef: (
+    result: Vector3,
+    slotIndex: number,
+  ) => void
 }
 
 export interface EnterableHouseResult {
@@ -182,6 +203,9 @@ const DOOR_OPEN_ANGLE = -Math.PI * 0.53
 // zombie radius is 0.36 m; 0.75 m leaves enough room to settle and turn onto
 // the collision opening's centreline before attempting the crossing.
 const ZOMBIE_DOORWAY_ROUTE_OFFSET = 0.75
+const ZOMBIE_DOORWAY_BODY_DIAMETER = 0.72
+const ZOMBIE_DOORWAY_SLOT_SPACING = 0.8
+const ZOMBIE_DOORWAY_QUEUE_SPACING = 0.9
 const ZOMBIE_COLLISION_EPSILON = 0.002
 const ZOMBIE_COLLISION_DIRECTION_EPSILON = 0.00000001
 const ZOMBIE_COLLISION_MAX_SLIDES = 3
@@ -613,6 +637,11 @@ export function createEnterableCabin(
     zombieDoorwayPassable = nextPassable
     doorPanel.checkCollisions = !nextPassable
     closedDoorwayBlocker.checkCollisions = !nextPassable
+    // These invisible boxes are valid bullet blockers only while the doorway is
+    // closed. Leaving them pickable after collision was disabled made an open
+    // doorway look clear while rifle and shotgun rays still stopped in mid-air.
+    doorPanel.isPickable = !nextPassable
+    closedDoorwayBlocker.isPickable = !nextPassable
     if (passabilityChanged) zombieDoorwayRevision += 1
   }
 
@@ -620,6 +649,40 @@ export function createEnterableCabin(
   const collisionSine = Math.sin(cabin.rotationY)
   const zombieDoorwayLocalX =
     (layout.doorOpeningLeft + layout.doorOpeningRight) * 0.5
+  const zombieDoorwayCenterSpan = Math.max(
+    0,
+    layout.doorOpeningRight - layout.doorOpeningLeft
+      - ZOMBIE_DOORWAY_BODY_DIAMETER,
+  )
+  const zombieDoorwayEntrySlotCount = Math.max(
+    1,
+    Math.floor(zombieDoorwayCenterSpan / ZOMBIE_DOORWAY_SLOT_SPACING) + 1,
+  )
+  const zombieDoorwaySlotSpan =
+    (zombieDoorwayEntrySlotCount - 1) * ZOMBIE_DOORWAY_SLOT_SPACING
+
+  function getZombieDoorwaySlotLocalX(slotIndex: number) {
+    const safeSlotIndex = Math.max(
+      0,
+      Math.min(zombieDoorwayEntrySlotCount - 1, Math.floor(slotIndex)),
+    )
+    return zombieDoorwayLocalX
+      - zombieDoorwaySlotSpan * 0.5
+      + safeSlotIndex * ZOMBIE_DOORWAY_SLOT_SPACING
+  }
+
+  function setZombieDoorwayLocalPositionToRef(
+    result: Vector3,
+    localX: number,
+    localZ: number,
+  ) {
+    result.set(
+      cabin.x + localX * collisionCosine + localZ * collisionSine,
+      0,
+      cabin.z - localX * collisionSine + localZ * collisionCosine,
+    )
+  }
+
   const zombieDoorwayApproachPosition = new Vector3(
     cabin.x
       + zombieDoorwayLocalX * collisionCosine
@@ -887,6 +950,9 @@ export function createEnterableCabin(
     get passable() {
       return zombieDoorwayPassable
     },
+    get entrySlotCount() {
+      return zombieDoorwayEntrySlotCount
+    },
     containsInteriorPosition(position, clearance = 0) {
       const safeClearance = Math.max(0, clearance)
       const worldX = position.x - cabin.x
@@ -903,6 +969,22 @@ export function createEnterableCabin(
     },
     getInsidePositionToRef(result) {
       result.copyFrom(zombieDoorwayInsidePosition)
+    },
+    getApproachSlotPositionToRef(result, slotIndex, queueIndex) {
+      const safeQueueIndex = Math.max(0, Math.floor(queueIndex))
+      setZombieDoorwayLocalPositionToRef(
+        result,
+        getZombieDoorwaySlotLocalX(slotIndex),
+        layout.frontZ - ZOMBIE_DOORWAY_ROUTE_OFFSET
+          - safeQueueIndex * ZOMBIE_DOORWAY_QUEUE_SPACING,
+      )
+    },
+    getInsideSlotPositionToRef(result, slotIndex) {
+      setZombieDoorwayLocalPositionToRef(
+        result,
+        getZombieDoorwaySlotLocalX(slotIndex),
+        layout.frontZ + ZOMBIE_DOORWAY_ROUTE_OFFSET,
+      )
     },
   }
 

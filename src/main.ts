@@ -2248,6 +2248,91 @@ const ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE_SQUARED =
   * ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE
 const ZOMBIE_DOORWAY_ALIGNMENT_START_DISTANCE = 1.4
 const ZOMBIE_DOORWAY_ALIGNMENT_COMPLETE_DISTANCE = 0.5
+const ZOMBIE_BODY_SPACING = 0.04
+const ZOMBIE_BODY_SWEEP_EPSILON = 0.003
+
+interface ZombieDoorwayQueueClaim {
+  readonly cabinId: string
+  readonly laneIndex: number
+}
+
+interface ZombieDoorwayQueueState {
+  readonly lanes: ZombieDoorwayQueueClaim[][]
+}
+
+// One independent queue ledger per cabin. A claim stays in lane order while its
+// zombie approaches or crosses, then is removed as soon as that body clears the
+// inside waypoint. Removing the front claim advances every follower's rank and
+// therefore its longitudinal target without ever retargeting the whole pack to
+// one shared position.
+const zombieDoorwayQueues = new Map<string, ZombieDoorwayQueueState>()
+const zombieDoorwayClaimProbe = Vector3.Zero()
+
+function getZombieDoorwayQueue(cabin: EnterableHouseResult) {
+  let queue = zombieDoorwayQueues.get(cabin.cabinId)
+  if (queue) return queue
+  queue = {
+    lanes: Array.from(
+      { length: cabin.zombieDoorway.entrySlotCount },
+      () => [],
+    ),
+  }
+  zombieDoorwayQueues.set(cabin.cabinId, queue)
+  return queue
+}
+
+function claimZombieDoorwayQueue(
+  cabin: EnterableHouseResult,
+  zombiePosition: Vector3,
+) {
+  const queue = getZombieDoorwayQueue(cabin)
+  let bestLaneIndex = 0
+  let bestLaneOccupancy = Number.POSITIVE_INFINITY
+  let bestDistanceSquared = Number.POSITIVE_INFINITY
+  for (let laneIndex = 0; laneIndex < queue.lanes.length; laneIndex += 1) {
+    cabin.zombieDoorway.getApproachSlotPositionToRef(
+      zombieDoorwayClaimProbe,
+      laneIndex,
+      0,
+    )
+    const offsetX = zombieDoorwayClaimProbe.x - zombiePosition.x
+    const offsetZ = zombieDoorwayClaimProbe.z - zombiePosition.z
+    const distanceSquared = offsetX * offsetX + offsetZ * offsetZ
+    const laneOccupancy = queue.lanes[laneIndex].length
+    if (
+      laneOccupancy < bestLaneOccupancy
+      || (
+        laneOccupancy === bestLaneOccupancy
+        && distanceSquared < bestDistanceSquared
+      )
+    ) {
+      bestLaneOccupancy = laneOccupancy
+      bestDistanceSquared = distanceSquared
+      bestLaneIndex = laneIndex
+    }
+  }
+
+  const claim: ZombieDoorwayQueueClaim = {
+    cabinId: cabin.cabinId,
+    laneIndex: bestLaneIndex,
+  }
+  queue.lanes[bestLaneIndex].push(claim)
+  return claim
+}
+
+function getZombieDoorwayQueueRank(claim: ZombieDoorwayQueueClaim) {
+  const queue = zombieDoorwayQueues.get(claim.cabinId)
+  if (!queue) return 0
+  return Math.max(0, queue.lanes[claim.laneIndex]?.indexOf(claim) ?? 0)
+}
+
+function releaseZombieDoorwayQueueClaim(claim: ZombieDoorwayQueueClaim) {
+  const queue = zombieDoorwayQueues.get(claim.cabinId)
+  const lane = queue?.lanes[claim.laneIndex]
+  if (!lane) return
+  const claimIndex = lane.indexOf(claim)
+  if (claimIndex >= 0) lane.splice(claimIndex, 1)
+}
 
 function getCabinContainingPosition(position: Vector3) {
   for (const binding of cabinDoors) {
@@ -2290,6 +2375,7 @@ class Zombie {
   private chaseGoalZ = 0
   private chasingPlayerDirectly = true
   private doorwayRouteWaiting = false
+  private doorwayQueueClaim: ZombieDoorwayQueueClaim | null = null
   private chaseSteeringMode: ZombieChaseSteeringMode = 'player'
   private desiredDirectionX = 0
   private desiredDirectionZ = 0
@@ -2578,8 +2664,14 @@ class Zombie {
     this.clearDoorwayRoute()
   }
 
+  private releaseDoorwayQueueClaim() {
+    if (!this.doorwayQueueClaim) return
+    releaseZombieDoorwayQueueClaim(this.doorwayQueueClaim)
+    this.doorwayQueueClaim = null
+  }
+
   private clearDoorwayRoute() {
-    if (!this.doorwayRouteCabin) return
+    this.releaseDoorwayQueueClaim()
     this.doorwayRouteCabin = null
     this.doorwayRouteStage = 'player'
     this.doorwayRouteWaiting = false
@@ -2594,13 +2686,39 @@ class Zombie {
   private setDoorwayRouteStage(stage: ZombieDoorwayRouteStage) {
     if (stage === this.doorwayRouteStage) return
     this.doorwayRouteStage = stage
-    // A stage boundary is a deliberate turn onto the doorway centreline.
+    if (stage === 'player') this.releaseDoorwayQueueClaim()
+    // A stage boundary is a deliberate turn onto this body's doorway lane.
     // Discarding the previous wall/obstacle heading prevents one stale lateral
     // step from carrying the body into a jamb.
     this.desiredDirectionX = 0
     this.desiredDirectionZ = 0
     this.currentDirectionX = 0
     this.currentDirectionZ = 0
+  }
+
+  private updateDoorwayQueueWaypoints(cabin: EnterableHouseResult) {
+    if (
+      !this.doorwayQueueClaim
+      || this.doorwayQueueClaim.cabinId !== cabin.cabinId
+    ) {
+      this.releaseDoorwayQueueClaim()
+      this.doorwayQueueClaim = claimZombieDoorwayQueue(
+        cabin,
+        this.root.position,
+      )
+    }
+
+    const queueRank = getZombieDoorwayQueueRank(this.doorwayQueueClaim)
+    cabin.zombieDoorway.getApproachSlotPositionToRef(
+      this.doorwayApproachPosition,
+      this.doorwayQueueClaim.laneIndex,
+      queueRank,
+    )
+    cabin.zombieDoorway.getInsideSlotPositionToRef(
+      this.doorwayInsidePosition,
+      this.doorwayQueueClaim.laneIndex,
+    )
+    return queueRank
   }
 
   private selectChaseGoal(playerPosition: Vector3) {
@@ -2616,13 +2734,8 @@ class Zombie {
     }
 
     if (this.doorwayRouteCabin !== playerCabin) {
+      this.releaseDoorwayQueueClaim()
       this.doorwayRouteCabin = playerCabin
-      playerCabin.zombieDoorway.getApproachPositionToRef(
-        this.doorwayApproachPosition,
-      )
-      playerCabin.zombieDoorway.getInsidePositionToRef(
-        this.doorwayInsidePosition,
-      )
       this.doorwayRouteStage =
         playerCabin.zombieDoorway.containsInteriorPosition(
           this.root.position,
@@ -2634,9 +2747,15 @@ class Zombie {
       this.desiredDirectionZ = 0
       this.currentDirectionX = 0
       this.currentDirectionZ = 0
+      if (this.doorwayRouteStage !== 'player') {
+        this.updateDoorwayQueueWaypoints(playerCabin)
+      }
     }
 
     const doorway = playerCabin.zombieDoorway
+    if (this.doorwayRouteStage !== 'player') {
+      this.updateDoorwayQueueWaypoints(playerCabin)
+    }
     const zombieFullyInside = doorway.containsInteriorPosition(
       this.root.position,
       this.root.ellipsoid.x,
@@ -2668,6 +2787,9 @@ class Zombie {
       this.setDoorwayRouteStage('outside')
     }
 
+    const queueRank = this.doorwayRouteStage === 'player'
+      ? 0
+      : this.updateDoorwayQueueWaypoints(playerCabin)
     this.doorwayRouteWaiting = false
     if (this.doorwayRouteStage === 'outside') {
       this.chaseGoalX = this.doorwayApproachPosition.x
@@ -2678,8 +2800,9 @@ class Zombie {
       const approachOffsetX = this.chaseGoalX - this.root.position.x
       const approachOffsetZ = this.chaseGoalZ - this.root.position.z
       const reachedApproach =
-        approachOffsetX * approachOffsetX + approachOffsetZ * approachOffsetZ
-        <= ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE_SQUARED
+        queueRank === 0
+        && approachOffsetX * approachOffsetX + approachOffsetZ * approachOffsetZ
+          <= ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE_SQUARED
       if (!reachedApproach) return
       if (!doorway.passable) {
         this.doorwayRouteWaiting = true
@@ -2908,12 +3031,97 @@ class Zombie {
     this.visual.root.computeWorldMatrix(true)
   }
 
+  /**
+   * Sweeps this living body's horizontal circle against every other living
+   * zombie. Steering keeps neighbours apart before contact; this inexpensive
+   * final guard prevents a large frame or knockback step from tunnelling into
+   * the body in front while a doorway queue is compacting.
+   */
+  private resolveMovementAgainstLivingZombies() {
+    if (this._state === 'dead') return
+
+    for (let index = 0; index < zombies.length; index += 1) {
+      const other = zombies[index]
+      if (
+        other === this
+        || other.eliminated
+        || !other.root.isEnabled()
+      ) continue
+
+      const minimumDistance = this.root.ellipsoid.x
+        + other.root.ellipsoid.x
+        + ZOMBIE_BODY_SPACING
+      const minimumDistanceSquared = minimumDistance * minimumDistance
+      const startX = this.root.position.x - other.root.position.x
+      const startZ = this.root.position.z - other.root.position.z
+      const startDistanceSquared = startX * startX + startZ * startZ
+
+      if (startDistanceSquared < minimumDistanceSquared) {
+        const startDistance = Math.sqrt(startDistanceSquared)
+        const normalX = startDistance > 0.0001
+          ? startX / startDistance
+          : this.id < other.id ? -1 : 1
+        const normalZ = startDistance > 0.0001 ? startZ / startDistance : 0
+        const inwardMovement = this.movementDelta.x * normalX
+          + this.movementDelta.z * normalZ
+        if (inwardMovement < 0) {
+          this.movementDelta.x -= normalX * inwardMovement
+          this.movementDelta.z -= normalZ * inwardMovement
+        }
+        // Repair any inherited overlap gradually. The cabin sweep runs again
+        // after this correction, so separating bodies cannot be nudged through
+        // a jamb or wall.
+        const correction = Math.min(
+          minimumDistance - startDistance + ZOMBIE_BODY_SWEEP_EPSILON,
+          0.08,
+        )
+        this.movementDelta.x += normalX * correction
+        this.movementDelta.z += normalZ * correction
+        continue
+      }
+
+      const movementLengthSquared = this.movementDelta.x * this.movementDelta.x
+        + this.movementDelta.z * this.movementDelta.z
+      if (movementLengthSquared < 0.00000001) break
+      const toward = startX * this.movementDelta.x
+        + startZ * this.movementDelta.z
+      if (toward >= 0) continue
+
+      // |start + movement * t| = minimumDistance. The earliest root is the
+      // contact time; stopping just before it preserves the configured speed
+      // everywhere that the route is clear and only trims an actual collision.
+      const clearance = startDistanceSquared - minimumDistanceSquared
+      const discriminant = toward * toward
+        - movementLengthSquared * clearance
+      if (discriminant < 0) continue
+      const contactTime = (
+        -toward - Math.sqrt(discriminant)
+      ) / movementLengthSquared
+      if (contactTime < 0 || contactTime > 1) continue
+
+      const safetyTime = ZOMBIE_BODY_SWEEP_EPSILON
+        / Math.sqrt(movementLengthSquared)
+      const allowedScale = Math.max(0, contactTime - safetyTime)
+      this.movementDelta.x *= allowedScale
+      this.movementDelta.z *= allowedScale
+    }
+  }
+
   private moveHorizontallyWithCollisions() {
     // Resolve each cabin's small fixed wall set as a swept horizontal circle
     // before the scene collision pass. This prevents a large knockback step or
     // a corner slide from crossing a thin wall, while Babylon continues to own
     // every other environment/player collision response.
     this.movementDelta.y = 0
+    abandonedStructures.zombieCollision.resolveMovement(
+      this.root.position,
+      this.movementDelta,
+      this.root.ellipsoid.x,
+    )
+    this.resolveMovementAgainstLivingZombies()
+    // Body-overlap recovery can add a small separating component. Re-run the
+    // fixed cabin sweep so knockback and local spacing share the same wall/frame
+    // containment guarantee at both cabins.
     abandonedStructures.zombieCollision.resolveMovement(
       this.root.position,
       this.movementDelta,
@@ -6671,6 +6879,31 @@ function hitZombieWithBullet(
   return true
 }
 
+function isWeaponRayTarget(mesh: AbstractMesh) {
+  // Supplying a predicate replaces Babylon's normal pick eligibility check; it
+  // does not run in addition to it. Reapply that default here so non-pickable
+  // zombie presentation/root meshes cannot win the nearest result ahead of the
+  // exact pickable hit-zone Mesh stored in zombieHitZones.
+  if (!mesh.isEnabled() || !mesh.isVisible || !mesh.isPickable) return false
+
+  // An open cabin disables collision on both its animated panel proxy and the
+  // full-aperture closed-door blocker. They are invisible gameplay meshes, so
+  // they must leave weapon picking at the same moment or they intercept shots
+  // in an opening that is visibly and physically clear.
+  if (
+    mesh.metadata?.zombieCabinObstacle === 'door'
+    && !mesh.checkCollisions
+  ) return false
+  return true
+}
+
+function pickNearestWeaponHit(ray: Ray) {
+  // Babylon's non-fast pick compares every eligible intersection and returns
+  // the nearest one. Zombie presentation meshes are non-pickable, leaving the
+  // nearest live hit-zone mesh or the first real piece of cover as the winner.
+  return scene.pickWithRay(ray, isWeaponRayTarget)
+}
+
 // The rifle's reload. The shotgun runs its own beginShotgunReload, so this
 // path must never run while the shotgun is selected.
 function beginReload() {
@@ -6748,7 +6981,7 @@ function fire() {
     weaponRay.direction.z += (Math.random() * 2 - 1) * spread
     weaponRay.direction.normalize()
   }
-  const result = scene.pickWithRay(weaponRay)
+  const result = pickNearestWeaponHit(weaponRay)
   if (!result?.hit || !result.pickedMesh) return
 
   const zombieHit = zombieHitZones.get(result.pickedMesh as Mesh)
@@ -6920,7 +7153,7 @@ function fireShotgun() {
     // the same zombie. View-model weapon and arm meshes are not pickable, and
     // the first blocking wall or prop simply wins the pick.
     diagnostics.pelletRaysCast += 1
-    const result = scene.pickWithRay(shotgunPelletRay)
+    const result = pickNearestWeaponHit(shotgunPelletRay)
     if (!result?.hit || !result.pickedMesh) {
       diagnostics.missedPellets += 1
       continue
@@ -7982,7 +8215,7 @@ if (import.meta.env.DEV) {
       },
       hitZombieAtAim() {
         camera.getForwardRayToRef(weaponRay, 100)
-        const result = scene.pickWithRay(weaponRay)
+        const result = pickNearestWeaponHit(weaponRay)
         const hitZone = result?.pickedMesh
           ? zombieHitZones.get(result.pickedMesh as Mesh)
           : undefined
@@ -8001,7 +8234,7 @@ if (import.meta.env.DEV) {
       },
       probeAim() {
         camera.getForwardRayToRef(weaponRay, 100)
-        const result = scene.pickWithRay(weaponRay)
+        const result = pickNearestWeaponHit(weaponRay)
         const hitZone = result?.pickedMesh
           ? zombieHitZones.get(result.pickedMesh as Mesh)
           : undefined
