@@ -6,6 +6,7 @@ export type LocalAssetKey =
   | 'shed'
   | 'ammoCrate'
   | 'utilityPole'
+  | 'rustyCar'
 
 export type LocalGlbPath = `/assets/${string}.glb`
 export type LocalTexturePath = `/assets/${string}/`
@@ -107,6 +108,8 @@ export interface AmmoCrateAssetDefinition extends LocalGlbAssetDefinition<'ammoC
 
 export interface UtilityPoleAssetDefinition extends LocalGlbAssetDefinition<'utilityPole'> {}
 
+export interface RustyCarAssetDefinition extends LocalGlbAssetDefinition<'rustyCar'> {}
+
 export interface LocalAssetDefinitions {
   readonly rifle: RifleAssetDefinition
   readonly shotgun: ShotgunAssetDefinition
@@ -115,6 +118,7 @@ export interface LocalAssetDefinitions {
   readonly shed: ShedAssetDefinition
   readonly ammoCrate: AmmoCrateAssetDefinition
   readonly utilityPole: UtilityPoleAssetDefinition
+  readonly rustyCar: RustyCarAssetDefinition
 }
 
 export interface LocalAssetConfiguration {
@@ -307,6 +311,26 @@ export const ASSET_CONFIG = {
         mode: 'source',
         minimumRoughness: 0.35,
         maximumEnvironmentIntensity: 0.7,
+      },
+    },
+    rustyCar: {
+      key: 'rustyCar',
+      label: 'Old Rusty Car',
+      path: '/assets/environment/vehicles/old_rusty_car.glb',
+      transform: {
+        // The Sketchfab wrapper embedded in the GLB already converts its
+        // selected LOW2 car template to metres and makes local +Z its length.
+        // Fixed world placement, yaw, and small size variation live in
+        // rustyCars.ts; grounding is measured from the instantiated vertices.
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+      },
+      animation: { speed: 1, autoplay: false, loop: false },
+      material: {
+        mode: 'source',
+        minimumRoughness: 0.4,
+        maximumEnvironmentIntensity: 0.65,
       },
     },
   },

@@ -84,6 +84,7 @@ import {
   logRuntimeWarning,
 } from './runtimeUtils'
 import { ShotgunAudioController } from './shotgunAudio'
+import { createRustyCars } from './rustyCars'
 import { createBrokenUtilityPoles } from './utilityPoles'
 import {
   createMuzzleCoreTexture,
@@ -979,6 +980,36 @@ canvas.dataset.utilityPoleCollisionCount = String(utilityPoles.collisionMeshCoun
 canvas.dataset.utilityPoleVisualMeshCount = String(utilityPoles.visualMeshCount)
 canvas.dataset.utilityPoleLocations = utilityPoles.placements
   .map(({ position }) => position.join(','))
+  .join('|')
+
+const rustyCarAssetResult = await localAssetManager.load('rustyCar')
+if (rustyCarAssetResult.status !== 'loaded') {
+  throw new Error(
+    `Required old rusty car GLB failed to load: ${rustyCarAssetResult.reason}`,
+  )
+}
+const rustyCars = createRustyCars({
+  castShadows: !isMobile && shadowGenerator !== null,
+  config: rustyCarAssetResult.config,
+  container: rustyCarAssetResult.container,
+  registerCollisionMesh(mesh) {
+    proceduralEnvironmentMeshes.push(mesh)
+  },
+  scene,
+  shadowGenerator,
+  worldLayerMask: WORLD_RENDER_LAYER_MASK,
+})
+canvas.dataset.rustyCarCount = String(rustyCars.placements.length)
+canvas.dataset.rustyCarSource = 'glb'
+canvas.dataset.rustyCarSharing = 'hardware-instanced-shared-geometry-materials-textures'
+canvas.dataset.rustyCarCollisionCount = String(rustyCars.collisionMeshCount)
+canvas.dataset.rustyCarColliderBaseDimensions =
+  rustyCars.colliderBaseDimensions.join(',')
+canvas.dataset.rustyCarVisualMeshCount = String(rustyCars.visualMeshCount)
+canvas.dataset.rustyCarPlacements = rustyCars.placements
+  .map(({ position, rotationY, scale }) => (
+    `${position.join(',')},${rotationY},${scale}`
+  ))
   .join('|')
 
 // One binding per cabin. Every cabin keeps its own door reference, doorway
