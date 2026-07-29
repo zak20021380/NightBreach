@@ -2540,6 +2540,18 @@ class Zombie {
     this.playerTargetAcquired = false
   }
 
+  refreshDoorwayNavigation() {
+    if (this.disposed || this._state === 'dead') return
+    // A closed-door obstacle probe may have turned both steering vectors away
+    // from the doorway. Re-run awareness on this frame and discard that cached
+    // turn whenever cabin 2 changes door state, especially on the second open.
+    this.thinkTimeRemaining = 0
+    this.desiredDirectionX = 0
+    this.desiredDirectionZ = 0
+    this.currentDirectionX = 0
+    this.currentDirectionZ = 0
+  }
+
   setPaused(paused: boolean) {
     if (this.disposed || this.animationPaused === paused) return
     if (paused) this.activeAnimation?.pause()
@@ -3910,7 +3922,17 @@ void initializeZombies().catch((error) => {
   logRuntimeError('[Zombies] Initialization failed:', error)
 })
 
+let secondaryZombieDoorState = secondaryCabinDoor?.door.state ?? null
+
 scene.onBeforeRenderObservable.add(() => {
+  const nextSecondaryZombieDoorState = secondaryCabinDoor?.door.state ?? null
+  if (nextSecondaryZombieDoorState !== secondaryZombieDoorState) {
+    secondaryZombieDoorState = nextSecondaryZombieDoorState
+    for (let index = 0; index < zombies.length; index += 1) {
+      zombies[index].refreshDoorwayNavigation()
+    }
+  }
+
   const deltaSeconds = Math.min(engine.getDeltaTime() / 1000, 0.05)
   let pauseZombieAI = !deployed || gameOver || !webViewActive || portraitInputPaused
   for (let index = 0; index < zombies.length; index += 1) {
