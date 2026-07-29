@@ -2302,21 +2302,22 @@ const ZOMBIE_DOORWAY_ALIGNMENT_START_DISTANCE = 1.4
 const ZOMBIE_DOORWAY_ALIGNMENT_COMPLETE_DISTANCE = 0.5
 const ZOMBIE_BODY_SPACING = 0.04
 const ZOMBIE_BODY_SWEEP_EPSILON = 0.003
+const ZOMBIE_DOORWAY_LEADER_PROGRESS_EPSILON = 0.01
+const ZOMBIE_DOORWAY_LEADER_STUCK_SECONDS = 0.8
 
 interface ZombieDoorwayQueueClaim {
   readonly cabinId: string
   readonly laneIndex: number
+  readonly owner: Zombie
 }
 
 interface ZombieDoorwayQueueState {
-  readonly lanes: ZombieDoorwayQueueClaim[][]
+  readonly claims: ZombieDoorwayQueueClaim[]
+  readonly slotCount: number
 }
 
-// One independent queue ledger per cabin. A claim stays in lane order while its
-// zombie approaches or crosses, then is removed as soon as that body clears the
-// inside waypoint. Removing the front claim advances every follower's rank and
-// therefore its longitudinal target without ever retargeting the whole pack to
-// one shared position.
+// One ordered ledger per cabin. Slot indices spread waiting bodies laterally,
+// but only claims[0] owns the threshold; there are never independent lane heads.
 const zombieDoorwayQueues = new Map<string, ZombieDoorwayQueueState>()
 const zombieDoorwayClaimProbe = Vector3.Zero()
 
@@ -2327,25 +2328,34 @@ function getZombieDoorwayQueue(
   let queue = zombieDoorwayQueues.get(cabin.cabinId)
   if (queue) return queue
   queue = {
-    lanes: Array.from(
-      { length: cabin.zombieDoorway.getEntrySlotCount(zombieRadius) },
-      () => [],
-    ),
+    claims: [],
+    slotCount: cabin.zombieDoorway.getEntrySlotCount(zombieRadius),
   }
   zombieDoorwayQueues.set(cabin.cabinId, queue)
   return queue
 }
 
+function pruneZombieDoorwayQueue(queue: ZombieDoorwayQueueState) {
+  for (let index = queue.claims.length - 1; index >= 0; index -= 1) {
+    const claim = queue.claims[index]
+    if (!claim.owner.ownsDoorwayQueueClaim(claim)) {
+      queue.claims.splice(index, 1)
+    }
+  }
+}
+
 function claimZombieDoorwayQueue(
   cabin: EnterableHouseResult,
-  zombiePosition: Vector3,
-  zombieRadius: number,
+  owner: Zombie,
 ) {
+  const zombiePosition = owner.root.position
+  const zombieRadius = owner.root.ellipsoid.x
   const queue = getZombieDoorwayQueue(cabin, zombieRadius)
+  pruneZombieDoorwayQueue(queue)
   let bestLaneIndex = 0
   let bestLaneOccupancy = Number.POSITIVE_INFINITY
   let bestDistanceSquared = Number.POSITIVE_INFINITY
-  for (let laneIndex = 0; laneIndex < queue.lanes.length; laneIndex += 1) {
+  for (let laneIndex = 0; laneIndex < queue.slotCount; laneIndex += 1) {
     cabin.zombieDoorway.getApproachSlotPositionToRef(
       zombieDoorwayClaimProbe,
       laneIndex,
@@ -2355,7 +2365,10 @@ function claimZombieDoorwayQueue(
     const offsetX = zombieDoorwayClaimProbe.x - zombiePosition.x
     const offsetZ = zombieDoorwayClaimProbe.z - zombiePosition.z
     const distanceSquared = offsetX * offsetX + offsetZ * offsetZ
-    const laneOccupancy = queue.lanes[laneIndex].length
+    let laneOccupancy = 0
+    for (let index = 0; index < queue.claims.length; index += 1) {
+      if (queue.claims[index].laneIndex === laneIndex) laneOccupancy += 1
+    }
     if (
       laneOccupancy < bestLaneOccupancy
       || (
@@ -2372,23 +2385,33 @@ function claimZombieDoorwayQueue(
   const claim: ZombieDoorwayQueueClaim = {
     cabinId: cabin.cabinId,
     laneIndex: bestLaneIndex,
+    owner,
   }
-  queue.lanes[bestLaneIndex].push(claim)
+  queue.claims.push(claim)
   return claim
 }
 
 function getZombieDoorwayQueueRank(claim: ZombieDoorwayQueueClaim) {
   const queue = zombieDoorwayQueues.get(claim.cabinId)
-  if (!queue) return 0
-  return Math.max(0, queue.lanes[claim.laneIndex]?.indexOf(claim) ?? 0)
+  if (!queue) return -1
+  pruneZombieDoorwayQueue(queue)
+  return queue.claims.indexOf(claim)
 }
 
 function releaseZombieDoorwayQueueClaim(claim: ZombieDoorwayQueueClaim) {
   const queue = zombieDoorwayQueues.get(claim.cabinId)
-  const lane = queue?.lanes[claim.laneIndex]
-  if (!lane) return
-  const claimIndex = lane.indexOf(claim)
-  if (claimIndex >= 0) lane.splice(claimIndex, 1)
+  if (!queue) return
+  const claimIndex = queue.claims.indexOf(claim)
+  if (claimIndex >= 0) queue.claims.splice(claimIndex, 1)
+}
+
+function promoteZombieDoorwayQueueClaim(claim: ZombieDoorwayQueueClaim) {
+  const queue = zombieDoorwayQueues.get(claim.cabinId)
+  if (!queue) return
+  const claimIndex = queue.claims.indexOf(claim)
+  if (claimIndex <= 0) return
+  queue.claims.splice(claimIndex, 1)
+  queue.claims.unshift(claim)
 }
 
 function getCabinContainingPosition(position: Vector3) {
@@ -2433,6 +2456,9 @@ class Zombie {
   private chasingPlayerDirectly = true
   private doorwayRouteWaiting = false
   private doorwayQueueClaim: ZombieDoorwayQueueClaim | null = null
+  private doorwayLeaderForwardProgress = Number.NEGATIVE_INFINITY
+  private doorwayLeaderStuckSeconds = 0
+  private readonly ignoredQueueFollowerColliders: Mesh[] = []
   private chaseSteeringMode: ZombieChaseSteeringMode = 'player'
   private desiredDirectionX = 0
   private desiredDirectionZ = 0
@@ -2558,6 +2584,20 @@ class Zombie {
     return this.playerTargetAcquired
   }
 
+  ownsDoorwayQueueClaim(claim: ZombieDoorwayQueueClaim) {
+    return (
+      this.doorwayQueueClaim === claim
+      && !this.disposed
+      && this._state !== 'dead'
+      && this._state !== 'hit'
+      && this._state !== 'attacking'
+      && this.knockbackRemaining <= 0
+      && this.playerTargetAcquired
+      && this.doorwayRouteCabin?.cabinId === claim.cabinId
+      && this.doorwayRouteStage !== 'player'
+    )
+  }
+
   get currentHealth() {
     return this.health
   }
@@ -2624,6 +2664,9 @@ class Zombie {
     if (this.disposed || this._state === 'dead' || initialSpeed <= 0) return
     const length = Math.hypot(directionX, directionZ)
     if (length < 0.001) return
+    // A displaced queue member must not retain a position it is no longer
+    // occupying. This is especially important for the active threshold owner.
+    this.abandonDoorwayQueuePosition()
     this.knockbackDirectionX = directionX / length
     this.knockbackDirectionZ = directionZ / length
     this.knockbackSpeed = Math.min(
@@ -2694,6 +2737,11 @@ class Zombie {
 
   setState(nextState: ZombieState) {
     if (this.disposed || this._state === nextState) return
+    if (
+      nextState === 'hit'
+      || nextState === 'dead'
+      || nextState === 'attacking'
+    ) this.abandonDoorwayQueuePosition()
     this._state = nextState
     if (nextState !== 'chasing') {
       this.desiredDirectionX = 0
@@ -2725,6 +2773,38 @@ class Zombie {
     if (!this.doorwayQueueClaim) return
     releaseZombieDoorwayQueueClaim(this.doorwayQueueClaim)
     this.doorwayQueueClaim = null
+    this.resetDoorwayLeaderWatchdog()
+  }
+
+  private resetDoorwayLeaderWatchdog() {
+    this.doorwayLeaderForwardProgress = Number.NEGATIVE_INFINITY
+    this.doorwayLeaderStuckSeconds = 0
+  }
+
+  private abandonDoorwayQueuePosition() {
+    if (!this.doorwayQueueClaim) return
+    this.releaseDoorwayQueueClaim()
+    if (this.doorwayRouteStage === 'inside') {
+      // An interrupted crosser returns to the ordered outside route when it
+      // resumes. It cannot keep an inside target after forfeiting ownership.
+      this.setDoorwayRouteStage('outside')
+    }
+    this.thinkTimeRemaining = 0
+  }
+
+  private isDoorwayQueueLeader() {
+    return this.doorwayQueueClaim !== null
+      && getZombieDoorwayQueueRank(this.doorwayQueueClaim) === 0
+  }
+
+  private hasDoorwayQueuePriorityOver(other: Zombie) {
+    if (!this.isDoorwayQueueLeader()) return false
+    const leaderClaim = this.doorwayQueueClaim
+    const otherClaim = other.doorwayQueueClaim
+    return leaderClaim !== null
+      && otherClaim !== null
+      && otherClaim.cabinId === leaderClaim.cabinId
+      && getZombieDoorwayQueueRank(otherClaim) > 0
   }
 
   private clearDoorwayRoute() {
@@ -2754,23 +2834,35 @@ class Zombie {
   }
 
   private updateDoorwayQueueWaypoints(cabin: EnterableHouseResult) {
+    let queueRank = this.doorwayQueueClaim
+      ? getZombieDoorwayQueueRank(this.doorwayQueueClaim)
+      : -1
     if (
       !this.doorwayQueueClaim
       || this.doorwayQueueClaim.cabinId !== cabin.cabinId
+      || queueRank < 0
     ) {
       this.releaseDoorwayQueueClaim()
       this.doorwayQueueClaim = claimZombieDoorwayQueue(
         cabin,
-        this.root.position,
-        this.root.ellipsoid.x,
+        this,
       )
+      queueRank = getZombieDoorwayQueueRank(this.doorwayQueueClaim)
     }
 
-    const queueRank = getZombieDoorwayQueueRank(this.doorwayQueueClaim)
+    const slotCount = cabin.zombieDoorway.getEntrySlotCount(
+      this.root.ellipsoid.x,
+    )
+    const waitingLaneIndex = queueRank === 0
+      ? this.doorwayQueueClaim.laneIndex
+      : (queueRank - 1) % slotCount
+    const waitingRow = queueRank === 0
+      ? 0
+      : Math.floor((queueRank - 1) / slotCount) + 1
     cabin.zombieDoorway.getApproachSlotPositionToRef(
       this.doorwayApproachPosition,
-      this.doorwayQueueClaim.laneIndex,
-      queueRank,
+      waitingLaneIndex,
+      waitingRow,
       this.root.ellipsoid.x,
     )
     cabin.zombieDoorway.getInsideSlotPositionToRef(
@@ -2821,21 +2913,12 @@ class Zombie {
       this.root.ellipsoid.x,
     )
     if (this.doorwayRouteStage === 'inside') {
-      const insideOffsetX =
-        this.root.position.x - this.doorwayInsidePosition.x
-      const insideOffsetZ =
-        this.root.position.z - this.doorwayInsidePosition.z
-      const doorwaySpanX =
-        this.doorwayInsidePosition.x - this.doorwayApproachPosition.x
-      const doorwaySpanZ =
-        this.doorwayInsidePosition.z - this.doorwayApproachPosition.z
-      const reachedInsidePoint =
-        insideOffsetX * insideOffsetX + insideOffsetZ * insideOffsetZ
-          <= ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE_SQUARED
-        // A knockback can carry the body beyond the waypoint between think
-        // ticks. Passing its inward plane counts as completing that target.
-        || insideOffsetX * doorwaySpanX + insideOffsetZ * doorwaySpanZ >= 0
-      if (reachedInsidePoint || (zombieFullyInside && !doorway.passable)) {
+      if (doorway.hasFullyCrossedInteriorPlane(
+        this.root.position,
+        this.root.ellipsoid.x,
+      )) {
+        // Release on the first full-radius crossing of the frame's inner plane,
+        // rather than retaining ownership all the way to the distant waypoint.
         this.setDoorwayRouteStage('player')
       }
     } else if (zombieFullyInside) {
@@ -2905,6 +2988,13 @@ class Zombie {
       || this._state === 'dead'
       || !this.playerTargetAcquired
     ) return
+    // Interrupted zombies have already yielded their claim. Let their normal
+    // recovery tick rebuild the route instead of re-inserting an inactive owner
+    // merely because the door changed state.
+    if (this._state === 'attacking' || this._state === 'hit') {
+      this.thinkTimeRemaining = 0
+      return
+    }
     this.selectChaseGoal(playerPosition)
     if (this.doorwayRouteCabin !== cabin) return
 
@@ -2916,10 +3006,120 @@ class Zombie {
     this.desiredDirectionZ = 0
     this.currentDirectionX = 0
     this.currentDirectionZ = 0
-    // Preserve attack and hit-reaction timing. Idle/chasing zombies can safely
-    // install the new rush vector synchronously on the door-open frame.
-    if (this._state === 'attacking' || this._state === 'hit') return
     this.updateAwarenessAndSteering(playerPosition)
+  }
+
+  private updateDoorwayQueueLiveness(
+    deltaSeconds: number,
+    playerPosition: Vector3,
+  ) {
+    const claim = this.doorwayQueueClaim
+    if (!claim) {
+      this.resetDoorwayLeaderWatchdog()
+      return
+    }
+
+    const cabin = this.doorwayRouteCabin
+    const playerCabin = getCabinContainingPosition(playerPosition)
+    if (
+      !cabin
+      || cabin.cabinId !== claim.cabinId
+      || playerCabin !== cabin
+      || this.doorwayRouteStage === 'player'
+    ) {
+      // Player distance is deliberately absent: only leaving/changing the
+      // containing cabin invalidates the route.
+      this.abandonDoorwayQueuePosition()
+      return
+    }
+
+    const queueRank = getZombieDoorwayQueueRank(claim)
+    if (queueRank < 0) {
+      this.doorwayQueueClaim = null
+      this.resetDoorwayLeaderWatchdog()
+      this.thinkTimeRemaining = 0
+      return
+    }
+    if (queueRank > 0) {
+      // A former owner that was interrupted and requeued may never retain its
+      // crossing stage while another claim is ahead of it.
+      if (this.doorwayRouteStage === 'inside') {
+        this.abandonDoorwayQueuePosition()
+      } else {
+        this.resetDoorwayLeaderWatchdog()
+      }
+      return
+    }
+
+    const doorway = cabin.zombieDoorway
+    if (
+      this.doorwayRouteStage === 'inside'
+      && doorway.hasFullyCrossedInteriorPlane(
+        this.root.position,
+        this.root.ellipsoid.x,
+      )
+    ) {
+      this.setDoorwayRouteStage('player')
+      this.thinkTimeRemaining = 0
+      return
+    }
+
+    if (
+      this.doorwayRouteStage !== 'inside'
+      || !doorway.passable
+      || !doorway.containsPassagePosition(
+        this.root.position,
+        this.root.ellipsoid.x,
+      )
+    ) {
+      this.resetDoorwayLeaderWatchdog()
+      return
+    }
+
+    const spanX = this.doorwayInsidePosition.x
+      - this.doorwayApproachPosition.x
+    const spanZ = this.doorwayInsidePosition.z
+      - this.doorwayApproachPosition.z
+    const spanLength = Math.hypot(spanX, spanZ)
+    if (spanLength < 0.001) {
+      this.resetDoorwayLeaderWatchdog()
+      return
+    }
+    const forwardProgress = (
+      (this.root.position.x - this.doorwayApproachPosition.x) * spanX
+      + (this.root.position.z - this.doorwayApproachPosition.z) * spanZ
+    ) / spanLength
+    if (
+      !Number.isFinite(this.doorwayLeaderForwardProgress)
+      || forwardProgress
+        >= this.doorwayLeaderForwardProgress
+          + ZOMBIE_DOORWAY_LEADER_PROGRESS_EPSILON
+    ) {
+      this.doorwayLeaderForwardProgress = forwardProgress
+      this.doorwayLeaderStuckSeconds = 0
+      return
+    }
+
+    this.doorwayLeaderStuckSeconds += deltaSeconds
+    if (
+      this.doorwayLeaderStuckSeconds
+      < ZOMBIE_DOORWAY_LEADER_STUCK_SECONDS
+    ) return
+
+    // Replace the blocked head's claim and rebuild from its actual position.
+    // No transform is changed; the normal swept movement remains the only way
+    // this zombie can return to the threshold.
+    this.clearDoorwayRoute()
+    this.thinkTimeRemaining = 0
+    this.selectChaseGoal(playerPosition)
+    const rebuiltClaim = this.doorwayQueueClaim
+    if (rebuiltClaim && this.doorwayRouteCabin === cabin) {
+      // The watchdog runs only after crossing ownership began. Keep this body
+      // at the head while it backs out and retries, because yielding a body
+      // already in the threshold would make a follower cross through it.
+      promoteZombieDoorwayQueueClaim(rebuiltClaim)
+      this.updateDoorwayQueueWaypoints(cabin)
+    }
   }
 
   setPaused(paused: boolean) {
@@ -3027,6 +3227,7 @@ class Zombie {
       this.updateMovement(deltaSeconds, playerPosition)
     }
 
+    this.updateDoorwayQueueLiveness(deltaSeconds, playerPosition)
     this.updateProceduralAnimation(deltaSeconds)
   }
 
@@ -3113,6 +3314,10 @@ class Zombie {
         other === this
         || other.eliminated
         || !other.root.isEnabled()
+        // Queue followers yield collision priority to their one cabin leader.
+        // The reverse is not skipped, so every follower is still swept against
+        // the leader and cannot enter its occupied threshold space.
+        || this.hasDoorwayQueuePriorityOver(other)
       ) continue
 
       const minimumDistance = this.root.ellipsoid.x
@@ -3194,7 +3399,35 @@ class Zombie {
       this.movementDelta,
       this.root.ellipsoid.x,
     )
-    this.root.moveWithCollisions(this.movementDelta)
+    // Babylon's scene collision pass would otherwise reintroduce the follower
+    // contacts deliberately skipped by the ordered body sweep above. Disable
+    // only those follower roots for the duration of this leader's one move;
+    // cabin walls, jambs, corners, and the live door remain fully collidable.
+    this.ignoredQueueFollowerColliders.length = 0
+    for (let index = 0; index < zombies.length; index += 1) {
+      const other = zombies[index]
+      if (
+        other === this
+        || other.eliminated
+        || !other.root.isEnabled()
+        || !other.root.checkCollisions
+        || !this.hasDoorwayQueuePriorityOver(other)
+      ) continue
+      other.root.checkCollisions = false
+      this.ignoredQueueFollowerColliders.push(other.root)
+    }
+    try {
+      this.root.moveWithCollisions(this.movementDelta)
+    } finally {
+      for (
+        let index = 0;
+        index < this.ignoredQueueFollowerColliders.length;
+        index += 1
+      ) {
+        this.ignoredQueueFollowerColliders[index].checkCollisions = true
+      }
+      this.ignoredQueueFollowerColliders.length = 0
+    }
     // Babylon may return a vertical slide while resolving contact even when the
     // requested displacement has Y=0. Restore the body-centred collider to its
     // one absolute ground height after retaining collision-aware X/Z movement.
@@ -3615,6 +3848,7 @@ class Zombie {
       const other = zombies[index]
       // Dead and disposed zombies are ignored: corpses must not steer the pack.
       if (other === this || other.eliminated || !other.root.isEnabled()) continue
+      if (this.hasDoorwayQueuePriorityOver(other)) continue
 
       const offsetX = this.root.position.x - other.root.position.x
       const offsetZ = this.root.position.z - other.root.position.z
@@ -4415,8 +4649,9 @@ function resetZombieWave() {
   stopZombieWaveTimers()
   for (let index = 0; index < zombies.length; index += 1) zombies[index].dispose()
   zombies.length = 0
-  // Disposal already releases each lane; zeroing here guarantees a restart can
-  // never inherit a stale count and skew the first wave's spread.
+  // Disposal releases owned claims; clearing the ledgers also removes any
+  // orphaned entry left by an interrupted teardown before the next wave.
+  zombieDoorwayQueues.clear()
   resetApproachSlots()
   activeZombieCount = 0
   nextZombieId = 1

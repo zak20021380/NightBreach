@@ -107,6 +107,14 @@ export interface ZombieCabinDoorwayState {
     clearance?: number,
   ) => boolean
   /**
+   * True once the body's trailing edge is beyond the inner face of the front
+   * frame. At that point the complete horizontal collider has left the doorway.
+   */
+  hasFullyCrossedInteriorPlane: (
+    position: Vector3,
+    clearance: number,
+  ) => boolean
+  /**
    * Tests only the opening's lateral clear interval after expanding both jambs
    * by a body radius. A route may begin its inside leg only from this interval.
    */
@@ -994,6 +1002,12 @@ export function createEnterableCabin(
         && localX <= interiorMaximumX - safeClearance
         && localZ >= interiorMinimumZ + safeClearance
         && localZ <= interiorMaximumZ - safeClearance
+    },
+    hasFullyCrossedInteriorPlane(position, clearance) {
+      const worldX = position.x - cabin.x
+      const worldZ = position.z - cabin.z
+      const localZ = worldX * collisionSine + worldZ * collisionCosine
+      return localZ >= interiorMinimumZ + Math.max(0, clearance)
     },
     containsPassagePosition(position, clearance) {
       const worldX = position.x - cabin.x
