@@ -33,6 +33,7 @@ import {
   LocalAssetManager,
 } from './assets/localAssetManager'
 import { createAbandonedStructures } from './abandonedStructures'
+import { createAmmoCrate } from './ammoCrate'
 import {
   type EnterableHouseResult,
   type InteractiveHouseDoor,
@@ -179,6 +180,8 @@ let cancelMobileInput: () => void = () => undefined
 let stopZombieWaveTimers: () => void = () => undefined
 let startZombieWave: () => void = () => undefined
 let releaseZombiePlayerTargets: () => void = () => undefined
+let resupplyFromAmmoCrate: () => string | null = () => null
+let resetAmmoCrateForNextWave: () => void = () => undefined
 let portraitInputPaused = isTouchDevice && window.innerHeight > window.innerWidth
 
 function gameplayInputEnabled() {
@@ -933,6 +936,24 @@ canvas.dataset.interiorObjectCount = String(
   abandonedStructures.enterableHouse.interior.objects.length,
 )
 
+const ammoCrateAssetResult = await localAssetManager.load('ammoCrate')
+if (ammoCrateAssetResult.status !== 'loaded') {
+  throw new Error(
+    `Required ammo crate GLB failed to load: ${ammoCrateAssetResult.reason}`,
+  )
+}
+const ammoCrate = createAmmoCrate({
+  cabin: abandonedStructures.enterableHouse,
+  config: ammoCrateAssetResult.config,
+  container: ammoCrateAssetResult.container,
+  scene,
+  shadowGenerator,
+  worldLayerMask: WORLD_RENDER_LAYER_MASK,
+})
+canvas.dataset.ammoCrateCabin = abandonedStructures.enterableHouse.cabinId
+canvas.dataset.ammoCrateSource = 'glb'
+canvas.dataset.ammoCrateVisualMeshCount = String(ammoCrate.visualMeshCount)
+
 // One binding per cabin. Every cabin keeps its own door reference, doorway
 // position, and interaction range, so the prompt and the toggle always act on
 // the cabin the player is actually standing at.
@@ -981,8 +1002,14 @@ if (secondaryCabinDoor) {
 let activeCabinDoor: CabinDoorBinding | null = null
 let doorInteractionAvailable = false
 let doorPromptAction: 'Open' | 'Close' = 'Open'
-let renderedDoorUiVisible = false
-let renderedDoorUiAction: 'Open' | 'Close' | null = null
+let ammoCrateInteractionAvailable = false
+let interactionFeedbackText: string | null = null
+let interactionFeedbackExpiresAt = 0
+let renderedInteractionUiVisible = false
+let renderedInteractionUiText: string | null = null
+let renderedInteractionTarget: 'door' | 'ammoCrate' | null = null
+const AMMO_CRATE_INTERACTION_DISTANCE_SQUARED = 1.65 * 1.65
+const INTERACTION_FEEDBACK_DURATION_MS = 1_800
 
 function publishDoorDatasets() {
   canvas.dataset.doorState = frontDoor.state
@@ -996,34 +1023,77 @@ function publishDoorDatasets() {
     String(secondaryCabinDoor.door.panel.checkCollisions)
 }
 
-function setDoorInteractionUi(binding: CabinDoorBinding | null) {
+function clearInteractionFeedback() {
+  interactionFeedbackText = null
+  interactionFeedbackExpiresAt = 0
+}
+
+function showInteractionFeedback(text: string) {
+  interactionFeedbackText = text
+  interactionFeedbackExpiresAt = performance.now() + INTERACTION_FEEDBACK_DURATION_MS
+  renderedInteractionUiText = null
+  updateDoorInteractionUi()
+}
+
+function setDoorInteractionUi(
+  binding: CabinDoorBinding | null,
+  ammoCrateInRange = false,
+) {
   activeCabinDoor = binding
-  const visible = binding !== null
-  doorInteractionAvailable = visible
+  ammoCrateInteractionAvailable = ammoCrateInRange
+  doorInteractionAvailable = binding !== null
   // With no cabin in range the prompt still reports the first cabin's action,
   // exactly as the single-cabin version did.
   const action = (binding ?? primaryCabinDoor).door.state === 'open'
     ? 'Close'
     : 'Open'
   doorPromptAction = action
-  if (visible === renderedDoorUiVisible && action === renderedDoorUiAction) return
-  renderedDoorUiVisible = visible
-  renderedDoorUiAction = action
-  if (isDesktop) {
-    const text = `Press E to ${action}`
-    if (doorPrompt.textContent !== text) doorPrompt.textContent = text
-    doorPrompt.classList.toggle('visible', visible)
-    doorPrompt.setAttribute('aria-hidden', String(!visible))
+
+  if (
+    interactionFeedbackText
+    && performance.now() >= interactionFeedbackExpiresAt
+  ) clearInteractionFeedback()
+  const feedbackVisible = interactionFeedbackText !== null
+  const target = ammoCrateInRange ? 'ammoCrate' : binding ? 'door' : null
+  const visible = feedbackVisible || target !== null
+  const text = interactionFeedbackText
+    ?? (target === 'ammoCrate'
+      ? 'Press E to Resupply'
+      : target === 'door'
+        ? `Press E to ${action}`
+        : null)
+  if (
+    visible === renderedInteractionUiVisible
+    && text === renderedInteractionUiText
+    && target === renderedInteractionTarget
+  ) return
+  renderedInteractionUiVisible = visible
+  renderedInteractionUiText = text
+  renderedInteractionTarget = target
+
+  if (text !== null && doorPrompt.textContent !== text) {
+    doorPrompt.textContent = text
   }
+  const promptVisible = isDesktop ? visible : feedbackVisible
+  doorPrompt.classList.toggle('visible', promptVisible)
+  doorPrompt.setAttribute('aria-hidden', String(!promptVisible))
   if (isTouchDevice) {
-    useButton.classList.toggle('visible', visible)
-    useButton.setAttribute('aria-hidden', String(!visible))
+    const useVisible = target !== null
+    useButton.classList.toggle('visible', useVisible)
+    useButton.setAttribute('aria-hidden', String(!useVisible))
+    useButton.textContent = target === 'ammoCrate' ? 'SUPPLY' : 'USE'
+    useButton.setAttribute(
+      'aria-label',
+      target === 'ammoCrate' ? 'Resupply ammunition' : 'Use door',
+    )
   }
-  canvas.dataset.doorInteractionAvailable = String(visible)
+  canvas.dataset.doorInteractionAvailable = String(binding !== null)
+  canvas.dataset.ammoCrateInteractionAvailable = String(ammoCrateInRange)
 }
 
 function updateDoorInteractionUi() {
   if (!gameplayInputEnabled()) {
+    clearInteractionFeedback()
     setDoorInteractionUi(null)
     return
   }
@@ -1032,7 +1102,18 @@ function updateDoorInteractionUi() {
   // the moving door pose can never hide the control from a nearby player. A
   // cabin whose own door is mid-animation offers no prompt.
   let nearestBinding: CabinDoorBinding | null = null
-  let nearestDistanceSquared = Number.POSITIVE_INFINITY
+  const ammoCrateDistanceX =
+    ammoCrate.interactionPosition.x - camera.globalPosition.x
+  const ammoCrateDistanceZ =
+    ammoCrate.interactionPosition.z - camera.globalPosition.z
+  const ammoCrateDistanceSquared =
+    ammoCrateDistanceX * ammoCrateDistanceX
+    + ammoCrateDistanceZ * ammoCrateDistanceZ
+  const ammoCrateInRange = waveState.currentWave > 0
+    && ammoCrateDistanceSquared <= AMMO_CRATE_INTERACTION_DISTANCE_SQUARED
+  let nearestDistanceSquared = ammoCrateInRange
+    ? ammoCrateDistanceSquared
+    : Number.POSITIVE_INFINITY
   for (const binding of cabinDoors) {
     if (binding.door.isAnimating) continue
     const distanceX = binding.doorwayPosition.x - camera.globalPosition.x
@@ -1043,11 +1124,17 @@ function updateDoorInteractionUi() {
     nearestBinding = binding
     nearestDistanceSquared = distanceSquared
   }
-  setDoorInteractionUi(nearestBinding)
+  setDoorInteractionUi(nearestBinding, ammoCrateInRange && nearestBinding === null)
 }
 
 useDoorInteraction = () => {
   if (!gameplayInputEnabled()) return false
+  if (ammoCrateInteractionAvailable) {
+    const feedback = resupplyFromAmmoCrate()
+    if (feedback === null) return false
+    showInteractionFeedback(feedback)
+    return true
+  }
   const binding = activeCabinDoor
   if (!binding) return false
   // Only the cabin in range toggles; the other cabin's door keeps its state.
@@ -4584,6 +4671,7 @@ function startNextZombieWave() {
     || nextWaveTimer !== undefined) return
 
   stopZombieWaveTimers()
+  resetAmmoCrateForNextWave()
   waveState.currentWave += 1
   waveState.scheduledZombies = Math.min(
     ZOMBIE_WAVE_CONFIG.baseZombieCount
@@ -7094,8 +7182,11 @@ function deactivateWeaponSwitchButton() {
   weaponSwitchButton.classList.remove('active')
 }
 
+const RIFLE_RESERVE_LIMIT = 120
+const AMMO_CRATE_AK_ROUNDS = 30
+const AMMO_CRATE_SHOTGUN_SHELLS = 4
 let magazineAmmo = 30
-let reserveAmmo = 120
+let reserveAmmo = RIFLE_RESERVE_LIMIT
 let recoilAmount = 0
 let muzzleFlashRemaining = 0
 let reloadElapsed = -1
@@ -7131,6 +7222,42 @@ const {
     hitMarker,
   },
 })
+let ammoCrateUsedThisWave = false
+
+function publishAmmoCrateState() {
+  canvas.dataset.ammoCrateUsedThisWave = String(ammoCrateUsedThisWave)
+}
+
+resetAmmoCrateForNextWave = () => {
+  ammoCrateUsedThisWave = false
+  clearInteractionFeedback()
+  publishAmmoCrateState()
+}
+
+resupplyFromAmmoCrate = () => {
+  if (ammoCrateUsedThisWave) return 'Already used this wave'
+
+  ammoCrateUsedThisWave = true
+  const akRoundsReceived = Math.min(
+    AMMO_CRATE_AK_ROUNDS,
+    Math.max(0, RIFLE_RESERVE_LIMIT - reserveAmmo),
+  )
+  const shotgunShellsReceived = Math.min(
+    AMMO_CRATE_SHOTGUN_SHELLS,
+    Math.max(
+      0,
+      SHOTGUN_COMBAT_CONFIG.startingReserveShells - shotgunReserveShells,
+    ),
+  )
+  reserveAmmo += akRoundsReceived
+  shotgunReserveShells += shotgunShellsReceived
+  updateAmmoDisplay()
+  publishAmmoCrateState()
+  return `Received ${akRoundsReceived} AK rounds and `
+    + `${shotgunShellsReceived} shotgun shells`
+}
+
+publishAmmoCrateState()
 let movementPointerId: number | null = null
 let aimPointerId: number | null = null
 let firePointerId: number | null = null
@@ -7801,7 +7928,7 @@ function restartPrototype() {
   bloodEffectPool.reset()
   playerHealthController.resetHealth()
   magazineAmmo = 30
-  reserveAmmo = 120
+  reserveAmmo = RIFLE_RESERVE_LIMIT
   reloadElapsed = -1
   reloadApplied = false
   // The shotgun restarts on its configured loadout with no reload or pump

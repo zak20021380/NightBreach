@@ -4,6 +4,7 @@ export type LocalAssetKey =
   | 'zombie'
   | 'environment'
   | 'shed'
+  | 'ammoCrate'
 
 export type LocalGlbPath = `/assets/${string}.glb`
 export type LocalTexturePath = `/assets/${string}/`
@@ -101,12 +102,15 @@ export interface EnvironmentAssetDefinition extends LocalGlbAssetDefinition<'env
 
 export interface ShedAssetDefinition extends LocalGlbAssetDefinition<'shed'> {}
 
+export interface AmmoCrateAssetDefinition extends LocalGlbAssetDefinition<'ammoCrate'> {}
+
 export interface LocalAssetDefinitions {
   readonly rifle: RifleAssetDefinition
   readonly shotgun: ShotgunAssetDefinition
   readonly zombie: ZombieAssetDefinition
   readonly environment: EnvironmentAssetDefinition
   readonly shed: ShedAssetDefinition
+  readonly ammoCrate: AmmoCrateAssetDefinition
 }
 
 export interface LocalAssetConfiguration {
@@ -263,6 +267,21 @@ export const ASSET_CONFIG = {
         position: [-15.6, 0, 19.7],
         rotation: [0, 3.101592653589793, 0],
         scale: [0.0132, 0.0132, 0.0132],
+      },
+      animation: { speed: 1, autoplay: false, loop: false },
+      material: { mode: 'source' },
+    },
+    ammoCrate: {
+      key: 'ammoCrate',
+      label: 'Ammo Crate',
+      path: '/assets/props/ammo/ammo_crate.glb',
+      transform: {
+        // The GLB is already authored at a natural 0.904 x 0.527 x 0.550 m.
+        // Keep that meter scale and let the cabin placement wrapper provide
+        // only its world position, wall-aligned yaw, and ground correction.
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
       },
       animation: { speed: 1, autoplay: false, loop: false },
       material: { mode: 'source' },
