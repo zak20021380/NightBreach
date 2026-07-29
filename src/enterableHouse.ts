@@ -87,6 +87,14 @@ export interface ZombieCabinCollision {
   blocksObstacleProbe: (mesh: AbstractMesh) => boolean
 }
 
+export interface ZombieCabinDoorwayState {
+  /** Changes whenever this cabin's doorway switches between blocked/passable. */
+  readonly revision: number
+  /** True only after the door has completed its opening animation. */
+  readonly passable: boolean
+  getPositionToRef: (result: Vector3) => void
+}
+
 export interface EnterableHouseResult {
   asset: WoodenShedAssetSummary
   /** Stable id shared with this cabin's collider metadata. */
@@ -108,6 +116,7 @@ export interface EnterableHouseResult {
   weatherShelters: readonly WeatherShelter[]
   winterSurfaces: readonly WinterSurface[]
   zombieCollision: ZombieCabinCollision
+  zombieDoorway: ZombieCabinDoorwayState
 }
 
 export const DEFAULT_CABIN_INTERACTION_DISTANCE = 2.2
@@ -522,6 +531,17 @@ export function createEnterableCabin(
   )
   let doorState: InteractiveDoorState = 'closed'
   let doorProgress = 0
+  let zombieDoorwayPassable = false
+  let zombieDoorwayRevision = 0
+
+  function syncZombieDoorwayPassability() {
+    const nextPassable = doorState === 'open'
+    const passabilityChanged = nextPassable !== zombieDoorwayPassable
+    zombieDoorwayPassable = nextPassable
+    doorPanel.checkCollisions = !nextPassable
+    closedDoorwayBlocker.checkCollisions = !nextPassable
+    if (passabilityChanged) zombieDoorwayRevision += 1
+  }
 
   const collisionCosine = Math.cos(cabin.rotationY)
   const collisionSine = Math.sin(cabin.rotationY)
@@ -530,7 +550,7 @@ export function createEnterableCabin(
       const obstacleKind = mesh.metadata?.zombieCabinObstacle
       const ownsMesh = mesh.metadata?.zombieCabinId === cabin.structureId
       if (ownsMesh && obstacleKind === 'wall') return true
-      if (ownsMesh && obstacleKind === 'door') return doorState !== 'open'
+      if (ownsMesh && obstacleKind === 'door') return !zombieDoorwayPassable
       return mesh.checkCollisions
     },
     resolveMovement(position, movement, radius) {
@@ -562,7 +582,7 @@ export function createEnterableCabin(
         let collisionNormalZ = 0
         let collided = false
         const barrierCount = layout.staticZombieWallBounds.length
-          + (doorState === 'open' ? 0 : 1)
+          + (zombieDoorwayPassable ? 0 : 1)
 
         for (let index = 0; index < barrierCount; index += 1) {
           const bounds = index < layout.staticZombieWallBounds.length
@@ -662,6 +682,18 @@ export function createEnterableCabin(
     doorPanel.computeWorldMatrix(true)
   }
 
+  const zombieDoorway: ZombieCabinDoorwayState = {
+    get revision() {
+      return zombieDoorwayRevision
+    },
+    get passable() {
+      return zombieDoorwayPassable
+    },
+    getPositionToRef(result) {
+      result.copyFrom(doorwayPosition)
+    },
+  }
+
   const frontDoor: InteractiveHouseDoor = {
     panel: doorPanel,
     get state() {
@@ -676,13 +708,15 @@ export function createEnterableCabin(
     reset() {
       doorProgress = 0
       doorState = 'closed'
-      doorPanel.checkCollisions = true
-      closedDoorwayBlocker.checkCollisions = true
+      syncZombieDoorwayPassability()
       applyDoorPose()
     },
     toggle() {
       if (doorState === 'opening' || doorState === 'closing') return false
       doorState = doorState === 'closed' ? 'opening' : 'closing'
+      // Closing revokes passability immediately. Opening remains blocked until
+      // the authored animation reaches its fully-open state.
+      syncZombieDoorwayPassability()
       return true
     },
     update(deltaSeconds) {
@@ -699,8 +733,7 @@ export function createEnterableCabin(
       // invisible blocker active through motion and while closed, then disable
       // it only in the fully-open state so player entry cannot catch on the
       // hinge-side edge of the lightweight box.
-      doorPanel.checkCollisions = doorState !== 'open'
-      closedDoorwayBlocker.checkCollisions = doorState !== 'open'
+      syncZombieDoorwayPassability()
       applyDoorPose()
     },
   }
@@ -739,6 +772,7 @@ export function createEnterableCabin(
     }],
     winterSurfaces: [],
     zombieCollision,
+    zombieDoorway,
   }
 }
 

@@ -64,7 +64,7 @@ export function createAbandonedStructures(
       const cabin = cabinsById.get(mesh.metadata?.zombieCabinId)
       if (!cabin) return mesh.checkCollisions
       if (obstacleKind === 'wall') return true
-      if (obstacleKind === 'door') return cabin.frontDoor.state !== 'open'
+      if (obstacleKind === 'door') return !cabin.zombieDoorway.passable
       return mesh.checkCollisions
     },
     resolveMovement(position, movement, radius) {

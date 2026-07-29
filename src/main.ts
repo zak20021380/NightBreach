@@ -965,6 +965,12 @@ const doorwayPosition = primaryCabinDoor.doorwayPosition
 const cabinDoorPanels = new Set<AbstractMesh>(
   cabinDoors.map((binding) => binding.door.panel),
 )
+const cabinZombieDoorwayRevisions = new Map(
+  cabinDoors.map((binding) => [
+    binding.cabin.cabinId,
+    binding.cabin.zombieDoorway.revision,
+  ]),
+)
 canvas.dataset.shedDoorwayPosition =
   `${doorwayPosition.x.toFixed(3)},${doorwayPosition.z.toFixed(3)}`
 if (secondaryCabinDoor) {
@@ -2540,16 +2546,23 @@ class Zombie {
     this.playerTargetAcquired = false
   }
 
-  refreshDoorwayNavigation() {
-    if (this.disposed || this._state === 'dead') return
-    // A closed-door obstacle probe may have turned both steering vectors away
-    // from the doorway. Re-run awareness on this frame and discard that cached
-    // turn whenever cabin 2 changes door state, especially on the second open.
+  refreshRouteForOpenedDoorway(doorwayPosition: Vector3) {
+    if (
+      this.disposed
+      || this._state === 'dead'
+      || !this.playerTargetAcquired
+    ) return
+    const doorwayOffsetX = doorwayPosition.x - this.root.position.x
+    const doorwayOffsetZ = doorwayPosition.z - this.root.position.z
+    const nearbyDistance = ZOMBIE_AI_CONFIG.nearThinkDistance
+    if (
+      doorwayOffsetX * doorwayOffsetX + doorwayOffsetZ * doorwayOffsetZ
+      > nearbyDistance * nearbyDistance
+    ) return
+    // The authoritative collision state just made this doorway passable.
+    // Schedule the existing awareness/obstacle route on this same frame;
+    // retain its normal steering vectors, speed, separation, and movement pipe.
     this.thinkTimeRemaining = 0
-    this.desiredDirectionX = 0
-    this.desiredDirectionZ = 0
-    this.currentDirectionX = 0
-    this.currentDirectionZ = 0
   }
 
   setPaused(paused: boolean) {
@@ -3922,14 +3935,19 @@ void initializeZombies().catch((error) => {
   logRuntimeError('[Zombies] Initialization failed:', error)
 })
 
-let secondaryZombieDoorState = secondaryCabinDoor?.door.state ?? null
-
 scene.onBeforeRenderObservable.add(() => {
-  const nextSecondaryZombieDoorState = secondaryCabinDoor?.door.state ?? null
-  if (nextSecondaryZombieDoorState !== secondaryZombieDoorState) {
-    secondaryZombieDoorState = nextSecondaryZombieDoorState
+  for (const binding of cabinDoors) {
+    const doorway = binding.cabin.zombieDoorway
+    const previousRevision =
+      cabinZombieDoorwayRevisions.get(binding.cabin.cabinId)
+    if (previousRevision === doorway.revision) continue
+    cabinZombieDoorwayRevisions.set(
+      binding.cabin.cabinId,
+      doorway.revision,
+    )
+    if (!doorway.passable) continue
     for (let index = 0; index < zombies.length; index += 1) {
-      zombies[index].refreshDoorwayNavigation()
+      zombies[index].refreshRouteForOpenedDoorway(binding.doorwayPosition)
     }
   }
 
