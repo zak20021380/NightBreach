@@ -2320,12 +2320,15 @@ interface ZombieDoorwayQueueState {
 const zombieDoorwayQueues = new Map<string, ZombieDoorwayQueueState>()
 const zombieDoorwayClaimProbe = Vector3.Zero()
 
-function getZombieDoorwayQueue(cabin: EnterableHouseResult) {
+function getZombieDoorwayQueue(
+  cabin: EnterableHouseResult,
+  zombieRadius: number,
+) {
   let queue = zombieDoorwayQueues.get(cabin.cabinId)
   if (queue) return queue
   queue = {
     lanes: Array.from(
-      { length: cabin.zombieDoorway.entrySlotCount },
+      { length: cabin.zombieDoorway.getEntrySlotCount(zombieRadius) },
       () => [],
     ),
   }
@@ -2336,8 +2339,9 @@ function getZombieDoorwayQueue(cabin: EnterableHouseResult) {
 function claimZombieDoorwayQueue(
   cabin: EnterableHouseResult,
   zombiePosition: Vector3,
+  zombieRadius: number,
 ) {
-  const queue = getZombieDoorwayQueue(cabin)
+  const queue = getZombieDoorwayQueue(cabin, zombieRadius)
   let bestLaneIndex = 0
   let bestLaneOccupancy = Number.POSITIVE_INFINITY
   let bestDistanceSquared = Number.POSITIVE_INFINITY
@@ -2346,6 +2350,7 @@ function claimZombieDoorwayQueue(
       zombieDoorwayClaimProbe,
       laneIndex,
       0,
+      zombieRadius,
     )
     const offsetX = zombieDoorwayClaimProbe.x - zombiePosition.x
     const offsetZ = zombieDoorwayClaimProbe.z - zombiePosition.z
@@ -2757,6 +2762,7 @@ class Zombie {
       this.doorwayQueueClaim = claimZombieDoorwayQueue(
         cabin,
         this.root.position,
+        this.root.ellipsoid.x,
       )
     }
 
@@ -2765,10 +2771,12 @@ class Zombie {
       this.doorwayApproachPosition,
       this.doorwayQueueClaim.laneIndex,
       queueRank,
+      this.root.ellipsoid.x,
     )
     cabin.zombieDoorway.getInsideSlotPositionToRef(
       this.doorwayInsidePosition,
       this.doorwayQueueClaim.laneIndex,
+      this.root.ellipsoid.x,
     )
     return queueRank
   }
@@ -2853,6 +2861,13 @@ class Zombie {
       const approachOffsetZ = this.chaseGoalZ - this.root.position.z
       const reachedApproach =
         queueRank === 0
+        // The distance tolerance can include a lateral point inside a jamb's
+        // radius-expanded AABB. Cross only from the real clear opening so the
+        // hardened start-inside sweep never has to reject this route handoff.
+        && doorway.containsPassagePosition(
+          this.root.position,
+          this.root.ellipsoid.x,
+        )
         && approachOffsetX * approachOffsetX + approachOffsetZ * approachOffsetZ
           <= ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE_SQUARED
       if (!reachedApproach) return

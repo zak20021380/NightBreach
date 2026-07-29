@@ -93,11 +93,10 @@ export interface ZombieCabinDoorwayState {
   /** True only after the door has completed its opening animation. */
   readonly passable: boolean
   /**
-   * Number of non-overlapping body lanes that fit through this cabin's real
-   * collision opening. The wider primary cabin admits two abreast; the scaled
-   * secondary cabin remains single-file.
+   * Number of non-overlapping body lanes that fit after shrinking this cabin's
+   * real collision opening by the supplied body radius on both jambs.
    */
-  readonly entrySlotCount: number
+  getEntrySlotCount: (clearance: number) => number
   /**
    * Tests the walkable interior in the cabin's collision frame. `clearance`
    * shrinks that area by a body radius, so a zombie is not considered through
@@ -106,6 +105,14 @@ export interface ZombieCabinDoorwayState {
   containsInteriorPosition: (
     position: Vector3,
     clearance?: number,
+  ) => boolean
+  /**
+   * Tests only the opening's lateral clear interval after expanding both jambs
+   * by a body radius. A route may begin its inside leg only from this interval.
+   */
+  containsPassagePosition: (
+    position: Vector3,
+    clearance: number,
   ) => boolean
   /** Stable centreline point outside the real collision opening. */
   getApproachPositionToRef: (result: Vector3) => void
@@ -120,11 +127,13 @@ export interface ZombieCabinDoorwayState {
     result: Vector3,
     slotIndex: number,
     queueIndex: number,
+    clearance: number,
   ) => void
   /** Matching lane-specific point beyond the inside of the frame. */
   getInsideSlotPositionToRef: (
     result: Vector3,
     slotIndex: number,
+    clearance: number,
   ) => void
 }
 
@@ -203,7 +212,6 @@ const DOOR_OPEN_ANGLE = -Math.PI * 0.53
 // zombie radius is 0.36 m; 0.75 m leaves enough room to settle and turn onto
 // the collision opening's centreline before attempting the crossing.
 const ZOMBIE_DOORWAY_ROUTE_OFFSET = 0.75
-const ZOMBIE_DOORWAY_BODY_DIAMETER = 0.72
 const ZOMBIE_DOORWAY_SLOT_SPACING = 0.8
 const ZOMBIE_DOORWAY_QUEUE_SPACING = 0.9
 const ZOMBIE_COLLISION_EPSILON = 0.002
@@ -655,25 +663,42 @@ export function createEnterableCabin(
   const collisionSine = Math.sin(cabin.rotationY)
   const zombieDoorwayLocalX =
     (layout.doorOpeningLeft + layout.doorOpeningRight) * 0.5
-  const zombieDoorwayCenterSpan = Math.max(
-    0,
-    layout.doorOpeningRight - layout.doorOpeningLeft
-      - ZOMBIE_DOORWAY_BODY_DIAMETER,
-  )
-  const zombieDoorwayEntrySlotCount = Math.max(
-    1,
-    Math.floor(zombieDoorwayCenterSpan / ZOMBIE_DOORWAY_SLOT_SPACING) + 1,
-  )
-  const zombieDoorwaySlotSpan =
-    (zombieDoorwayEntrySlotCount - 1) * ZOMBIE_DOORWAY_SLOT_SPACING
+  function getZombieDoorwaySafeClearance(clearance: number) {
+    // Match the swept-circle solver's expanded jamb bounds, including its
+    // contact epsilon. Lane centres on the exact expanded face are collision
+    // contacts, not usable doorway space.
+    return Math.max(0, clearance) + ZOMBIE_COLLISION_EPSILON
+  }
 
-  function getZombieDoorwaySlotLocalX(slotIndex: number) {
+  function getZombieDoorwayEntrySlotCount(clearance: number) {
+    const safeClearance = getZombieDoorwaySafeClearance(clearance)
+    const centerSpan = Math.max(
+      0,
+      layout.doorOpeningRight - layout.doorOpeningLeft - safeClearance * 2,
+    )
+    return Math.max(
+      1,
+      Math.floor(centerSpan / ZOMBIE_DOORWAY_SLOT_SPACING) + 1,
+    )
+  }
+
+  function getZombieDoorwaySlotLocalX(slotIndex: number, clearance: number) {
+    const safeClearance = getZombieDoorwaySafeClearance(clearance)
+    const centerSpan = Math.max(
+      0,
+      layout.doorOpeningRight - layout.doorOpeningLeft - safeClearance * 2,
+    )
+    const entrySlotCount = getZombieDoorwayEntrySlotCount(clearance)
     const safeSlotIndex = Math.max(
       0,
-      Math.min(zombieDoorwayEntrySlotCount - 1, Math.floor(slotIndex)),
+      Math.min(entrySlotCount - 1, Math.floor(slotIndex)),
+    )
+    const slotSpan = Math.min(
+      centerSpan,
+      (entrySlotCount - 1) * ZOMBIE_DOORWAY_SLOT_SPACING,
     )
     return zombieDoorwayLocalX
-      - zombieDoorwaySlotSpan * 0.5
+      - slotSpan * 0.5
       + safeSlotIndex * ZOMBIE_DOORWAY_SLOT_SPACING
   }
 
@@ -956,8 +981,8 @@ export function createEnterableCabin(
     get passable() {
       return zombieDoorwayPassable
     },
-    get entrySlotCount() {
-      return zombieDoorwayEntrySlotCount
+    getEntrySlotCount(clearance) {
+      return getZombieDoorwayEntrySlotCount(clearance)
     },
     containsInteriorPosition(position, clearance = 0) {
       const safeClearance = Math.max(0, clearance)
@@ -970,25 +995,33 @@ export function createEnterableCabin(
         && localZ >= interiorMinimumZ + safeClearance
         && localZ <= interiorMaximumZ - safeClearance
     },
+    containsPassagePosition(position, clearance) {
+      const worldX = position.x - cabin.x
+      const worldZ = position.z - cabin.z
+      const localX = worldX * collisionCosine - worldZ * collisionSine
+      const safeClearance = getZombieDoorwaySafeClearance(clearance)
+      return localX >= layout.doorOpeningLeft + safeClearance
+        && localX <= layout.doorOpeningRight - safeClearance
+    },
     getApproachPositionToRef(result) {
       result.copyFrom(zombieDoorwayApproachPosition)
     },
     getInsidePositionToRef(result) {
       result.copyFrom(zombieDoorwayInsidePosition)
     },
-    getApproachSlotPositionToRef(result, slotIndex, queueIndex) {
+    getApproachSlotPositionToRef(result, slotIndex, queueIndex, clearance) {
       const safeQueueIndex = Math.max(0, Math.floor(queueIndex))
       setZombieDoorwayLocalPositionToRef(
         result,
-        getZombieDoorwaySlotLocalX(slotIndex),
+        getZombieDoorwaySlotLocalX(slotIndex, clearance),
         layout.frontZ - ZOMBIE_DOORWAY_ROUTE_OFFSET
           - safeQueueIndex * ZOMBIE_DOORWAY_QUEUE_SPACING,
       )
     },
-    getInsideSlotPositionToRef(result, slotIndex) {
+    getInsideSlotPositionToRef(result, slotIndex, clearance) {
       setZombieDoorwayLocalPositionToRef(
         result,
-        getZombieDoorwaySlotLocalX(slotIndex),
+        getZombieDoorwaySlotLocalX(slotIndex, clearance),
         layout.frontZ + ZOMBIE_DOORWAY_ROUTE_OFFSET,
       )
     },
