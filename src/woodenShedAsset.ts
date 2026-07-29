@@ -212,6 +212,23 @@ export function instantiateAuditedWoodenShed(
       (mesh): mesh is Mesh =>
         mesh instanceof Mesh && mesh.getTotalVertices() > 0,
     )
+  const movingDoorHierarchy = [
+    movingDoorNode,
+    ...movingDoorNode.getChildTransformNodes(false),
+  ]
+  const importedNodeSet = new Set(allDescendants)
+  if (movingDoorHierarchy.some((node) => !importedNodeSet.has(node))) {
+    entries.dispose()
+    placementRoot.dispose()
+    throw new Error(
+      `Old Wooden Shed door hierarchy escaped its ${instanceName} instance.`,
+    )
+  }
+  // A second clone can retain a cached world matrix independently of the first
+  // clone. Explicitly thaw its complete authored Door subtree before it is
+  // reparented to the cabin's live hinge; the static freeze pass below still
+  // freezes every mesh outside this exact instance-owned hierarchy.
+  for (const node of movingDoorHierarchy) node.unfreezeWorldMatrix()
   const movingDoorMeshNames = movingDoorMeshes.map(
     (mesh) => sourceName(mesh.name),
   )
