@@ -1402,6 +1402,33 @@ console.info(
   `[Night Breach][Map] Procedural map ready (${proceduralEnvironmentMeshes.length} visible meshes plus gameplay colliders).`,
 )
 
+// Persistent blood can only attach to geometry that is actually rendered.
+// The general environment registry also contains invisible gameplay blockers,
+// while the two imported sheds deliberately keep their render meshes out of
+// that registry. Build a dedicated surface set from the visible procedural map
+// and both authored shed instances.
+const bloodDecalSurfaces = new Set<AbstractMesh>(
+  proceduralEnvironmentMeshes.filter(
+    (mesh) => mesh.isVisible && mesh.visibility > 0,
+  ),
+)
+for (const mesh of scene.meshes) {
+  if (
+    mesh.metadata?.importedOldWoodenShed === true
+    && mesh.metadata?.abandonedStructureCollider !== true
+  ) bloodDecalSurfaces.add(mesh)
+}
+
+function isBloodDecalSurface(mesh: AbstractMesh) {
+  return (
+    bloodDecalSurfaces.has(mesh)
+    && !mesh.isDisposed()
+    && mesh.isEnabled()
+    && mesh.isVisible
+    && mesh.visibility > 0
+  )
+}
+
 const ENVIRONMENT_ASSET_CONFIG = ASSET_CONFIG.assets.environment
 
 async function initializeLocalEnvironment() {
@@ -1438,6 +1465,7 @@ async function initializeLocalEnvironment() {
       mesh.checkCollisions = false
       mesh.receiveShadows = true
       if (!isLowEndMobile) shadowGenerator?.addShadowCaster(mesh)
+      bloodDecalSurfaces.add(mesh)
     }
     applyImportedMaterialSettings(modelMeshes, ENVIRONMENT_ASSET_CONFIG.material)
 
@@ -1565,6 +1593,7 @@ interface BloodDecal {
   age: number
   lifetime: number
   mesh: Mesh
+  surface: AbstractMesh | null
 }
 
 class BloodEffectPool {
@@ -1619,7 +1648,13 @@ class BloodEffectPool {
       mesh.renderingGroupId = 0
       mesh.rotationQuaternion = Quaternion.Identity()
       mesh.visibility = 0
-      this.decals.push({ active: false, age: 0, lifetime: 0, mesh })
+      this.decals.push({
+        active: false,
+        age: 0,
+        lifetime: 0,
+        mesh,
+        surface: null,
+      })
     }
 
     scene.onBeforeRenderObservable.add(() => this.update(Math.min(engine.getDeltaTime() / 1000, 0.05)))
@@ -1718,6 +1753,9 @@ class BloodEffectPool {
 
   private createBloodTexture(variation: number) {
     const texture = new DynamicTexture(`bloodShape${variation}`, { width: 64, height: 64 }, scene, false)
+    // StandardMaterial only reads diffuse alpha when the texture explicitly
+    // advertises it. Without this flag, cleared pixels sample as opaque black.
+    texture.hasAlpha = true
     const context = texture.getContext()
     const center = 32
     const seed = variation * 19 + 7
@@ -1776,22 +1814,23 @@ class BloodEffectPool {
   private spawnDecal(hitPoint: Vector3) {
     this.decalRay.origin.copyFrom(hitPoint).addInPlace(this.direction.scale(0.12))
     this.decalRay.direction.copyFrom(this.direction)
-    let hit = scene.pickWithRay(this.decalRay, (mesh) => proceduralEnvironmentMeshes.includes(mesh), true)
+    let hit = scene.pickWithRay(this.decalRay, isBloodDecalSurface)
     if (!hit?.hit || !hit.pickedPoint) {
       this.decalRay.origin.copyFrom(hitPoint)
       this.decalRay.direction.copyFromFloats(0, -1, 0)
-      hit = scene.pickWithRay(this.decalRay, (mesh) => proceduralEnvironmentMeshes.includes(mesh), true)
+      hit = scene.pickWithRay(this.decalRay, isBloodDecalSurface)
     }
-    if (!hit?.hit || !hit.pickedPoint) return
-    const decal = this.acquireDecal()
-    this.decalNormal.copyFrom(hit.getNormal(true) ?? this.direction)
-    if (!hit.getNormal(true)) this.decalNormal.scaleInPlace(-1)
+    const pickedNormal = hit?.getNormal(true)
+    if (!hit?.hit || !hit.pickedMesh || !hit.pickedPoint || !pickedNormal) return
+    this.decalNormal.copyFrom(pickedNormal)
     if (this.decalNormal.lengthSquared() < 0.001) return
     this.decalNormal.normalize()
     Quaternion.FromUnitVectorsToRef(Vector3.Forward(), this.decalNormal, this.decalRotation)
+    const decal = this.acquireDecal()
     decal.active = true
     decal.age = 0
     decal.lifetime = 6 + Math.random() * 4
+    decal.surface = hit.pickedMesh
     decal.mesh.position.copyFrom(hit.pickedPoint)
     decal.mesh.position.x += this.decalNormal.x * 0.012
     decal.mesh.position.y += this.decalNormal.y * 0.012
@@ -1801,6 +1840,12 @@ class BloodEffectPool {
     const size = 0.24 + Math.random() * 0.18
     decal.mesh.scaling.set(size, size * (0.72 + Math.random() * 0.32), 1)
     decal.mesh.material = this.particleMaterials.splash[Math.floor(Math.random() * 5)]
+    // Preserve the world projection while making an authored moving cabin door
+    // own the decal for the rest of its pooled lifetime. Static surfaces stay
+    // world-rooted and avoid inheriting non-uniform environment scaling.
+    if (hit.pickedMesh.metadata?.bloodDecalFollowsSurface === true) {
+      decal.mesh.setParent(hit.pickedMesh, true)
+    }
     decal.mesh.visibility = 0.86
   }
 
@@ -1813,6 +1858,7 @@ class BloodEffectPool {
   private acquireDecal() {
     const decal = this.decals[this.nextDecal]
     this.nextDecal = (this.nextDecal + 1) % this.decalCapacity
+    this.deactivateDecal(decal)
     return decal
   }
 
@@ -1841,6 +1887,10 @@ class BloodEffectPool {
     for (let index = 0; index < this.decals.length; index += 1) {
       const decal = this.decals[index]
       if (!decal.active) continue
+      if (!decal.surface || !isBloodDecalSurface(decal.surface)) {
+        this.deactivateDecal(decal)
+        continue
+      }
       decal.age += deltaSeconds
       const progress = decal.age / decal.lifetime
       if (progress >= 1) this.deactivateDecal(decal)
@@ -1856,6 +1906,8 @@ class BloodEffectPool {
   private deactivateDecal(decal: BloodDecal) {
     decal.active = false
     decal.mesh.visibility = 0
+    if (decal.mesh.parent) decal.mesh.setParent(null, true)
+    decal.surface = null
   }
 }
 

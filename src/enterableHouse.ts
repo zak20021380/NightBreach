@@ -611,7 +611,13 @@ export function createEnterableCabin(
   const movingDoorSet = new Set<AbstractMesh>(movingDoorMeshes)
   for (const mesh of importedMeshes) {
     shadowGenerator?.addShadowCaster(mesh)
-    if (movingDoorSet.has(mesh)) continue
+    if (movingDoorSet.has(mesh)) {
+      mesh.metadata = {
+        ...mesh.metadata,
+        bloodDecalFollowsSurface: true,
+      }
+      continue
+    }
     mesh.computeWorldMatrix(true)
     mesh.freezeWorldMatrix()
   }
