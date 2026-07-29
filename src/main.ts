@@ -554,11 +554,6 @@ const {
   scene,
 })
 
-const concreteMaterial = createMaterial(
-  'roughConcrete',
-  Color3.FromHexString('#7b7e78'),
-  0.91,
-)
 const wallConcreteMaterial = createMaterial(
   'stainedWallConcrete',
   Color3.FromHexString('#6a716d'),
@@ -568,12 +563,6 @@ const groundMaterial = createMaterial(
   'oilStainedHardstand',
   Color3.FromHexString('#5b6158'),
   0.96,
-)
-const wornBrownMaterial = createMaterial(
-  'weatheredCrateWood',
-  Color3.FromHexString('#755637'),
-  0.88,
-  0.02,
 )
 const sandbagMaterial = createMaterial(
   'weatheredCanvas',
@@ -585,12 +574,6 @@ const darkMetalMaterial = createMaterial(
   Color3.FromHexString('#343a38'),
   0.64,
   0.76,
-)
-const hazardMaterial = createMaterial(
-  'wornHazardPaint',
-  Color3.FromHexString('#9a813f'),
-  0.82,
-  0.08,
 )
 const coldLampMaterial = createMaterial(
   'coldSecurityLampLens',
@@ -615,17 +598,6 @@ setMaterialColor(
   new Color3(0.82, 0.39, 0.09),
 )
 
-applyProceduralSurface(concreteMaterial, 'castConcrete', {
-  kind: 'concrete',
-  baseColor: Color3.FromHexString('#7b7e78'),
-  roughness: 0.91,
-  roughnessVariation: 0.12,
-  metallic: 0,
-  seed: 41,
-  size: 128,
-  textureScale: 2.4,
-  normalStrength: 1.5,
-})
 applyProceduralSurface(wallConcreteMaterial, 'wallConcrete', {
   kind: 'concrete',
   baseColor: Color3.FromHexString('#6a716d'),
@@ -647,17 +619,6 @@ applyProceduralSurface(groundMaterial, 'yardHardstand', {
   size: 256,
   textureScale: 3.2,
   normalStrength: 1.8,
-})
-applyProceduralSurface(wornBrownMaterial, 'crateWood', {
-  kind: 'wood',
-  baseColor: Color3.FromHexString('#755637'),
-  roughness: 0.88,
-  roughnessVariation: 0.14,
-  metallic: 0.02,
-  seed: 263,
-  size: 128,
-  textureScale: 1,
-  normalStrength: 1.15,
 })
 applyProceduralSurface(sandbagMaterial, 'sandbagCanvas', {
   kind: 'canvas',
@@ -681,18 +642,6 @@ applyProceduralSurface(darkMetalMaterial, 'oxidizedMetal', {
   textureScale: 2,
   normalStrength: 0.9,
 })
-applyProceduralSurface(hazardMaterial, 'hazardPaint', {
-  kind: 'hazard',
-  baseColor: Color3.FromHexString('#9a813f'),
-  roughness: 0.82,
-  roughnessVariation: 0.14,
-  metallic: 0.08,
-  seed: 487,
-  size: 128,
-  textureScale: 1,
-  normalStrength: 0.5,
-})
-
 const proceduralEnvironmentMeshes: AbstractMesh[] = []
 
 function prepareWorldMesh(
@@ -739,122 +688,6 @@ createWall('northWall', new Vector3(0, 2.2, 26), 52, 0.8)
 createWall('southWall', new Vector3(0, 2.2, -26), 52, 0.8)
 createWall('eastWall', new Vector3(26, 2.2, 0), 0.8, 52)
 createWall('westWall', new Vector3(-26, 2.2, 0), 0.8, 52)
-
-const crateLayouts = [
-  { position: new Vector3(-9, 1, -7), size: new Vector3(4, 2, 3) },
-  { position: new Vector3(8, 1.5, -4), size: new Vector3(3, 3, 3) },
-  { position: new Vector3(-13, 1.25, 8), size: new Vector3(5, 2.5, 3) },
-  { position: new Vector3(10, 1, 10), size: new Vector3(6, 2, 2.5) },
-  { position: new Vector3(0, 0.75, 4), size: new Vector3(2.5, 1.5, 4) },
-  { position: new Vector3(17, 2, 1), size: new Vector3(2, 4, 5) },
-]
-
-const crateSource = MeshBuilder.CreateBox('crate1', { size: 1 }, scene)
-crateSource.material = wornBrownMaterial
-crateSource.position.copyFrom(crateLayouts[0].position)
-crateSource.scaling.copyFrom(crateLayouts[0].size)
-prepareWorldMesh(crateSource)
-
-crateLayouts.slice(1).forEach(({ position, size }, index) => {
-  const crate = createSharedMesh(crateSource, `crate${index + 2}`)
-  crate.position.copyFrom(position)
-  crate.scaling.copyFrom(size)
-  crate.checkCollisions = true
-  crate.receiveShadows = true
-})
-
-const pillarPositions = [
-  new Vector3(-20, 2.25, -20),
-  new Vector3(20, 2.25, -20),
-  new Vector3(-20, 2.25, 20),
-  new Vector3(20, 2.25, 20),
-  new Vector3(-4, 2.25, 25.2),
-  new Vector3(12, 2.25, 25.2),
-]
-const pillarSource = MeshBuilder.CreateBox('concretePillar1', { size: 1 }, scene)
-pillarSource.material = concreteMaterial
-pillarSource.position.copyFrom(pillarPositions[0])
-pillarSource.scaling.set(1.15, 4.5, 1.15)
-prepareWorldMesh(pillarSource)
-
-pillarPositions.slice(1).forEach((position, index) => {
-  const pillar = createSharedMesh(pillarSource, `concretePillar${index + 2}`)
-  pillar.position.copyFrom(position)
-  pillar.scaling.set(1.15, 4.5, 1.15)
-  pillar.checkCollisions = true
-  pillar.receiveShadows = true
-})
-
-const damagedWallLayouts = [
-  { position: new Vector3(2.2, 1.45, 8.2), size: new Vector3(3.8, 2.9, 0.65), rotation: 0.05 },
-  { position: new Vector3(5.5, 0.9, 8.3), size: new Vector3(2.6, 1.8, 0.65), rotation: 0.05 },
-  { position: new Vector3(7.6, 0.55, 8.4), size: new Vector3(1.4, 1.1, 0.65), rotation: 0.05 },
-  { position: new Vector3(-15.2, 1.5, -13), size: new Vector3(0.7, 3, 4.4), rotation: -0.12 },
-  { position: new Vector3(-15, 0.65, -9.6), size: new Vector3(0.7, 1.3, 2.3), rotation: -0.12 },
-]
-const damagedWallSource = MeshBuilder.CreateBox('damagedWall1', { size: 1 }, scene)
-damagedWallSource.material = concreteMaterial
-damagedWallSource.position.copyFrom(damagedWallLayouts[0].position)
-damagedWallSource.scaling.copyFrom(damagedWallLayouts[0].size)
-damagedWallSource.rotation.y = damagedWallLayouts[0].rotation
-prepareWorldMesh(damagedWallSource)
-
-damagedWallLayouts.slice(1).forEach(({ position, size, rotation }, index) => {
-  const wallPiece = createSharedMesh(damagedWallSource, `damagedWall${index + 2}`)
-  wallPiece.position.copyFrom(position)
-  wallPiece.scaling.copyFrom(size)
-  wallPiece.rotation.y = rotation
-  wallPiece.checkCollisions = true
-  wallPiece.receiveShadows = true
-})
-
-const barrierLayouts = [
-  { position: new Vector3(-4.5, 0, -12), rotation: 0.06 },
-  { position: new Vector3(11.5, 0, -8), rotation: -0.28 },
-  { position: new Vector3(-9, 0, 13), rotation: 0.2 },
-  { position: new Vector3(14, 0, 15), rotation: -0.15 },
-]
-const barrierBase = MeshBuilder.CreateBox(
-  'barrierBase1',
-  { width: 3.6, height: 0.42, depth: 0.95 },
-  scene,
-)
-barrierBase.material = concreteMaterial
-barrierBase.position.set(
-  barrierLayouts[0].position.x,
-  0.21,
-  barrierLayouts[0].position.z,
-)
-barrierBase.rotation.y = barrierLayouts[0].rotation
-prepareWorldMesh(barrierBase)
-
-const barrierTop = MeshBuilder.CreateBox(
-  'barrierTop1',
-  { width: 3.2, height: 0.72, depth: 0.48 },
-  scene,
-)
-barrierTop.material = concreteMaterial
-barrierTop.position.set(
-  barrierLayouts[0].position.x,
-  0.78,
-  barrierLayouts[0].position.z,
-)
-barrierTop.rotation.y = barrierLayouts[0].rotation
-prepareWorldMesh(barrierTop)
-
-barrierLayouts.slice(1).forEach(({ position, rotation }, index) => {
-  const base = createSharedMesh(barrierBase, `barrierBase${index + 2}`)
-  base.position.set(position.x, 0.21, position.z)
-  base.rotation.y = rotation
-  base.checkCollisions = true
-  base.receiveShadows = true
-
-  const top = createSharedMesh(barrierTop, `barrierTop${index + 2}`)
-  top.position.set(position.x, 0.78, position.z)
-  top.rotation.y = rotation
-  top.checkCollisions = true
-  top.receiveShadows = true
-})
 
 const sandbagLayouts = [
   new Vector3(-20, 0.22, -7.8),
@@ -1227,51 +1060,6 @@ const winterSurfaces: WinterSurface[] = [
   { name: 'southWall', x: 0, y: 4.48, z: -26, width: 52, depth: 0.86 },
   { name: 'eastWall', x: 26, y: 4.48, z: 0, width: 0.86, depth: 52 },
   { name: 'westWall', x: -26, y: 4.48, z: 0, width: 0.86, depth: 52 },
-  ...crateLayouts.map(({ position, size }, index) => ({
-    name: `crate${index + 1}`,
-    x: position.x,
-    y: position.y + size.y * 0.5 + 0.024,
-    z: position.z,
-    width: size.x * 0.99,
-    depth: size.z * 0.99,
-  })),
-  ...pillarPositions.map((position, index) => ({
-    name: `pillar${index + 1}`,
-    x: position.x,
-    y: position.y + 2.274,
-    z: position.z,
-    width: 1.12,
-    depth: 1.12,
-  })),
-  ...damagedWallLayouts.map(({ position, size, rotation }, index) => ({
-    name: `damagedWall${index + 1}`,
-    x: position.x,
-    y: position.y + size.y * 0.5 + 0.024,
-    z: position.z,
-    width: size.x * 0.98,
-    depth: size.z * 0.98,
-    rotationY: rotation,
-  })),
-  ...barrierLayouts.flatMap(({ position, rotation }, index) => [
-    {
-      name: `barrierBase${index + 1}`,
-      x: position.x,
-      y: 0.444,
-      z: position.z,
-      width: 3.56,
-      depth: 0.91,
-      rotationY: rotation,
-    },
-    {
-      name: `barrierTop${index + 1}`,
-      x: position.x,
-      y: 1.164,
-      z: position.z,
-      width: 3.16,
-      depth: 0.45,
-      rotationY: rotation,
-    },
-  ]),
   ...abandonedStructures.winterSurfaces,
 ]
 const winterEnvironment = new WinterEnvironment({
@@ -1366,42 +1154,6 @@ function mergeVisualDetails(
   proceduralEnvironmentMeshes.push(merged)
 }
 
-// Thin, merged face rails make the existing cover read as framed military
-// shipping crates. They have no collision or picking role, so every route and
-// hit test continues to use the original six boxes.
-const crateFaceRails: Mesh[] = []
-crateLayouts.forEach(({ position, size }, crateIndex) => {
-  const railDepth = 0.055
-  const railWidth = Math.min(0.16, size.x * 0.07)
-  const railHeight = Math.min(0.16, size.y * 0.1)
-  for (const faceDirection of [-1, 1]) {
-    const faceZ = position.z + faceDirection * (size.z * 0.5 + railDepth * 0.5)
-    for (const edgeDirection of [-1, 1]) {
-      crateFaceRails.push(createVisualDetailBox(
-        `crate${crateIndex + 1}VerticalRail${faceDirection}_${edgeDirection}`,
-        new Vector3(
-          position.x + edgeDirection * (size.x * 0.5 - railWidth * 0.55),
-          position.y,
-          faceZ,
-        ),
-        new Vector3(railWidth, size.y * 0.96, railDepth),
-        wornBrownMaterial,
-      ))
-      crateFaceRails.push(createVisualDetailBox(
-        `crate${crateIndex + 1}HorizontalRail${faceDirection}_${edgeDirection}`,
-        new Vector3(
-          position.x,
-          position.y + edgeDirection * (size.y * 0.5 - railHeight * 0.55),
-          faceZ,
-        ),
-        new Vector3(size.x * 0.96, railHeight, railDepth),
-        wornBrownMaterial,
-      ))
-    }
-  }
-})
-mergeVisualDetails('crateFaceRails', crateFaceRails, wornBrownMaterial)
-
 const metalEdgeDetails: Mesh[] = [
   createVisualDetailBox(
     'northWallCap',
@@ -1429,40 +1181,6 @@ const metalEdgeDetails: Mesh[] = [
   ),
 ]
 mergeVisualDetails('rustedWallCaps', metalEdgeDetails, darkMetalMaterial)
-
-const hazardDetails: Mesh[] = []
-pillarPositions.forEach((position, index) => {
-  hazardDetails.push(createVisualDetailBox(
-    `pillarHazardBase${index + 1}`,
-    new Vector3(position.x, 0.62, position.z),
-    new Vector3(1.18, 1.22, 1.18),
-    hazardMaterial,
-  ))
-})
-
-function rotateLocalOffset(localX: number, localZ: number, rotationY: number) {
-  const cosine = Math.cos(rotationY)
-  const sine = Math.sin(rotationY)
-  return new Vector3(
-    localX * cosine - localZ * sine,
-    0,
-    localX * sine + localZ * cosine,
-  )
-}
-
-barrierLayouts.forEach(({ position, rotation }, index) => {
-  for (const faceDirection of [-1, 1]) {
-    const offset = rotateLocalOffset(0, faceDirection * 0.258, rotation)
-    hazardDetails.push(createVisualDetailBox(
-      `barrierReflector${index + 1}_${faceDirection}`,
-      new Vector3(position.x + offset.x, 0.82, position.z + offset.z),
-      new Vector3(0.48, 0.1, 0.035),
-      hazardMaterial,
-      rotation,
-    ))
-  }
-})
-mergeVisualDetails('wornHazardMarkers', hazardDetails, hazardMaterial)
 
 const lampHousingDetails: Mesh[] = []
 const lampLensDetails: Mesh[] = []

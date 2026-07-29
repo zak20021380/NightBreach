@@ -38,7 +38,7 @@ export function createZombieAiConfig(isMobile: boolean) {
     // can do along a zombie's side during the 0.82s attack animation.
     attackReachDistance: 2.05,
     // Vertical band around the zombie's centre. Melee is a horizontal check, but
-    // a player on a crate overhead should still be out of reach.
+    // a player on an elevated surface should still be out of reach.
     attackReachHeight: 2.1,
     walkSpeed: 2.1,
     runSpeed: 3.3,

@@ -45,7 +45,7 @@ const UTILITY_POLE_PLACEMENTS = [
     position: [-23, -14],
     rotationY: -Math.PI * 0.5,
     scale: 0.96,
-    setting: 'west perimeter beside the ruined-wall and sandbag service lane',
+    setting: 'west perimeter beside the sandbag service lane',
     wireTarget: 'west perimeter wall / map edge',
   },
   {
@@ -53,7 +53,7 @@ const UTILITY_POLE_PLACEMENTS = [
     position: [4, 23],
     rotationY: 0,
     scale: 1.04,
-    setting: 'north perimeter between the two wall pillars; distant silhouette',
+    setting: 'north perimeter beside the open wall stretch; distant silhouette',
     wireTarget: 'north perimeter wall / map edge',
   },
   {
@@ -61,7 +61,7 @@ const UTILITY_POLE_PLACEMENTS = [
     position: [23, -11.5],
     rotationY: Math.PI * 0.5,
     scale: 0.99,
-    setting: 'east perimeter beyond the crate and barrier traffic lanes',
+    setting: 'east perimeter beside the open traffic lane',
     wireTarget: 'east perimeter wall / map edge',
   },
   {

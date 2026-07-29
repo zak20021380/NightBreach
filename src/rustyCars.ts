@@ -45,7 +45,7 @@ interface ModelBounds {
 
 // Both placements sit beside, rather than across, a possible future road line.
 // The west car is 2.75 m east of the broken pole and leaves a broad service
-// corridor beside the damaged wall. The east car is north of a plausible
+// corridor along the west side. The east car is north of a plausible
 // east-west road entry; its long side remains about 1.85 m from the inner wall.
 // Both clear every cabin/doorway, primary and fallback zombie spawn, the player
 // start, the ammo crate, and the central cover/sightline cluster.
