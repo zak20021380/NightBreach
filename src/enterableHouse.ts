@@ -92,7 +92,19 @@ export interface ZombieCabinDoorwayState {
   readonly revision: number
   /** True only after the door has completed its opening animation. */
   readonly passable: boolean
-  getPositionToRef: (result: Vector3) => void
+  /**
+   * Tests the walkable interior in the cabin's collision frame. `clearance`
+   * shrinks that area by a body radius, so a zombie is not considered through
+   * the doorway until its whole collider has cleared the frame.
+   */
+  containsInteriorPosition: (
+    position: Vector3,
+    clearance?: number,
+  ) => boolean
+  /** Stable centreline point outside the real collision opening. */
+  getApproachPositionToRef: (result: Vector3) => void
+  /** Stable centreline point far enough inside to clear both jamb corners. */
+  getInsidePositionToRef: (result: Vector3) => void
 }
 
 export interface EnterableHouseResult {
@@ -166,6 +178,10 @@ const DOORWAY_MINIMUM_CLEAR_HEIGHT = 1.95
 // every cabin regardless of how large that cabin is.
 const DOOR_ANIMATION_SECONDS = 0.46
 const DOOR_OPEN_ANGLE = -Math.PI * 0.53
+// Waypoints sit beyond the radius-expanded front wall on both sides. The
+// zombie radius is 0.36 m; 0.75 m leaves enough room to settle and turn onto
+// the collision opening's centreline before attempting the crossing.
+const ZOMBIE_DOORWAY_ROUTE_OFFSET = 0.75
 const ZOMBIE_COLLISION_EPSILON = 0.002
 const ZOMBIE_COLLISION_DIRECTION_EPSILON = 0.00000001
 const ZOMBIE_COLLISION_MAX_SLIDES = 3
@@ -189,6 +205,63 @@ function horizontalBounds(
     minimumX: centerX - width * 0.5,
     minimumZ: centerZ - depth * 0.5,
   }
+}
+
+/**
+ * Returns the nearest expanded-AABB face, preferring the face that the current
+ * movement penetrates most when a point is exactly at a corner.
+ * 0/1 are minimum/maximum X; 2/3 are minimum/maximum Z.
+ */
+function nearestCollisionFace(
+  currentX: number,
+  currentZ: number,
+  minimumX: number,
+  maximumX: number,
+  minimumZ: number,
+  maximumZ: number,
+  movementX: number,
+  movementZ: number,
+) {
+  let face = 0
+  let nearestDistance = currentX - minimumX
+  let selectedOutwardMovement = -movementX
+
+  const maximumXDistance = maximumX - currentX
+  const maximumXOutwardMovement = movementX
+  if (
+    maximumXDistance < nearestDistance
+    || (Math.abs(maximumXDistance - nearestDistance)
+      <= ZOMBIE_COLLISION_EPSILON
+      && maximumXOutwardMovement < selectedOutwardMovement)
+  ) {
+    face = 1
+    nearestDistance = maximumXDistance
+    selectedOutwardMovement = maximumXOutwardMovement
+  }
+
+  const minimumZDistance = currentZ - minimumZ
+  const minimumZOutwardMovement = -movementZ
+  if (
+    minimumZDistance < nearestDistance
+    || (Math.abs(minimumZDistance - nearestDistance)
+      <= ZOMBIE_COLLISION_EPSILON
+      && minimumZOutwardMovement < selectedOutwardMovement)
+  ) {
+    face = 2
+    nearestDistance = minimumZDistance
+    selectedOutwardMovement = minimumZOutwardMovement
+  }
+
+  const maximumZDistance = maximumZ - currentZ
+  const maximumZOutwardMovement = movementZ
+  if (
+    maximumZDistance < nearestDistance
+    || (Math.abs(maximumZDistance - nearestDistance)
+      <= ZOMBIE_COLLISION_EPSILON
+      && maximumZOutwardMovement < selectedOutwardMovement)
+  ) face = 3
+
+  return face
 }
 
 interface CabinLayout {
@@ -545,6 +618,30 @@ export function createEnterableCabin(
 
   const collisionCosine = Math.cos(cabin.rotationY)
   const collisionSine = Math.sin(cabin.rotationY)
+  const zombieDoorwayLocalX =
+    (layout.doorOpeningLeft + layout.doorOpeningRight) * 0.5
+  const zombieDoorwayApproachPosition = new Vector3(
+    cabin.x
+      + zombieDoorwayLocalX * collisionCosine
+      + (layout.frontZ - ZOMBIE_DOORWAY_ROUTE_OFFSET) * collisionSine,
+    0,
+    cabin.z
+      - zombieDoorwayLocalX * collisionSine
+      + (layout.frontZ - ZOMBIE_DOORWAY_ROUTE_OFFSET) * collisionCosine,
+  )
+  const zombieDoorwayInsidePosition = new Vector3(
+    cabin.x
+      + zombieDoorwayLocalX * collisionCosine
+      + (layout.frontZ + ZOMBIE_DOORWAY_ROUTE_OFFSET) * collisionSine,
+    0,
+    cabin.z
+      - zombieDoorwayLocalX * collisionSine
+      + (layout.frontZ + ZOMBIE_DOORWAY_ROUTE_OFFSET) * collisionCosine,
+  )
+  const interiorMinimumX = layout.westX + layout.wallThickness * 0.5
+  const interiorMaximumX = layout.eastX - layout.wallThickness * 0.5
+  const interiorMinimumZ = layout.frontZ + layout.wallThickness * 0.5
+  const interiorMaximumZ = layout.rearZ - layout.wallThickness * 0.5
   const zombieCollision: ZombieCabinCollision = {
     blocksObstacleProbe(mesh) {
       const obstacleKind = mesh.metadata?.zombieCabinObstacle
@@ -563,10 +660,10 @@ export function createEnterableCabin(
       // Work in the same unrotated local frame as the simple cabin boxes.
       const worldStartX = position.x - cabin.x
       const worldStartZ = position.z - cabin.z
-      let currentX = worldStartX * collisionCosine + worldStartZ * collisionSine
-      let currentZ = -worldStartX * collisionSine + worldStartZ * collisionCosine
-      let remainingX = movement.x * collisionCosine + movement.z * collisionSine
-      let remainingZ = -movement.x * collisionSine + movement.z * collisionCosine
+      let currentX = worldStartX * collisionCosine - worldStartZ * collisionSine
+      let currentZ = worldStartX * collisionSine + worldStartZ * collisionCosine
+      let remainingX = movement.x * collisionCosine - movement.z * collisionSine
+      let remainingZ = movement.x * collisionSine + movement.z * collisionCosine
       let resolvedX = 0
       let resolvedZ = 0
 
@@ -574,6 +671,76 @@ export function createEnterableCabin(
       // horizontal equivalent of its collision ellipsoid. Three iterations
       // cover a wall slide and a following corner without sub-stepping.
       for (let slide = 0; slide < ZOMBIE_COLLISION_MAX_SLIDES; slide += 1) {
+        const barrierCount = layout.staticZombieWallBounds.length
+          + (zombieDoorwayPassable ? 0 : 1)
+
+        // A door can close around a body already deep inside its newly restored
+        // radius-expanded blocker. A point can also begin in the square corner
+        // of an expanded wall AABB while its circular body is beside the real
+        // corner. In either case, keep only motion toward the nearest outward
+        // face until clear; retaining an arbitrary tangent here could cross a
+        // different face and clip the wall/jamb in one high-speed step.
+        for (let index = 0; index < barrierCount; index += 1) {
+          const bounds = index < layout.staticZombieWallBounds.length
+            ? layout.staticZombieWallBounds[index]
+            : layout.closedDoorwayBounds
+          const minimumX = bounds.minimumX - radius
+          const maximumX = bounds.maximumX + radius
+          const minimumZ = bounds.minimumZ - radius
+          const maximumZ = bounds.maximumZ + radius
+          if (
+            currentX < minimumX
+            || currentX > maximumX
+            || currentZ < minimumZ
+            || currentZ > maximumZ
+          ) continue
+
+          const face = nearestCollisionFace(
+            currentX,
+            currentZ,
+            minimumX,
+            maximumX,
+            minimumZ,
+            maximumZ,
+            remainingX,
+            remainingZ,
+          )
+          const faceDistance = face === 0
+            ? currentX - minimumX
+            : face === 1
+              ? maximumX - currentX
+              : face === 2
+                ? currentZ - minimumZ
+                : maximumZ - currentZ
+          if (faceDistance <= ZOMBIE_COLLISION_EPSILON) continue
+
+          const outwardMovement = face === 0
+            ? -remainingX
+            : face === 1
+              ? remainingX
+              : face === 2
+                ? -remainingZ
+                : remainingZ
+          if (outwardMovement <= ZOMBIE_COLLISION_DIRECTION_EPSILON) {
+            remainingX = 0
+            remainingZ = 0
+            break
+          }
+          if (face === 0) {
+            remainingX = -outwardMovement
+            remainingZ = 0
+          } else if (face === 1) {
+            remainingX = outwardMovement
+            remainingZ = 0
+          } else if (face === 2) {
+            remainingX = 0
+            remainingZ = -outwardMovement
+          } else {
+            remainingX = 0
+            remainingZ = outwardMovement
+          }
+        }
+
         const remainingLength = Math.hypot(remainingX, remainingZ)
         if (remainingLength < ZOMBIE_COLLISION_DIRECTION_EPSILON) break
 
@@ -581,8 +748,6 @@ export function createEnterableCabin(
         let collisionNormalX = 0
         let collisionNormalZ = 0
         let collided = false
-        const barrierCount = layout.staticZombieWallBounds.length
-          + (zombieDoorwayPassable ? 0 : 1)
 
         for (let index = 0; index < barrierCount; index += 1) {
           const bounds = index < layout.staticZombieWallBounds.length
@@ -592,6 +757,43 @@ export function createEnterableCabin(
           const maximumX = bounds.maximumX + radius
           const minimumZ = bounds.minimumZ - radius
           const maximumZ = bounds.maximumZ + radius
+
+          const startsInside = currentX >= minimumX
+            && currentX <= maximumX
+            && currentZ >= minimumZ
+            && currentZ <= maximumZ
+          if (startsInside) {
+            // Closing restores the doorway blocker immediately, so a zombie can
+            // legitimately begin a sweep inside its radius-expanded bounds.
+            // Choose the nearest outward face: separating/tangent movement may
+            // escape, but inward movement is a time-zero collision. Applying
+            // the same rule to wall/corner contact closes the negative-entry
+            // hole without pinning bodies that are already moving clear.
+            const face = nearestCollisionFace(
+              currentX,
+              currentZ,
+              minimumX,
+              maximumX,
+              minimumZ,
+              maximumZ,
+              remainingX,
+              remainingZ,
+            )
+            const outwardMovement = face === 0
+              ? -remainingX
+              : face === 1
+                ? remainingX
+                : face === 2
+                  ? -remainingZ
+                  : remainingZ
+            if (outwardMovement >= -ZOMBIE_COLLISION_DIRECTION_EPSILON) continue
+
+            collided = true
+            collisionTime = 0
+            collisionNormalX = face === 0 ? -1 : face === 1 ? 1 : 0
+            collisionNormalZ = face === 2 ? -1 : face === 3 ? 1 : 0
+            continue
+          }
 
           let nearX = Number.NEGATIVE_INFINITY
           let farX = Number.POSITIVE_INFINITY
@@ -617,12 +819,8 @@ export function createEnterableCabin(
 
           const entryTime = Math.max(nearX, nearZ)
           const exitTime = Math.min(farX, farZ)
-          // A negative entry means the centre already touches this expanded
-          // rectangle. Ignore it so collision epsilon cannot trap a zombie that
-          // is moving away or sliding tangentially along a wall.
           if (
-            entryTime < -ZOMBIE_COLLISION_EPSILON
-            || entryTime > exitTime
+            entryTime > exitTime
             || exitTime < 0
             || entryTime > collisionTime
           ) continue
@@ -668,8 +866,8 @@ export function createEnterableCabin(
         remainingZ = slideZ
       }
 
-      movement.x = resolvedX * collisionCosine - resolvedZ * collisionSine
-      movement.z = resolvedX * collisionSine + resolvedZ * collisionCosine
+      movement.x = resolvedX * collisionCosine + resolvedZ * collisionSine
+      movement.z = -resolvedX * collisionSine + resolvedZ * collisionCosine
     },
   }
 
@@ -689,8 +887,22 @@ export function createEnterableCabin(
     get passable() {
       return zombieDoorwayPassable
     },
-    getPositionToRef(result) {
-      result.copyFrom(doorwayPosition)
+    containsInteriorPosition(position, clearance = 0) {
+      const safeClearance = Math.max(0, clearance)
+      const worldX = position.x - cabin.x
+      const worldZ = position.z - cabin.z
+      const localX = worldX * collisionCosine - worldZ * collisionSine
+      const localZ = worldX * collisionSine + worldZ * collisionCosine
+      return localX >= interiorMinimumX + safeClearance
+        && localX <= interiorMaximumX - safeClearance
+        && localZ >= interiorMinimumZ + safeClearance
+        && localZ <= interiorMaximumZ - safeClearance
+    },
+    getApproachPositionToRef(result) {
+      result.copyFrom(zombieDoorwayApproachPosition)
+    },
+    getInsidePositionToRef(result) {
+      result.copyFrom(zombieDoorwayInsidePosition)
     },
   }
 

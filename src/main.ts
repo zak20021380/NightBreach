@@ -2239,6 +2239,25 @@ const zombieMeleeOccluders = scene.meshes.filter((mesh) => (
   mesh.checkCollisions && mesh.metadata?.zombieCollider !== true
 ))
 
+type ZombieDoorwayRouteStage = 'outside' | 'inside' | 'player'
+type ZombieChaseSteeringMode = 'player' | 'doorway-approach' | 'doorway-crossing'
+
+const ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE = 0.24
+const ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE_SQUARED =
+  ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE
+  * ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE
+const ZOMBIE_DOORWAY_ALIGNMENT_START_DISTANCE = 1.4
+const ZOMBIE_DOORWAY_ALIGNMENT_COMPLETE_DISTANCE = 0.5
+
+function getCabinContainingPosition(position: Vector3) {
+  for (const binding of cabinDoors) {
+    if (
+      binding.cabin.zombieDoorway.containsInteriorPosition(position)
+    ) return binding.cabin
+  }
+  return null
+}
+
 class Zombie {
   readonly id: number
   readonly root: Mesh
@@ -2260,6 +2279,18 @@ class Zombie {
   // target lock is independent of the proximity check used by an unassigned
   // zombie, and lasts until death or disposal.
   private playerTargetAcquired = false
+  // A cabin route is installed only while the player is inside that cabin.
+  // Both waypoints come from its real collision aperture, not the authored
+  // moving door slab, and the stage is retained across close/reopen cycles.
+  private doorwayRouteCabin: EnterableHouseResult | null = null
+  private doorwayRouteStage: ZombieDoorwayRouteStage = 'player'
+  private readonly doorwayApproachPosition = Vector3.Zero()
+  private readonly doorwayInsidePosition = Vector3.Zero()
+  private chaseGoalX = 0
+  private chaseGoalZ = 0
+  private chasingPlayerDirectly = true
+  private doorwayRouteWaiting = false
+  private chaseSteeringMode: ZombieChaseSteeringMode = 'player'
   private desiredDirectionX = 0
   private desiredDirectionZ = 0
   private currentDirectionX = 0
@@ -2544,25 +2575,161 @@ class Zombie {
 
   releasePlayerTarget() {
     this.playerTargetAcquired = false
+    this.clearDoorwayRoute()
   }
 
-  refreshRouteForOpenedDoorway(doorwayPosition: Vector3) {
+  private clearDoorwayRoute() {
+    if (!this.doorwayRouteCabin) return
+    this.doorwayRouteCabin = null
+    this.doorwayRouteStage = 'player'
+    this.doorwayRouteWaiting = false
+    this.chasingPlayerDirectly = true
+    this.chaseSteeringMode = 'player'
+    this.desiredDirectionX = 0
+    this.desiredDirectionZ = 0
+    this.currentDirectionX = 0
+    this.currentDirectionZ = 0
+  }
+
+  private setDoorwayRouteStage(stage: ZombieDoorwayRouteStage) {
+    if (stage === this.doorwayRouteStage) return
+    this.doorwayRouteStage = stage
+    // A stage boundary is a deliberate turn onto the doorway centreline.
+    // Discarding the previous wall/obstacle heading prevents one stale lateral
+    // step from carrying the body into a jamb.
+    this.desiredDirectionX = 0
+    this.desiredDirectionZ = 0
+    this.currentDirectionX = 0
+    this.currentDirectionZ = 0
+  }
+
+  private selectChaseGoal(playerPosition: Vector3) {
+    const playerCabin = getCabinContainingPosition(playerPosition)
+    if (!playerCabin) {
+      this.clearDoorwayRoute()
+      this.chaseGoalX = playerPosition.x
+      this.chaseGoalZ = playerPosition.z
+      this.chasingPlayerDirectly = true
+      this.doorwayRouteWaiting = false
+      this.chaseSteeringMode = 'player'
+      return
+    }
+
+    if (this.doorwayRouteCabin !== playerCabin) {
+      this.doorwayRouteCabin = playerCabin
+      playerCabin.zombieDoorway.getApproachPositionToRef(
+        this.doorwayApproachPosition,
+      )
+      playerCabin.zombieDoorway.getInsidePositionToRef(
+        this.doorwayInsidePosition,
+      )
+      this.doorwayRouteStage =
+        playerCabin.zombieDoorway.containsInteriorPosition(
+          this.root.position,
+          this.root.ellipsoid.x,
+        )
+          ? 'player'
+          : 'outside'
+      this.desiredDirectionX = 0
+      this.desiredDirectionZ = 0
+      this.currentDirectionX = 0
+      this.currentDirectionZ = 0
+    }
+
+    const doorway = playerCabin.zombieDoorway
+    const zombieFullyInside = doorway.containsInteriorPosition(
+      this.root.position,
+      this.root.ellipsoid.x,
+    )
+    if (this.doorwayRouteStage === 'inside') {
+      const insideOffsetX =
+        this.root.position.x - this.doorwayInsidePosition.x
+      const insideOffsetZ =
+        this.root.position.z - this.doorwayInsidePosition.z
+      const doorwaySpanX =
+        this.doorwayInsidePosition.x - this.doorwayApproachPosition.x
+      const doorwaySpanZ =
+        this.doorwayInsidePosition.z - this.doorwayApproachPosition.z
+      const reachedInsidePoint =
+        insideOffsetX * insideOffsetX + insideOffsetZ * insideOffsetZ
+          <= ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE_SQUARED
+        // A knockback can carry the body beyond the waypoint between think
+        // ticks. Passing its inward plane counts as completing that target.
+        || insideOffsetX * doorwaySpanX + insideOffsetZ * doorwaySpanZ >= 0
+      if (reachedInsidePoint || (zombieFullyInside && !doorway.passable)) {
+        this.setDoorwayRouteStage('player')
+      }
+    } else if (zombieFullyInside) {
+      // A route installed around a zombie already inside starts on the player.
+      this.setDoorwayRouteStage('player')
+    } else if (this.doorwayRouteStage === 'player') {
+      // An open-door knockback can put a previously admitted zombie outside.
+      // Reinstall the full route instead of allowing a new through-wall chase.
+      this.setDoorwayRouteStage('outside')
+    }
+
+    this.doorwayRouteWaiting = false
+    if (this.doorwayRouteStage === 'outside') {
+      this.chaseGoalX = this.doorwayApproachPosition.x
+      this.chaseGoalZ = this.doorwayApproachPosition.z
+      this.chasingPlayerDirectly = false
+      this.chaseSteeringMode = 'doorway-approach'
+
+      const approachOffsetX = this.chaseGoalX - this.root.position.x
+      const approachOffsetZ = this.chaseGoalZ - this.root.position.z
+      const reachedApproach =
+        approachOffsetX * approachOffsetX + approachOffsetZ * approachOffsetZ
+        <= ZOMBIE_DOORWAY_WAYPOINT_REACHED_DISTANCE_SQUARED
+      if (!reachedApproach) return
+      if (!doorway.passable) {
+        this.doorwayRouteWaiting = true
+        return
+      }
+      this.setDoorwayRouteStage('inside')
+    }
+
+    if (this.doorwayRouteStage === 'inside') {
+      this.chaseGoalX = this.doorwayInsidePosition.x
+      this.chaseGoalZ = this.doorwayInsidePosition.z
+      this.chasingPlayerDirectly = false
+      this.chaseSteeringMode = 'doorway-crossing'
+      // If the door closes around a body already in the threshold, freeze its
+      // AI translation until this same cabin becomes passable again. The sweep
+      // remains authoritative for knockback and any time-zero overlap.
+      this.doorwayRouteWaiting = !doorway.passable
+      return
+    }
+
+    this.chaseGoalX = playerPosition.x
+    this.chaseGoalZ = playerPosition.z
+    this.chasingPlayerDirectly = true
+    this.chaseSteeringMode = 'player'
+  }
+
+  refreshRouteForOpenedDoorway(
+    cabin: EnterableHouseResult,
+    playerPosition: Vector3,
+  ) {
     if (
       this.disposed
       || this._state === 'dead'
       || !this.playerTargetAcquired
     ) return
-    const doorwayOffsetX = doorwayPosition.x - this.root.position.x
-    const doorwayOffsetZ = doorwayPosition.z - this.root.position.z
-    const nearbyDistance = ZOMBIE_AI_CONFIG.nearThinkDistance
-    if (
-      doorwayOffsetX * doorwayOffsetX + doorwayOffsetZ * doorwayOffsetZ
-      > nearbyDistance * nearbyDistance
-    ) return
-    // The authoritative collision state just made this doorway passable.
-    // Schedule the existing awareness/obstacle route on this same frame;
-    // retain its normal steering vectors, speed, separation, and movement pipe.
+    this.selectChaseGoal(playerPosition)
+    if (this.doorwayRouteCabin !== cabin) return
+
+    // Every engaged zombie routed to this cabin is invalidated on the exact
+    // passability revision, without a player/door distance gate. Reopening the
+    // same cabin takes this path again because its revision increments again.
     this.thinkTimeRemaining = 0
+    this.desiredDirectionX = 0
+    this.desiredDirectionZ = 0
+    this.currentDirectionX = 0
+    this.currentDirectionZ = 0
+    // Preserve attack and hit-reaction timing. Idle/chasing zombies can safely
+    // install the new rush vector synchronously on the door-open frame.
+    if (this._state === 'attacking' || this._state === 'hit') return
+    this.updateAwarenessAndSteering(playerPosition)
   }
 
   setPaused(paused: boolean) {
@@ -3048,38 +3215,46 @@ class Zombie {
   }
 
   /**
-   * Builds the chase direction from three parts: the seek toward the player's
-   * approach ring, a stable per-zombie lane offset, and separation from nearby
-   * zombies. All three run for the entire chase, which is what makes the pack
-   * fan out on the way in rather than untangling itself on arrival.
+   * Builds the chase direction from the active seek target, optional player
+   * approach-ring offset, and separation from nearby zombies. Doorway legs omit
+   * the player ring and converge onto the aperture centreline before crossing.
    *
    * Horizontal only (X/Z) -- the vertical axis never participates in steering.
    */
   private updateChaseDirection(
-    playerPosition: Vector3,
-    toPlayerX: number,
-    toPlayerZ: number,
-    distance: number,
+    targetX: number,
+    targetZ: number,
+    toTargetX: number,
+    toTargetZ: number,
+    targetDistance: number,
+    steeringMode: ZombieChaseSteeringMode,
   ) {
-    // Bearing of this zombie as seen from the player. Claimed once so the group
-    // keeps its shape; re-picking a lane every tick is what causes jitter.
-    if (this.approachSlot < 0) {
-      this.approachSlot = claimApproachSlot(Math.atan2(-toPlayerX, -toPlayerZ))
+    if (targetDistance < 0.001) {
+      this.desiredDirectionX = 0
+      this.desiredDirectionZ = 0
+      return
+    }
+
+    // A player-relative lane is claimed only for the final player seek. Doorway
+    // waypoints must not inherit its 1.5 m offset and aim into a jamb.
+    if (steeringMode === 'player' && this.approachSlot < 0) {
+      this.approachSlot = claimApproachSlot(
+        Math.atan2(-toTargetX, -toTargetZ),
+      )
     }
 
     // Full lane offset out at range, fading to zero before melee so the final
     // steps and the swing itself are aimed at the real player position.
-    const approachWeight = clamp(
-      (distance - ZOMBIE_SWARM_CONFIG.approachBlendNearDistance)
-        / (ZOMBIE_SWARM_CONFIG.approachBlendFarDistance
-          - ZOMBIE_SWARM_CONFIG.approachBlendNearDistance),
-      0,
-      1,
-    )
-
-    let goalX = playerPosition.x
-    let goalZ = playerPosition.z
-    if (approachWeight > 0) {
+    let goalX = targetX
+    let goalZ = targetZ
+    if (steeringMode === 'player') {
+      const approachWeight = clamp(
+        (targetDistance - ZOMBIE_SWARM_CONFIG.approachBlendNearDistance)
+          / (ZOMBIE_SWARM_CONFIG.approachBlendFarDistance
+            - ZOMBIE_SWARM_CONFIG.approachBlendNearDistance),
+        0,
+        1,
+      )
       const slotAngle = getApproachSlotAngle(this.approachSlot)
       const ringOffset = ZOMBIE_SWARM_CONFIG.approachRingRadius * approachWeight
       goalX += Math.sin(slotAngle) * ringOffset
@@ -3093,18 +3268,33 @@ class Zombie {
       directionX /= goalDistance
       directionZ /= goalDistance
     } else {
-      // Standing on the lane anchor: fall back to the true player bearing so the
-      // zombie always has a valid heading and never stalls on its own offset.
-      directionX = toPlayerX / distance
-      directionZ = toPlayerZ / distance
+      // Standing on an offset anchor: fall back to the exact active target so
+      // the zombie always has a valid heading and never stalls on its own lane.
+      directionX = toTargetX / targetDistance
+      directionZ = toTargetZ / targetDistance
     }
 
     // Separation is eased rather than disabled in melee: stacking is worst at
     // the player's feet, but a full-strength push there would shove attackers
     // out of their own reach.
-    const separationScale = distance <= ZOMBIE_AI_CONFIG.attackReachDistance
+    let separationScale = targetDistance <= ZOMBIE_AI_CONFIG.attackReachDistance
       ? ZOMBIE_SWARM_CONFIG.separationMeleeScale
       : 1
+    if (steeringMode === 'doorway-crossing') {
+      // The secondary cabin's radius-expanded opening is only about 0.77 m
+      // wide. Its inside leg must stay on the exact centreline.
+      separationScale = 0
+    } else if (steeringMode === 'doorway-approach') {
+      // Keep the pack spread while approaching, then converge cleanly before
+      // the stage changes to the narrow inside leg.
+      separationScale *= clamp(
+        (targetDistance - ZOMBIE_DOORWAY_ALIGNMENT_COMPLETE_DISTANCE)
+          / (ZOMBIE_DOORWAY_ALIGNMENT_START_DISTANCE
+            - ZOMBIE_DOORWAY_ALIGNMENT_COMPLETE_DISTANCE),
+        0,
+        1,
+      )
+    }
     const separation = this.computeSeparation(directionX, directionZ, separationScale)
 
     directionX += separation.x
@@ -3117,8 +3307,8 @@ class Zombie {
     }
 
     // Separation exactly cancelled the seek. Keep chasing rather than freeze.
-    this.desiredDirectionX = toPlayerX / distance
-    this.desiredDirectionZ = toPlayerZ / distance
+    this.desiredDirectionX = toTargetX / targetDistance
+    this.desiredDirectionZ = toTargetZ / targetDistance
   }
 
   /**
@@ -3220,17 +3410,44 @@ class Zombie {
       this.playerTargetAcquired = true
     }
 
-    if (this.cachedDistanceSquared
+    this.selectChaseGoal(playerPosition)
+
+    // A wall-adjacent exterior zombie must not stop and swing at a player on
+    // the other side. Combat distances are unchanged; they become eligible
+    // only after the doorway route reaches its final player leg.
+    if (this.chasingPlayerDirectly && this.cachedDistanceSquared
       <= ZOMBIE_AI_CONFIG.attackDistance * ZOMBIE_AI_CONFIG.attackDistance) {
       if (this.attackCooldownRemaining <= 0) this.beginAttack()
       else this.setState('idle')
       return
     }
 
-    const distance = Math.sqrt(this.cachedDistanceSquared)
-    this.updateChaseDirection(playerPosition, toPlayerX, toPlayerZ, distance)
+    if (this.doorwayRouteWaiting) {
+      this.setState('idle')
+      return
+    }
 
-    const nextLocomotion = distance >= ZOMBIE_AI_CONFIG.runDistance ? 'run' : 'walk'
+    const targetOffsetX = this.chaseGoalX - this.root.position.x
+    const targetOffsetZ = this.chaseGoalZ - this.root.position.z
+    const targetDistance = Math.hypot(targetOffsetX, targetOffsetZ)
+    if (targetDistance < 0.001) {
+      this.setState('idle')
+      return
+    }
+    this.updateChaseDirection(
+      this.chaseGoalX,
+      this.chaseGoalZ,
+      targetOffsetX,
+      targetOffsetZ,
+      targetDistance,
+      this.chaseSteeringMode,
+    )
+
+    // Keep the existing player-distance speed/animation selection. Doorway
+    // routing changes only the seek target, never zombie speed.
+    const playerDistance = Math.sqrt(this.cachedDistanceSquared)
+    const nextLocomotion =
+      playerDistance >= ZOMBIE_AI_CONFIG.runDistance ? 'run' : 'walk'
     if (nextLocomotion !== this.locomotion) {
       this.locomotion = nextLocomotion
       if (this._state === 'chasing') this.playStateAnimation()
@@ -3250,6 +3467,13 @@ class Zombie {
       0,
       this.desiredDirectionZ,
     )
+    // A waypoint ray ends at that waypoint. Otherwise a zombie settling on the
+    // outside point would see the closed door 0.75 m beyond its goal, turn away,
+    // and never qualify for the inside leg. Direct player chase keeps the exact
+    // original probe length.
+    this.obstacleRay.length = this.chasingPlayerDirectly
+      ? ZOMBIE_AI_CONFIG.obstacleProbeDistance
+      : Math.min(ZOMBIE_AI_CONFIG.obstacleProbeDistance, targetDistance)
     const obstacle = scene.pickWithRay(this.obstacleRay, isZombieObstacle, true)
     if (!obstacle?.hit) return
 
@@ -3287,10 +3511,11 @@ class Zombie {
     const playerOffsetX = playerPosition.x - this.root.position.x
     const playerOffsetZ = playerPosition.z - this.root.position.z
     const playerDistance = Math.hypot(playerOffsetX, playerOffsetZ)
-    const availableDistance = Math.max(
-      0,
-      playerDistance - ZOMBIE_AI_CONFIG.attackStopDistance,
-    )
+    const chaseGoalOffsetX = this.chaseGoalX - this.root.position.x
+    const chaseGoalOffsetZ = this.chaseGoalZ - this.root.position.z
+    const availableDistance = this.chasingPlayerDirectly
+      ? Math.max(0, playerDistance - ZOMBIE_AI_CONFIG.attackStopDistance)
+      : Math.hypot(chaseGoalOffsetX, chaseGoalOffsetZ)
     const movementDistance = Math.min(
       this.targetSpeed * deltaSeconds,
       availableDistance,
@@ -3947,7 +4172,10 @@ scene.onBeforeRenderObservable.add(() => {
     )
     if (!doorway.passable) continue
     for (let index = 0; index < zombies.length; index += 1) {
-      zombies[index].refreshRouteForOpenedDoorway(binding.doorwayPosition)
+      zombies[index].refreshRouteForOpenedDoorway(
+        binding.cabin,
+        camera.position,
+      )
     }
   }
 
