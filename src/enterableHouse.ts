@@ -1,4 +1,5 @@
 import { type AssetContainer } from '@babylonjs/core/assetContainer'
+import { type ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator'
 import { Vector3 } from '@babylonjs/core/Maths/math.vector'
 import { type AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh'
 import { Mesh } from '@babylonjs/core/Meshes/mesh'
@@ -18,6 +19,44 @@ interface EnterableShedOptions {
   scene: Scene
   shedContainer: AssetContainer
   worldLayerMask: number
+}
+
+/**
+ * Everything that distinguishes one cabin instance from another. Each cabin
+ * owns its own door hinge, door state, animation, colliders, and interaction
+ * range, so two cabins built from this config never share mutable state.
+ */
+export interface EnterableCabinConfig {
+  /** Import name for this cabin's own copy of the shed hierarchy. */
+  readonly instanceName: string
+  /** Radius around this cabin's doorway that offers its own use prompt. */
+  readonly interactionDistance: number
+  /** Name prefix for every collider, hinge, and shelter this cabin owns. */
+  readonly namePrefix: string
+  /**
+   * Yaw of this cabin's gameplay collider frame. The visible shed adds the
+   * half-turn that puts its authored entrance on the same side.
+   */
+  readonly rotationY: number
+  /** Written to every collider's `metadata.structure`. */
+  readonly structureId: string
+  readonly uniformScale: number
+  readonly x: number
+  readonly z: number
+}
+
+export interface EnterableCabinOptions extends EnterableShedOptions {
+  readonly cabin: EnterableCabinConfig
+  /**
+   * Supplied only by cabins that already cast shadows. Omitting it keeps a
+   * cabin's existing shadow behaviour untouched.
+   */
+  readonly shadowGenerator?: ShadowGenerator | null
+  /**
+   * Supplied only by cabins whose gameplay blocker was already part of the
+   * environment registry (zombie spawn clearance, decal picking).
+   */
+  readonly registerStaticCollider?: (mesh: AbstractMesh) => void
 }
 
 export type InteractiveDoorState = 'closed' | 'opening' | 'open' | 'closing'
@@ -50,9 +89,12 @@ export interface ZombieCabinCollision {
 
 export interface EnterableHouseResult {
   asset: WoodenShedAssetSummary
+  /** Stable id shared with this cabin's collider metadata. */
+  cabinId: string
   colliderNames: readonly string[]
   collisionMeshCount: number
   frontDoor: InteractiveHouseDoor
+  interactionDistance: number
   interior: {
     collisionMeshCount: number
     lightCount: number
@@ -68,37 +110,28 @@ export interface EnterableHouseResult {
   zombieCollision: ZombieCabinCollision
 }
 
-interface HouseTransform {
-  x: number
-  z: number
-  rotationY: number
-}
-
-const HOUSE_TRANSFORM: HouseTransform = {
-  // Exact center and orientation of the building this asset replaces.
-  x: -15.6,
-  z: 19.7,
-  rotationY: -0.04,
-}
-// Babylon's glTF conversion leaves this asset's entrance on +Z. A half-turn
-// aligns it with the former building's -Z-facing entrance.
-const SHED_ROTATION_Y = HOUSE_TRANSFORM.rotationY + Math.PI
+export const DEFAULT_CABIN_INTERACTION_DISTANCE = 2.2
 
 // The source is authored at 338.87 x 327.97 x 305.91 units with a
-// 165.48-unit-tall door. This one uniform scale preserves its proportions while
-// producing a believable 4.47 x 4.33 x 4.04 metre enterable building.
-const SHED_UNIFORM_SCALE = 0.0132
+// 165.48-unit-tall door. One uniform scale preserves those proportions; the
+// reference scale below produces the 4.47 x 4.33 x 4.04 metre cabin the
+// gameplay collider layout was measured against.
+const REFERENCE_UNIFORM_SCALE = 0.0132
 const SHED_WIDTH = 4.47
 const SHED_DEPTH = 4.04
 const SHED_INTERIOR_WIDTH = 3.72
 const SHED_INTERIOR_DEPTH = 3.34
 const SHED_WALL_HEIGHT = 3.05
+const SHELTER_MAXIMUM_Y = 3.3
 
 const WALL_THICKNESS = 0.18
 const FRONT_Z = -1.73
 const REAR_Z = 1.66
 const WEST_X = -1.99
 const EAST_X = 2.02
+const REAR_WALL_WIDTH = 4.12
+const SIDE_WALL_DEPTH = 3.57
+const SIDE_WALL_CENTER_Z = -0.035
 // Babylon's handedness conversion keeps the off-centre doorway on positive
 // local X after the entrance-facing half-turn. The opening is deliberately
 // wide enough for the first-person collision ellipsoid without touching either
@@ -108,12 +141,22 @@ const DOOR_OPENING_RIGHT = 1.8
 const FRONT_LEFT_EDGE = -2.05
 const FRONT_RIGHT_EDGE = 2.08
 const LINTEL_BOTTOM = 2.28
-
-const DOOR_ANIMATION_SECONDS = 0.46
-const DOOR_OPEN_ANGLE = -Math.PI * 0.53
 const DOOR_COLLIDER_WIDTH = 0.98
 const DOOR_COLLIDER_HEIGHT = 2.19
 const DOOR_COLLIDER_DEPTH = 0.12
+
+// Headroom the invisible doorway must keep for the first-person capsule, whose
+// top rides at the 1.72 m eye height. The reference cabin's lintel already sits
+// well above this, so its layout is untouched; a smaller cabin keeps its
+// invisible lintel this high anyway. That is the same deliberate compromise the
+// collision doorway already makes on width, where the clear span is wider than
+// the authored door slab so the capsule never catches a jamb.
+const DOORWAY_MINIMUM_CLEAR_HEIGHT = 1.95
+
+// Timing and swing are proportions of the door itself, so they are shared by
+// every cabin regardless of how large that cabin is.
+const DOOR_ANIMATION_SECONDS = 0.46
+const DOOR_OPEN_ANGLE = -Math.PI * 0.53
 const ZOMBIE_COLLISION_EPSILON = 0.002
 const ZOMBIE_COLLISION_DIRECTION_EPSILON = 0.00000001
 const ZOMBIE_COLLISION_MAX_SLIDES = 3
@@ -139,52 +182,157 @@ function horizontalBounds(
   }
 }
 
-const FRONT_LEFT_WALL_BOUNDS = horizontalBounds(
-  FRONT_LEFT_EDGE + (DOOR_OPENING_LEFT - FRONT_LEFT_EDGE) * 0.5,
-  FRONT_Z,
-  DOOR_OPENING_LEFT - FRONT_LEFT_EDGE,
-  WALL_THICKNESS,
-)
-const FRONT_RIGHT_WALL_BOUNDS = horizontalBounds(
-  DOOR_OPENING_RIGHT + (FRONT_RIGHT_EDGE - DOOR_OPENING_RIGHT) * 0.5,
-  FRONT_Z,
-  FRONT_RIGHT_EDGE - DOOR_OPENING_RIGHT,
-  WALL_THICKNESS,
-)
-const REAR_WALL_BOUNDS = horizontalBounds(0, REAR_Z, 4.12, WALL_THICKNESS)
-const WEST_WALL_BOUNDS = horizontalBounds(WEST_X, -0.035, WALL_THICKNESS, 3.57)
-const EAST_WALL_BOUNDS = horizontalBounds(EAST_X, -0.035, WALL_THICKNESS, 3.57)
-const CLOSED_DOORWAY_BOUNDS = horizontalBounds(
-  (DOOR_OPENING_LEFT + DOOR_OPENING_RIGHT) * 0.5,
-  FRONT_Z,
-  DOOR_OPENING_RIGHT - DOOR_OPENING_LEFT,
-  WALL_THICKNESS,
-)
-const STATIC_ZOMBIE_WALL_BOUNDS: readonly HorizontalCollisionBounds[] = [
-  FRONT_LEFT_WALL_BOUNDS,
-  FRONT_RIGHT_WALL_BOUNDS,
-  REAR_WALL_BOUNDS,
-  WEST_WALL_BOUNDS,
-  EAST_WALL_BOUNDS,
-]
+interface CabinLayout {
+  readonly closedDoorwayBounds: HorizontalCollisionBounds
+  readonly doorColliderDepth: number
+  readonly doorColliderHeight: number
+  readonly doorColliderWidth: number
+  readonly doorOpeningLeft: number
+  readonly doorOpeningRight: number
+  readonly eastX: number
+  readonly frontLeftWallBounds: HorizontalCollisionBounds
+  readonly frontRightWallBounds: HorizontalCollisionBounds
+  readonly frontZ: number
+  readonly interiorDepth: number
+  readonly interiorWidth: number
+  readonly lintelBottom: number
+  readonly rearWallWidth: number
+  readonly rearZ: number
+  readonly shedDepth: number
+  readonly shedWidth: number
+  readonly shelterMaximumY: number
+  readonly sideWallCenterZ: number
+  readonly sideWallDepth: number
+  readonly staticZombieWallBounds: readonly HorizontalCollisionBounds[]
+  readonly wallHeight: number
+  readonly wallThickness: number
+  readonly westX: number
+}
 
 /**
- * Instantiates the downloaded Old Wooden Shed as the complete enterable
- * building. No procedural shell, floor, roof, window, trim, interior prop,
- * light, or decorative mesh is created here.
+ * Derives one cabin's complete collider layout from its uniform scale. Every
+ * length is measured on the shed at REFERENCE_UNIFORM_SCALE, so scaling all of
+ * them together keeps the walls, lintel, doorway, and door slab aligned with
+ * the same authored geometry on a cabin of any size.
  */
-export function createEnterableWoodenShed(
-  options: EnterableShedOptions,
+function createCabinLayout(uniformScale: number): CabinLayout {
+  const scale = uniformScale / REFERENCE_UNIFORM_SCALE
+  const wallThickness = WALL_THICKNESS * scale
+  const frontZ = FRONT_Z * scale
+  const doorOpeningLeft = DOOR_OPENING_LEFT * scale
+  const doorOpeningRight = DOOR_OPENING_RIGHT * scale
+  const frontLeftEdge = FRONT_LEFT_EDGE * scale
+  const frontRightEdge = FRONT_RIGHT_EDGE * scale
+  const rearZ = REAR_Z * scale
+  const rearWallWidth = REAR_WALL_WIDTH * scale
+  const westX = WEST_X * scale
+  const eastX = EAST_X * scale
+  const sideWallDepth = SIDE_WALL_DEPTH * scale
+  const sideWallCenterZ = SIDE_WALL_CENTER_Z * scale
+
+  const frontLeftWallBounds = horizontalBounds(
+    frontLeftEdge + (doorOpeningLeft - frontLeftEdge) * 0.5,
+    frontZ,
+    doorOpeningLeft - frontLeftEdge,
+    wallThickness,
+  )
+  const frontRightWallBounds = horizontalBounds(
+    doorOpeningRight + (frontRightEdge - doorOpeningRight) * 0.5,
+    frontZ,
+    frontRightEdge - doorOpeningRight,
+    wallThickness,
+  )
+  const rearWallBounds = horizontalBounds(0, rearZ, rearWallWidth, wallThickness)
+  const westWallBounds = horizontalBounds(
+    westX,
+    sideWallCenterZ,
+    wallThickness,
+    sideWallDepth,
+  )
+  const eastWallBounds = horizontalBounds(
+    eastX,
+    sideWallCenterZ,
+    wallThickness,
+    sideWallDepth,
+  )
+
+  const wallHeight = SHED_WALL_HEIGHT * scale
+  // Clear width scales to 1.49 m on the smaller cabin, still far wider than the
+  // 0.9 m capsule, so only the height needs a floor.
+  const lintelBottom = Math.min(
+    Math.max(LINTEL_BOTTOM * scale, DOORWAY_MINIMUM_CLEAR_HEIGHT),
+    wallHeight,
+  )
+
+  return {
+    closedDoorwayBounds: horizontalBounds(
+      (doorOpeningLeft + doorOpeningRight) * 0.5,
+      frontZ,
+      doorOpeningRight - doorOpeningLeft,
+      wallThickness,
+    ),
+    doorColliderDepth: DOOR_COLLIDER_DEPTH * scale,
+    doorColliderHeight: DOOR_COLLIDER_HEIGHT * scale,
+    doorColliderWidth: DOOR_COLLIDER_WIDTH * scale,
+    doorOpeningLeft,
+    doorOpeningRight,
+    eastX,
+    frontLeftWallBounds,
+    frontRightWallBounds,
+    frontZ,
+    interiorDepth: SHED_INTERIOR_DEPTH * scale,
+    interiorWidth: SHED_INTERIOR_WIDTH * scale,
+    lintelBottom,
+    rearWallWidth,
+    rearZ,
+    shedDepth: SHED_DEPTH * scale,
+    shedWidth: SHED_WIDTH * scale,
+    shelterMaximumY: SHELTER_MAXIMUM_Y * scale,
+    sideWallCenterZ,
+    sideWallDepth,
+    staticZombieWallBounds: [
+      frontLeftWallBounds,
+      frontRightWallBounds,
+      rearWallBounds,
+      westWallBounds,
+      eastWallBounds,
+    ],
+    wallHeight,
+    wallThickness,
+    westX,
+  }
+}
+
+/**
+ * Instantiates one downloaded Old Wooden Shed as a complete enterable cabin:
+ * its own wall/lintel colliders, its own hinged door with animation and
+ * collision, and its own zombie wall/doorway solver. No procedural shell,
+ * floor, roof, window, trim, interior prop, light, or decorative mesh is
+ * created here.
+ */
+export function createEnterableCabin(
+  options: EnterableCabinOptions,
 ): EnterableHouseResult {
-  const { scene, shedContainer, worldLayerMask } = options
+  const {
+    cabin,
+    registerStaticCollider,
+    scene,
+    shadowGenerator,
+    shedContainer,
+    worldLayerMask,
+  } = options
+  const layout = createCabinLayout(cabin.uniformScale)
+  // Babylon's glTF conversion leaves this asset's entrance on +Z. A half-turn
+  // aligns it with the facing direction of the building it replaces.
+  const shedRotationY = cabin.rotationY + Math.PI
   const shed = instantiateAuditedWoodenShed({
-    instanceName: 'enterableOldWoodenShed',
-    rotationY: SHED_ROTATION_Y,
+    instanceName: cabin.instanceName,
+    rotationY: shedRotationY,
     scene,
     shedContainer,
-    targetX: HOUSE_TRANSFORM.x,
-    targetZ: HOUSE_TRANSFORM.z,
-    uniformScale: SHED_UNIFORM_SCALE,
+    targetX: cabin.x,
+    targetZ: cabin.z,
+    uniformScale: cabin.uniformScale,
     worldLayerMask,
   })
   const {
@@ -195,17 +343,23 @@ export function createEnterableWoodenShed(
     movingDoorNode,
   } = shed
 
+  // The hinge, the moving door subtree, and the door collider all come from
+  // this cabin's own instantiated hierarchy, so each cabin animates its own
+  // door and never reaches another cabin's meshes.
   movingDoorNode.computeWorldMatrix(true)
   const doorHingeWorld = movingDoorNode.getAbsolutePosition().clone()
-  const doorHinge = new TransformNode('oldWoodenShedDoorHinge', scene)
+  const doorHinge = new TransformNode(`${cabin.namePrefix}DoorHinge`, scene)
   doorHinge.position.copyFrom(doorHingeWorld)
   movingDoorNode.setParent(doorHinge, true)
 
   // Simple meter-scale gameplay collision, independent of the detailed GLB.
-  // The local collider frame uses the same center and yaw as the old house.
-  const collisionRoot = new TransformNode('oldWoodenShedCollisionRoot', scene)
-  collisionRoot.position.set(HOUSE_TRANSFORM.x, 0, HOUSE_TRANSFORM.z)
-  collisionRoot.rotation.y = HOUSE_TRANSFORM.rotationY
+  // The local collider frame uses this cabin's own center and yaw.
+  const collisionRoot = new TransformNode(
+    `${cabin.namePrefix}CollisionRoot`,
+    scene,
+  )
+  collisionRoot.position.set(cabin.x, 0, cabin.z)
+  collisionRoot.rotation.y = cabin.rotationY
   const colliders: Mesh[] = []
   let interiorCollisionMeshCount = 0
 
@@ -233,100 +387,102 @@ export function createEnterableWoodenShed(
       enterableHouse: true,
       interior,
       preserveWithImportedEnvironment: true,
-      structure: 'oldWoodenShed',
+      structure: cabin.structureId,
+      zombieCabinId: cabin.structureId,
       zombieCabinObstacle: 'wall',
     }
     colliders.push(collider)
+    registerStaticCollider?.(collider)
     if (interior) interiorCollisionMeshCount += 1
     return collider
   }
 
   collisionBox(
-    'oldWoodenShedFrontLeftWallCollider',
+    `${cabin.namePrefix}FrontLeftWallCollider`,
     new Vector3(
-      (FRONT_LEFT_WALL_BOUNDS.minimumX + FRONT_LEFT_WALL_BOUNDS.maximumX) * 0.5,
-      SHED_WALL_HEIGHT * 0.5,
-      FRONT_Z,
+      (layout.frontLeftWallBounds.minimumX + layout.frontLeftWallBounds.maximumX) * 0.5,
+      layout.wallHeight * 0.5,
+      layout.frontZ,
     ),
     new Vector3(
-      FRONT_LEFT_WALL_BOUNDS.maximumX - FRONT_LEFT_WALL_BOUNDS.minimumX,
-      SHED_WALL_HEIGHT,
-      WALL_THICKNESS,
-    ),
-  )
-  collisionBox(
-    'oldWoodenShedFrontRightWallCollider',
-    new Vector3(
-      (FRONT_RIGHT_WALL_BOUNDS.minimumX + FRONT_RIGHT_WALL_BOUNDS.maximumX) * 0.5,
-      SHED_WALL_HEIGHT * 0.5,
-      FRONT_Z,
-    ),
-    new Vector3(
-      FRONT_RIGHT_WALL_BOUNDS.maximumX - FRONT_RIGHT_WALL_BOUNDS.minimumX,
-      SHED_WALL_HEIGHT,
-      WALL_THICKNESS,
+      layout.frontLeftWallBounds.maximumX - layout.frontLeftWallBounds.minimumX,
+      layout.wallHeight,
+      layout.wallThickness,
     ),
   )
   collisionBox(
-    'oldWoodenShedFrontLintelCollider',
+    `${cabin.namePrefix}FrontRightWallCollider`,
     new Vector3(
-      (DOOR_OPENING_LEFT + DOOR_OPENING_RIGHT) * 0.5,
-      LINTEL_BOTTOM + (SHED_WALL_HEIGHT - LINTEL_BOTTOM) * 0.5,
-      FRONT_Z,
+      (layout.frontRightWallBounds.minimumX + layout.frontRightWallBounds.maximumX) * 0.5,
+      layout.wallHeight * 0.5,
+      layout.frontZ,
     ),
     new Vector3(
-      DOOR_OPENING_RIGHT - DOOR_OPENING_LEFT,
-      SHED_WALL_HEIGHT - LINTEL_BOTTOM,
-      WALL_THICKNESS,
+      layout.frontRightWallBounds.maximumX - layout.frontRightWallBounds.minimumX,
+      layout.wallHeight,
+      layout.wallThickness,
     ),
   )
   collisionBox(
-    'oldWoodenShedRearWallCollider',
-    new Vector3(0, SHED_WALL_HEIGHT * 0.5, REAR_Z),
-    new Vector3(4.12, SHED_WALL_HEIGHT, WALL_THICKNESS),
+    `${cabin.namePrefix}FrontLintelCollider`,
+    new Vector3(
+      (layout.doorOpeningLeft + layout.doorOpeningRight) * 0.5,
+      layout.lintelBottom + (layout.wallHeight - layout.lintelBottom) * 0.5,
+      layout.frontZ,
+    ),
+    new Vector3(
+      layout.doorOpeningRight - layout.doorOpeningLeft,
+      layout.wallHeight - layout.lintelBottom,
+      layout.wallThickness,
+    ),
   )
   collisionBox(
-    'oldWoodenShedWestWallCollider',
-    new Vector3(WEST_X, SHED_WALL_HEIGHT * 0.5, -0.035),
-    new Vector3(WALL_THICKNESS, SHED_WALL_HEIGHT, 3.57),
+    `${cabin.namePrefix}RearWallCollider`,
+    new Vector3(0, layout.wallHeight * 0.5, layout.rearZ),
+    new Vector3(layout.rearWallWidth, layout.wallHeight, layout.wallThickness),
   )
   collisionBox(
-    'oldWoodenShedEastWallCollider',
-    new Vector3(EAST_X, SHED_WALL_HEIGHT * 0.5, -0.035),
-    new Vector3(WALL_THICKNESS, SHED_WALL_HEIGHT, 3.57),
+    `${cabin.namePrefix}WestWallCollider`,
+    new Vector3(layout.westX, layout.wallHeight * 0.5, layout.sideWallCenterZ),
+    new Vector3(layout.wallThickness, layout.wallHeight, layout.sideWallDepth),
+  )
+  collisionBox(
+    `${cabin.namePrefix}EastWallCollider`,
+    new Vector3(layout.eastX, layout.wallHeight * 0.5, layout.sideWallCenterZ),
+    new Vector3(layout.wallThickness, layout.wallHeight, layout.sideWallDepth),
   )
 
-  // The animated panel follows the authored 0.98 m door slab, while the
-  // collision doorway is intentionally 1.95 m wide for the player capsule.
-  // Fill that complete opening until the animation reaches fully open; using
-  // the narrow moving panel alone leaves a zombie-sized gap beside it.
+  // The animated panel follows the authored door slab, while the collision
+  // doorway is intentionally wider for the player capsule. Fill that complete
+  // opening until the animation reaches fully open; using the narrow moving
+  // panel alone leaves a zombie-sized gap beside it.
   const closedDoorwayBlocker = collisionBox(
-    'oldWoodenShedClosedDoorwayCollider',
+    `${cabin.namePrefix}ClosedDoorwayCollider`,
     new Vector3(
-      (CLOSED_DOORWAY_BOUNDS.minimumX + CLOSED_DOORWAY_BOUNDS.maximumX) * 0.5,
-      LINTEL_BOTTOM * 0.5,
-      FRONT_Z,
+      (layout.closedDoorwayBounds.minimumX + layout.closedDoorwayBounds.maximumX) * 0.5,
+      layout.lintelBottom * 0.5,
+      layout.frontZ,
     ),
     new Vector3(
-      CLOSED_DOORWAY_BOUNDS.maximumX - CLOSED_DOORWAY_BOUNDS.minimumX,
-      LINTEL_BOTTOM,
-      WALL_THICKNESS,
+      layout.closedDoorwayBounds.maximumX - layout.closedDoorwayBounds.minimumX,
+      layout.lintelBottom,
+      layout.wallThickness,
     ),
   )
   closedDoorwayBlocker.metadata.closedDoorway = true
   closedDoorwayBlocker.metadata.zombieCabinObstacle = 'door'
 
   const doorPanel = MeshBuilder.CreateBox(
-    'oldWoodenShedDoorCollider',
+    `${cabin.namePrefix}DoorCollider`,
     {
-      width: DOOR_COLLIDER_WIDTH,
-      height: DOOR_COLLIDER_HEIGHT,
-      depth: DOOR_COLLIDER_DEPTH,
+      width: layout.doorColliderWidth,
+      height: layout.doorColliderHeight,
+      depth: layout.doorColliderDepth,
     },
     scene,
   )
   doorPanel.position.copyFrom(placedDoorBounds.center)
-  doorPanel.rotation.y = HOUSE_TRANSFORM.rotationY
+  doorPanel.rotation.y = cabin.rotationY
   doorPanel.visibility = 0
   doorPanel.isPickable = true
   doorPanel.checkCollisions = true
@@ -337,7 +493,8 @@ export function createEnterableWoodenShed(
     importedOldWoodenShed: true,
     interactiveDoor: true,
     preserveWithImportedEnvironment: true,
-    structure: 'oldWoodenShed',
+    structure: cabin.structureId,
+    zombieCabinId: cabin.structureId,
     zombieCabinObstacle: 'door',
   }
   doorPanel.setParent(doorHinge, true)
@@ -347,6 +504,7 @@ export function createEnterableWoodenShed(
   // and moving collider deliberately remain dynamic.
   const movingDoorSet = new Set<AbstractMesh>(movingDoorMeshes)
   for (const mesh of importedMeshes) {
+    shadowGenerator?.addShadowCaster(mesh)
     if (movingDoorSet.has(mesh)) continue
     mesh.computeWorldMatrix(true)
     mesh.freezeWorldMatrix()
@@ -365,13 +523,14 @@ export function createEnterableWoodenShed(
   let doorState: InteractiveDoorState = 'closed'
   let doorProgress = 0
 
-  const collisionCosine = Math.cos(HOUSE_TRANSFORM.rotationY)
-  const collisionSine = Math.sin(HOUSE_TRANSFORM.rotationY)
+  const collisionCosine = Math.cos(cabin.rotationY)
+  const collisionSine = Math.sin(cabin.rotationY)
   const zombieCollision: ZombieCabinCollision = {
     blocksObstacleProbe(mesh) {
       const obstacleKind = mesh.metadata?.zombieCabinObstacle
-      if (obstacleKind === 'wall') return true
-      if (obstacleKind === 'door') return doorState !== 'open'
+      const ownsMesh = mesh.metadata?.zombieCabinId === cabin.structureId
+      if (ownsMesh && obstacleKind === 'wall') return true
+      if (ownsMesh && obstacleKind === 'door') return doorState !== 'open'
       return mesh.checkCollisions
     },
     resolveMovement(position, movement, radius) {
@@ -382,8 +541,8 @@ export function createEnterableWoodenShed(
       ) return
 
       // Work in the same unrotated local frame as the simple cabin boxes.
-      const worldStartX = position.x - HOUSE_TRANSFORM.x
-      const worldStartZ = position.z - HOUSE_TRANSFORM.z
+      const worldStartX = position.x - cabin.x
+      const worldStartZ = position.z - cabin.z
       let currentX = worldStartX * collisionCosine + worldStartZ * collisionSine
       let currentZ = -worldStartX * collisionSine + worldStartZ * collisionCosine
       let remainingX = movement.x * collisionCosine + movement.z * collisionSine
@@ -402,13 +561,13 @@ export function createEnterableWoodenShed(
         let collisionNormalX = 0
         let collisionNormalZ = 0
         let collided = false
-        const barrierCount = STATIC_ZOMBIE_WALL_BOUNDS.length
+        const barrierCount = layout.staticZombieWallBounds.length
           + (doorState === 'open' ? 0 : 1)
 
         for (let index = 0; index < barrierCount; index += 1) {
-          const bounds = index < STATIC_ZOMBIE_WALL_BOUNDS.length
-            ? STATIC_ZOMBIE_WALL_BOUNDS[index]
-            : CLOSED_DOORWAY_BOUNDS
+          const bounds = index < layout.staticZombieWallBounds.length
+            ? layout.staticZombieWallBounds[index]
+            : layout.closedDoorwayBounds
           const minimumX = bounds.minimumX - radius
           const maximumX = bounds.maximumX + radius
           const minimumZ = bounds.minimumZ - radius
@@ -549,10 +708,12 @@ export function createEnterableWoodenShed(
 
   return {
     asset,
+    cabinId: cabin.structureId,
     colliderNames: colliders.map((collider) => collider.name),
     collisionMeshCount: colliders.length,
     frontDoor,
-    footprint: [SHED_WIDTH, SHED_DEPTH],
+    footprint: [layout.shedWidth, layout.shedDepth],
+    interactionDistance: cabin.interactionDistance,
     interior: {
       collisionMeshCount: interiorCollisionMeshCount,
       lightCount: 0,
@@ -563,20 +724,49 @@ export function createEnterableWoodenShed(
       ],
       visibleMeshCount: importedMeshes.length,
     },
-    position: [HOUSE_TRANSFORM.x, HOUSE_TRANSFORM.z],
-    rotationY: SHED_ROTATION_Y,
+    position: [cabin.x, cabin.z],
+    rotationY: shedRotationY,
     visibleMeshCount: importedMeshes.length,
     weatherShelters: [{
-      name: 'oldWoodenShedInterior',
-      x: HOUSE_TRANSFORM.x,
-      z: HOUSE_TRANSFORM.z,
-      width: SHED_INTERIOR_WIDTH,
-      depth: SHED_INTERIOR_DEPTH,
-      rotationY: HOUSE_TRANSFORM.rotationY,
+      name: `${cabin.namePrefix}Interior`,
+      x: cabin.x,
+      z: cabin.z,
+      width: layout.interiorWidth,
+      depth: layout.interiorDepth,
+      rotationY: cabin.rotationY,
       minimumY: 0,
-      maximumY: 3.3,
+      maximumY: layout.shelterMaximumY,
     }],
     winterSurfaces: [],
     zombieCollision,
   }
+}
+
+// Exact center, orientation, and scale of the first cabin. These are the values
+// of the building this asset replaces and are deliberately left untouched.
+const ENTERABLE_HOUSE_CABIN: EnterableCabinConfig = {
+  instanceName: 'enterableOldWoodenShed',
+  interactionDistance: DEFAULT_CABIN_INTERACTION_DISTANCE,
+  namePrefix: 'oldWoodenShed',
+  rotationY: -0.04,
+  structureId: 'oldWoodenShed',
+  uniformScale: REFERENCE_UNIFORM_SCALE,
+  x: -15.6,
+  z: 19.7,
+}
+
+/**
+ * Builds the first enterable cabin. Its wiring is intentionally narrow: this
+ * cabin has never cast shadows or joined the environment registry, so neither
+ * optional hook is forwarded.
+ */
+export function createEnterableWoodenShed(
+  options: EnterableShedOptions,
+): EnterableHouseResult {
+  return createEnterableCabin({
+    cabin: ENTERABLE_HOUSE_CABIN,
+    scene: options.scene,
+    shedContainer: options.shedContainer,
+    worldLayerMask: options.worldLayerMask,
+  })
 }

@@ -34,6 +34,10 @@ import {
 } from './assets/localAssetManager'
 import { createAbandonedStructures } from './abandonedStructures'
 import {
+  type EnterableHouseResult,
+  type InteractiveHouseDoor,
+} from './enterableHouse'
+import {
   applyImportedMaterialSettings,
   matchImportedArmMaterials,
   vector3FromTuple,
@@ -929,23 +933,72 @@ canvas.dataset.interiorObjectCount = String(
   abandonedStructures.enterableHouse.interior.objects.length,
 )
 
-const frontDoor = abandonedStructures.enterableHouse.frontDoor
-frontDoor.reset()
-const doorwayPosition = Vector3.Zero()
-frontDoor.getDoorwayPositionToRef(doorwayPosition)
+// One binding per cabin. Every cabin keeps its own door reference, doorway
+// position, and interaction range, so the prompt and the toggle always act on
+// the cabin the player is actually standing at.
+interface CabinDoorBinding {
+  readonly cabin: EnterableHouseResult
+  readonly door: InteractiveHouseDoor
+  readonly doorwayPosition: Vector3
+  readonly interactionDistanceSquared: number
+}
+
+const cabinDoors: readonly CabinDoorBinding[] =
+  abandonedStructures.cabins.map((cabin) => {
+    const cabinDoorwayPosition = Vector3.Zero()
+    cabin.frontDoor.getDoorwayPositionToRef(cabinDoorwayPosition)
+    cabin.frontDoor.reset()
+    return {
+      cabin,
+      door: cabin.frontDoor,
+      doorwayPosition: cabinDoorwayPosition,
+      interactionDistanceSquared:
+        cabin.interactionDistance * cabin.interactionDistance,
+    }
+  })
+const primaryCabinDoor = cabinDoors[0]
+const secondaryCabinDoor = cabinDoors[1] ?? null
+const frontDoor = primaryCabinDoor.door
+const doorwayPosition = primaryCabinDoor.doorwayPosition
+// Both moving door colliders need a forced world matrix before any off-frame
+// occlusion test, so they are collected once here.
+const cabinDoorPanels = new Set<AbstractMesh>(
+  cabinDoors.map((binding) => binding.door.panel),
+)
 canvas.dataset.shedDoorwayPosition =
   `${doorwayPosition.x.toFixed(3)},${doorwayPosition.z.toFixed(3)}`
-const DOOR_INTERACTION_DISTANCE = 2.2
-const DOOR_INTERACTION_DISTANCE_SQUARED =
-  DOOR_INTERACTION_DISTANCE * DOOR_INTERACTION_DISTANCE
+if (secondaryCabinDoor) {
+  canvas.dataset.secondaryShedDoorwayPosition =
+    `${secondaryCabinDoor.doorwayPosition.x.toFixed(3)},`
+    + `${secondaryCabinDoor.doorwayPosition.z.toFixed(3)}`
+}
+let activeCabinDoor: CabinDoorBinding | null = null
 let doorInteractionAvailable = false
 let doorPromptAction: 'Open' | 'Close' = 'Open'
 let renderedDoorUiVisible = false
 let renderedDoorUiAction: 'Open' | 'Close' | null = null
 
-function setDoorInteractionUi(visible: boolean) {
+function publishDoorDatasets() {
+  canvas.dataset.doorState = frontDoor.state
+  canvas.dataset.doorAnimating = String(frontDoor.isAnimating)
+  canvas.dataset.doorCollision = String(frontDoor.panel.checkCollisions)
+  if (!secondaryCabinDoor) return
+  canvas.dataset.secondaryDoorState = secondaryCabinDoor.door.state
+  canvas.dataset.secondaryDoorAnimating =
+    String(secondaryCabinDoor.door.isAnimating)
+  canvas.dataset.secondaryDoorCollision =
+    String(secondaryCabinDoor.door.panel.checkCollisions)
+}
+
+function setDoorInteractionUi(binding: CabinDoorBinding | null) {
+  activeCabinDoor = binding
+  const visible = binding !== null
   doorInteractionAvailable = visible
-  const action = frontDoor.state === 'open' ? 'Close' : 'Open'
+  // With no cabin in range the prompt still reports the first cabin's action,
+  // exactly as the single-cabin version did.
+  const action = (binding ?? primaryCabinDoor).door.state === 'open'
+    ? 'Close'
+    : 'Open'
   doorPromptAction = action
   if (visible === renderedDoorUiVisible && action === renderedDoorUiAction) return
   renderedDoorUiVisible = visible
@@ -964,26 +1017,37 @@ function setDoorInteractionUi(visible: boolean) {
 }
 
 function updateDoorInteractionUi() {
-  if (!gameplayInputEnabled() || frontDoor.isAnimating) {
-    setDoorInteractionUi(false)
+  if (!gameplayInputEnabled()) {
+    setDoorInteractionUi(null)
     return
   }
-  // Door interaction is a fixed horizontal doorway zone. It deliberately does
-  // not ray-pick the panel or shell, so the wall colliders and the moving door
-  // pose can never hide the control from a nearby player.
-  const distanceX = doorwayPosition.x - camera.globalPosition.x
-  const distanceZ = doorwayPosition.z - camera.globalPosition.z
-  setDoorInteractionUi(
-    distanceX * distanceX + distanceZ * distanceZ
-      <= DOOR_INTERACTION_DISTANCE_SQUARED,
-  )
+  // Door interaction is a fixed horizontal doorway zone per cabin. It
+  // deliberately does not ray-pick the panel or shell, so the wall colliders and
+  // the moving door pose can never hide the control from a nearby player. A
+  // cabin whose own door is mid-animation offers no prompt.
+  let nearestBinding: CabinDoorBinding | null = null
+  let nearestDistanceSquared = Number.POSITIVE_INFINITY
+  for (const binding of cabinDoors) {
+    if (binding.door.isAnimating) continue
+    const distanceX = binding.doorwayPosition.x - camera.globalPosition.x
+    const distanceZ = binding.doorwayPosition.z - camera.globalPosition.z
+    const distanceSquared = distanceX * distanceX + distanceZ * distanceZ
+    if (distanceSquared > binding.interactionDistanceSquared) continue
+    if (distanceSquared >= nearestDistanceSquared) continue
+    nearestBinding = binding
+    nearestDistanceSquared = distanceSquared
+  }
+  setDoorInteractionUi(nearestBinding)
 }
 
 useDoorInteraction = () => {
-  if (!gameplayInputEnabled() || !doorInteractionAvailable) return false
-  if (!frontDoor.toggle()) return false
-  setDoorInteractionUi(false)
-  canvas.dataset.doorState = frontDoor.state
+  if (!gameplayInputEnabled()) return false
+  const binding = activeCabinDoor
+  if (!binding) return false
+  // Only the cabin in range toggles; the other cabin's door keeps its state.
+  if (!binding.door.toggle()) return false
+  setDoorInteractionUi(null)
+  publishDoorDatasets()
   return true
 }
 
@@ -998,14 +1062,11 @@ useButton.addEventListener('pointerdown', (event) => {
 
 scene.onBeforeRenderObservable.add(() => {
   const deltaSeconds = Math.min(engine.getDeltaTime() / 1000, 0.05)
-  frontDoor.update(deltaSeconds)
-  canvas.dataset.doorState = frontDoor.state
-  canvas.dataset.doorAnimating = String(frontDoor.isAnimating)
-  canvas.dataset.doorCollision = String(frontDoor.panel.checkCollisions)
+  for (const binding of cabinDoors) binding.door.update(deltaSeconds)
+  publishDoorDatasets()
   updateDoorInteractionUi()
 })
-canvas.dataset.doorState = frontDoor.state
-canvas.dataset.doorCollision = String(frontDoor.panel.checkCollisions)
+publishDoorDatasets()
 
 // Winter is a separate, non-pickable render layer. These planes sit just above
 // the existing surfaces and never replace or modify gameplay geometry.
@@ -2160,7 +2221,7 @@ function getZombieVisualFactory() {
 function isZombieObstacle(mesh: AbstractMesh) {
   return mesh.isEnabled()
     && mesh.metadata?.zombieCollider !== true
-    && abandonedStructures.enterableHouse.zombieCollision.blocksObstacleProbe(mesh)
+    && abandonedStructures.zombieCollision.blocksObstacleProbe(mesh)
 }
 
 // Capture gameplay collision meshes once, after the complete arena and both
@@ -2656,12 +2717,12 @@ class Zombie {
   }
 
   private moveHorizontallyWithCollisions() {
-    // Resolve the cabin's small fixed wall set as a swept horizontal circle
+    // Resolve each cabin's small fixed wall set as a swept horizontal circle
     // before the scene collision pass. This prevents a large knockback step or
     // a corner slide from crossing a thin wall, while Babylon continues to own
     // every other environment/player collision response.
     this.movementDelta.y = 0
-    abandonedStructures.enterableHouse.zombieCollision.resolveMovement(
+    abandonedStructures.zombieCollision.resolveMovement(
       this.root.position,
       this.movementDelta,
       this.root.ellipsoid.x,
@@ -3273,10 +3334,10 @@ class Zombie {
       const occluder = zombieMeleeOccluders[index]
       if (!occluder.checkCollisions || !occluder.isEnabled()) continue
 
-      // Door animation already updates this matrix every frame. Force the live
-      // pose here as well so a hit that lands between render callbacks can
-      // never use a stale closed/open transform.
-      if (occluder === frontDoor.panel) occluder.computeWorldMatrix(true)
+      // Door animation already updates these matrices every frame. Force the
+      // live pose here as well so a hit that lands between render callbacks can
+      // never use a stale closed/open transform for either cabin's door.
+      if (cabinDoorPanels.has(occluder)) occluder.computeWorldMatrix(true)
 
       const intersection = this.meleeProbeRay.intersectsMesh(occluder, true)
       if (
@@ -6968,8 +7029,8 @@ function restartPrototype() {
   camera.setTarget(PLAYER_START_TARGET)
   camera.cameraDirection.set(0, 0, 0)
   camera.cameraRotation.set(0, 0)
-  frontDoor.reset()
-  setDoorInteractionUi(false)
+  for (const binding of cabinDoors) binding.door.reset()
+  setDoorInteractionUi(null)
   previousCameraPosition.copyFrom(camera.position)
   previousCameraRotation.copyFrom(camera.rotation)
   swayX = 0
@@ -7338,6 +7399,19 @@ if (import.meta.env.DEV) {
             promptVisible: doorPrompt.classList.contains('visible'),
             state: frontDoor.state,
           },
+          secondaryDoor: secondaryCabinDoor
+            ? {
+              animating: secondaryCabinDoor.door.isAnimating,
+              collisionEnabled: secondaryCabinDoor.door.panel.checkCollisions,
+              position: {
+                x: secondaryCabinDoor.doorwayPosition.x,
+                y: secondaryCabinDoor.doorwayPosition.y,
+                z: secondaryCabinDoor.doorwayPosition.z,
+              },
+              state: secondaryCabinDoor.door.state,
+            }
+            : null,
+          activeDoorCabinId: activeCabinDoor?.cabin.cabinId ?? null,
           firePointerId,
           gameOver,
           health: playerHealthController.health,
@@ -7546,9 +7620,9 @@ if (import.meta.env.DEV) {
         let remaining = Math.min(seconds, 12)
         while (remaining > 0) {
           const step = Math.min(0.05, remaining)
-          // Matches registration order in the live frame: the moving door pose
-          // settles before the zombie reaches its damage event.
-          frontDoor.update(step)
+          // Matches registration order in the live frame: every cabin's moving
+          // door pose settles before the zombie reaches its damage event.
+          for (const binding of cabinDoors) binding.door.update(step)
           for (let index = firstZombieIndex; index <= lastZombieIndex; index += 1) {
             zombies[index].update(step, false, camera.position)
           }
