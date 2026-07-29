@@ -5,6 +5,7 @@ export type LocalAssetKey =
   | 'environment'
   | 'shed'
   | 'ammoCrate'
+  | 'utilityPole'
 
 export type LocalGlbPath = `/assets/${string}.glb`
 export type LocalTexturePath = `/assets/${string}/`
@@ -104,6 +105,8 @@ export interface ShedAssetDefinition extends LocalGlbAssetDefinition<'shed'> {}
 
 export interface AmmoCrateAssetDefinition extends LocalGlbAssetDefinition<'ammoCrate'> {}
 
+export interface UtilityPoleAssetDefinition extends LocalGlbAssetDefinition<'utilityPole'> {}
+
 export interface LocalAssetDefinitions {
   readonly rifle: RifleAssetDefinition
   readonly shotgun: ShotgunAssetDefinition
@@ -111,6 +114,7 @@ export interface LocalAssetDefinitions {
   readonly environment: EnvironmentAssetDefinition
   readonly shed: ShedAssetDefinition
   readonly ammoCrate: AmmoCrateAssetDefinition
+  readonly utilityPole: UtilityPoleAssetDefinition
 }
 
 export interface LocalAssetConfiguration {
@@ -285,6 +289,25 @@ export const ASSET_CONFIG = {
       },
       animation: { speed: 1, autoplay: false, loop: false },
       material: { mode: 'source' },
+    },
+    utilityPole: {
+      key: 'utilityPole',
+      label: 'Broken Utility Pole',
+      path: '/assets/environment/utility/broken_utility_pole.glb',
+      transform: {
+        // The authored pole is already in metres and includes its own dirt at
+        // the base. Each fixed placement adds only world position, yaw, and a
+        // small uniform size variation; grounding is measured from the GLB.
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+      },
+      animation: { speed: 1, autoplay: false, loop: false },
+      material: {
+        mode: 'source',
+        minimumRoughness: 0.35,
+        maximumEnvironmentIntensity: 0.7,
+      },
     },
   },
 } as const satisfies LocalAssetConfiguration

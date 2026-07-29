@@ -84,6 +84,7 @@ import {
   logRuntimeWarning,
 } from './runtimeUtils'
 import { ShotgunAudioController } from './shotgunAudio'
+import { createBrokenUtilityPoles } from './utilityPoles'
 import {
   createMuzzleCoreTexture,
   createMuzzleSmokeTexture,
@@ -953,6 +954,32 @@ const ammoCrate = createAmmoCrate({
 canvas.dataset.ammoCrateCabin = abandonedStructures.enterableHouse.cabinId
 canvas.dataset.ammoCrateSource = 'glb'
 canvas.dataset.ammoCrateVisualMeshCount = String(ammoCrate.visualMeshCount)
+
+const utilityPoleAssetResult = await localAssetManager.load('utilityPole')
+if (utilityPoleAssetResult.status !== 'loaded') {
+  throw new Error(
+    `Required broken utility pole GLB failed to load: ${utilityPoleAssetResult.reason}`,
+  )
+}
+const utilityPoles = createBrokenUtilityPoles({
+  castShadows: !isMobile && shadowGenerator !== null,
+  config: utilityPoleAssetResult.config,
+  container: utilityPoleAssetResult.container,
+  registerCollisionMesh(mesh) {
+    proceduralEnvironmentMeshes.push(mesh)
+  },
+  scene,
+  shadowGenerator,
+  worldLayerMask: WORLD_RENDER_LAYER_MASK,
+})
+canvas.dataset.utilityPoleCount = String(utilityPoles.placements.length)
+canvas.dataset.utilityPoleSource = 'glb'
+canvas.dataset.utilityPoleSharing = 'instanced-shared-geometry-materials-textures'
+canvas.dataset.utilityPoleCollisionCount = String(utilityPoles.collisionMeshCount)
+canvas.dataset.utilityPoleVisualMeshCount = String(utilityPoles.visualMeshCount)
+canvas.dataset.utilityPoleLocations = utilityPoles.placements
+  .map(({ position }) => position.join(','))
+  .join('|')
 
 // One binding per cabin. Every cabin keeps its own door reference, doorway
 // position, and interaction range, so the prompt and the toggle always act on
