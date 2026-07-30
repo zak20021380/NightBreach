@@ -88,6 +88,7 @@ import {
 import { ShotgunAudioController } from './shotgunAudio'
 import { createSnowPineForest } from './snowPineForest'
 import { createRustyCars } from './rustyCars'
+import { createRustyStreetlights } from './streetlights'
 import { createBrokenUtilityPoles } from './utilityPoles'
 import {
   createMuzzleCoreTexture,
@@ -907,6 +908,47 @@ canvas.dataset.asphaltRoadRoute =
   asphaltRoad.route.points.map((point) => point.join(',')).join('|')
 canvas.dataset.asphaltRoadSnowTreatmentMeshCount =
   String(asphaltRoad.snowTreatmentMeshCount)
+
+const streetlightAssetResult = await localAssetManager.load('streetlight')
+if (streetlightAssetResult.status !== 'loaded') {
+  throw new Error(
+    `Required rusty streetlight GLB failed to load: ${streetlightAssetResult.reason}`,
+  )
+}
+const rustyStreetlights = createRustyStreetlights({
+  config: streetlightAssetResult.config,
+  container: streetlightAssetResult.container,
+  registerCollisionMesh(mesh) {
+    proceduralEnvironmentMeshes.push(mesh)
+  },
+  scene,
+  worldLayerMask: WORLD_RENDER_LAYER_MASK,
+})
+scene.onDisposeObservable.addOnce(() => rustyStreetlights.dispose())
+canvas.dataset.streetlightCount = String(rustyStreetlights.placements.length)
+canvas.dataset.streetlightSource = 'glb'
+canvas.dataset.streetlightSharing =
+  'hardware-instanced-shared-geometry-materials-textures'
+canvas.dataset.streetlightCollisionCount =
+  String(rustyStreetlights.collisionMeshCount)
+canvas.dataset.streetlightActiveDynamicLightCount =
+  String(rustyStreetlights.activeDynamicLightCount)
+canvas.dataset.streetlightModelDimensions =
+  rustyStreetlights.modelDimensions.join(',')
+canvas.dataset.streetlightModelBounds =
+  `${rustyStreetlights.modelBounds.minimum.join(',')}|`
+  + rustyStreetlights.modelBounds.maximum.join(',')
+canvas.dataset.streetlightModelMeshNames =
+  rustyStreetlights.modelMeshNames.join(',')
+canvas.dataset.streetlightMaterialNames =
+  rustyStreetlights.materialNames.join(',')
+canvas.dataset.streetlightBulbMesh = rustyStreetlights.bulbMeshName
+canvas.dataset.streetlightOrientation = 'Y-up,arm-local-negative-X'
+canvas.dataset.streetlightPlacements = rustyStreetlights.placements
+  .map(({ position, rotationY, lightMode }) => (
+    `${position.join(',')},${rotationY},${lightMode}`
+  ))
+  .join('|')
 
 // One binding per cabin. Every cabin keeps its own door reference, doorway
 // position, and interaction range, so the prompt and the toggle always act on
@@ -7831,6 +7873,9 @@ function restartPrototype() {
   bobBlend = 0
   bobTime = 0
 
+  // Restart the one slow irregular timer from a known state without recreating
+  // or accumulating either of the two streetlight spot lights.
+  rustyStreetlights.resetLighting()
   startZombieWave()
   document.body.classList.remove('game-over')
   retryOverlay.setAttribute('aria-hidden', 'true')

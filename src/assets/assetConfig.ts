@@ -8,6 +8,7 @@ export type LocalAssetKey =
   | 'utilityPole'
   | 'rustyCar'
   | 'asphaltRoad'
+  | 'streetlight'
   | 'snowPinePack'
 
 export type LocalGlbPath = `/assets/${string}.glb`
@@ -114,6 +115,8 @@ export interface RustyCarAssetDefinition extends LocalGlbAssetDefinition<'rustyC
 
 export interface AsphaltRoadAssetDefinition extends LocalGlbAssetDefinition<'asphaltRoad'> {}
 
+export interface StreetlightAssetDefinition extends LocalGlbAssetDefinition<'streetlight'> {}
+
 export interface SnowPinePackAssetDefinition extends LocalGlbAssetDefinition<'snowPinePack'> {}
 
 export interface LocalAssetDefinitions {
@@ -126,6 +129,7 @@ export interface LocalAssetDefinitions {
   readonly utilityPole: UtilityPoleAssetDefinition
   readonly rustyCar: RustyCarAssetDefinition
   readonly asphaltRoad: AsphaltRoadAssetDefinition
+  readonly streetlight: StreetlightAssetDefinition
   readonly snowPinePack: SnowPinePackAssetDefinition
 }
 
@@ -360,6 +364,25 @@ export const ASSET_CONFIG = {
         minimumRoughness: 0.58,
         maximumEnvironmentIntensity: 0.62,
       },
+    },
+    streetlight: {
+      key: 'streetlight',
+      label: 'Rusty Streetlight',
+      path: '/assets/environment/streetlights/rusty-streetlight.glb',
+      transform: {
+        // Audited in the downloaded GLB after its Sketchfab/FBX wrappers:
+        // 4.358 m on X, 9.199 m on Y, and 0.587 m on Z. The pivot is at the
+        // pole foot, +Y is up, and the long lamp arm points toward local -X.
+        // Road-relative placement, grounding, and yaw live in streetlights.ts.
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+      },
+      animation: { speed: 1, autoplay: false, loop: false },
+      // Keep the authored base-colour, metal/roughness, normal, and emissive
+      // maps. streetlights.ts only restrains the shared bulb emissive strength
+      // so the three unpowered poles do not glow like working fixtures.
+      material: { mode: 'source' },
     },
     snowPinePack: {
       key: 'snowPinePack',
