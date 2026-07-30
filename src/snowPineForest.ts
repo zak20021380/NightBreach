@@ -161,29 +161,40 @@ const FOREST_VARIANTS = [
 ] as const satisfies readonly ForestVariantDefinition[]
 
 const INNER_CLUSTERS = [
-  { x: -8.5, z: 22, radius: 3.8 },
-  { x: 9.5, z: 22, radius: 3.5 },
-  { x: -22, z: -1.5, radius: 4.1 },
-  { x: -20.5, z: 11.5, radius: 3.1 },
-  { x: 22, z: 2, radius: 3.5 },
-  { x: 20.5, z: -18.5, radius: 4 },
-  { x: -14.5, z: -22, radius: 3.8 },
-  { x: -5.5, z: -22, radius: 3.5 },
-  { x: 6.5, z: -22, radius: 3.3 },
+  // Near-arena pockets keep the forest present without closing the combat read.
+  { x: -8.5, z: 21.5, radius: 3.6 },
+  { x: 8.5, z: 22.2, radius: 3.4 },
+  { x: -21.5, z: -1.5, radius: 3.8 },
+  { x: -21, z: 11.8, radius: 3.2 },
+  { x: -21.5, z: -10, radius: 3.3 },
+  { x: 21.5, z: 2, radius: 3.4 },
+  { x: 21, z: -18.5, radius: 3.8 },
+  { x: 22, z: 17.5, radius: 3.2 },
+  // These three pockets flank the road's southern approach.
+  { x: -15.5, z: -22, radius: 3.6 },
+  { x: -6.5, z: -22.5, radius: 3.3 },
+  { x: 6.5, z: -22, radius: 3.2 },
 ] as const satisfies readonly ForestCluster[]
 
 const OUTER_CLUSTERS = [
+  // Irregular corner pockets prevent any boundary from reading as an open gap.
+  { x: -32.5, z: -30.5, radius: 4.1 },
   { x: -32, z: -19, radius: 5 },
   { x: -32, z: 3, radius: 4.8 },
-  { x: -30.5, z: 22, radius: 4.7 },
-  { x: -17, z: 31.5, radius: 4.6 },
-  { x: 4, z: 32, radius: 4.8 },
-  { x: 24, z: 31, radius: 4.8 },
+  { x: -31.5, z: 24.5, radius: 4.3 },
+  { x: -29.5, z: 32, radius: 4 },
+  // Dense backdrops sit north of each cabin, outside their protected yards.
+  { x: -18, z: 31.5, radius: 4.3 },
+  { x: 5, z: 32, radius: 4.5 },
+  { x: 24, z: 30.5, radius: 4.4 },
+  { x: 32, z: 31.5, radius: 4.1 },
   { x: 32, z: 16, radius: 4.6 },
   { x: 32, z: -7, radius: 5 },
-  { x: 28, z: -29, radius: 4.5 },
-  { x: 8, z: -32, radius: 5 },
-  { x: -15, z: -32, radius: 4.7 },
+  { x: 32, z: -30.5, radius: 4.2 },
+  // Opposed pockets screen both sides of the road at its south boundary entry.
+  { x: 8, z: -32, radius: 4.7 },
+  { x: -7, z: -32.5, radius: 4.2 },
+  { x: -25.5, z: -33, radius: 4.1 },
 ] as const satisfies readonly ForestCluster[]
 
 // These zones mirror the established map layout. They protect the open combat
@@ -276,41 +287,41 @@ export const SNOW_PINE_FOREST_SETTINGS = {
   groundY: 0.02,
   counts: {
     'mobile-low': {
-      treeCount: 28,
-      innerTreeCount: 7,
-      boundaryTreeCount: 8,
-      bushCount: 4,
+      treeCount: 33,
+      innerTreeCount: 12,
+      boundaryTreeCount: 16,
+      bushCount: 6,
       shadowCasterTreeLimit: 0,
       trunkColliderLimit: 5,
     },
     mobile: {
-      treeCount: 34,
-      innerTreeCount: 9,
-      boundaryTreeCount: 12,
-      bushCount: 5,
+      treeCount: 41,
+      innerTreeCount: 15,
+      boundaryTreeCount: 20,
+      bushCount: 8,
       shadowCasterTreeLimit: 0,
       trunkColliderLimit: 7,
     },
     desktop: {
-      treeCount: 46,
-      innerTreeCount: 13,
-      boundaryTreeCount: 16,
-      bushCount: 8,
+      treeCount: 54,
+      innerTreeCount: 20,
+      boundaryTreeCount: 24,
+      bushCount: 11,
       shadowCasterTreeLimit: 8,
       trunkColliderLimit: 10,
     },
   } satisfies Readonly<Record<WinterPerformanceTier, ForestTierSettings>>,
   treeScaleRange: [0.88, 1.14],
   bushScaleRange: [0.58, 0.84],
-  innerTreeMinimumSpacing: 2.35,
-  outerTreeMinimumSpacing: 2.05,
+  innerTreeMinimumSpacing: 2.2,
+  outerTreeMinimumSpacing: 1.9,
   boundaryTreeMinimumSpacing: 1.7,
   boundaryTreeSeedSalt: 0xa341316c,
   bushMinimumSpacing: 1.1,
   bushMinimumTreeDistance: 0.9,
   innerBand: {
     maximumCoordinate: 24.15,
-    minimumEdgeCoordinate: 18,
+    minimumEdgeCoordinate: 17.25,
   },
   outerBand: {
     maximumCoordinate: 37,
@@ -404,9 +415,9 @@ function isInsideExclusionZone(
 }
 
 function isExcluded(x: number, z: number) {
-  // Reproduce the exact established seeded layout first. The road corridor is
-  // applied as a final targeted filter in createForestLayout so adding the road
-  // never resamples or shifts unrelated vegetation.
+  // Sample against the fixed gameplay exclusions first. The road corridor is
+  // applied as a final targeted filter in createForestLayout so route clearance
+  // cannot resample or shift vegetation elsewhere in the seeded layout.
   return BASE_FOREST_EXCLUSION_ZONES.some(
     (zone) => isInsideExclusionZone(x, z, zone),
   )
@@ -748,9 +759,9 @@ function createForestLayout(settings: ForestTierSettings) {
   const retainedPlacements = placements.filter(
     (placement) => !roadExcludedPlacements.includes(placement),
   )
-  // A separate random stream appends the new edge screen after the established
-  // forest is complete. This keeps every pre-existing placement and stable
-  // index unchanged while respecting the final road corridor.
+  // A separate random stream appends the dense edge screen after the clustered
+  // forest is complete. This keeps the cluster stream and stable indices
+  // independent from boundary density while respecting the final road corridor.
   const boundaryPlacements = createBoundaryTreePlacements(settings, placements)
   return {
     boundaryTreeCount: boundaryPlacements.length,
