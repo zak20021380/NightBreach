@@ -12,6 +12,7 @@ import { ASPHALT_ROAD_FOREST_EXCLUSIONS } from './roadLayout'
 import { type WinterPerformanceTier } from './winterConfig'
 
 type ForestBand = 'inner' | 'outer'
+type ForestPropKind = 'utility-pole' | 'streetlight'
 type VegetationKind = 'tree' | 'bush'
 
 interface ForestCluster {
@@ -52,6 +53,23 @@ export type ForestExclusionZone =
       readonly maximumZ: number
     }
 
+/**
+ * A perimeter prop whose base occupies world space the forest must leave free.
+ *
+ * A column-shaped prop only needs its anchor X/Z, because everything it owns
+ * stands over that point. A prop that leans or carries overhanging arms also
+ * supplies `outline`: its real transformed world-space ground silhouette, which
+ * vegetation clearance is measured against instead of one anchor radius. Every
+ * footprint test is static and runs once during initialization.
+ */
+export interface ForestPropFootprint {
+  readonly kind: ForestPropKind
+  readonly name: string
+  readonly outline?: readonly (readonly [x: number, z: number])[]
+  readonly x: number
+  readonly z: number
+}
+
 interface ForestVariantDefinition {
   readonly id: string
   readonly kind: VegetationKind
@@ -71,6 +89,13 @@ interface TemplateMesh {
 
 interface ForestTemplate {
   readonly definition: ForestVariantDefinition
+  /**
+   * Half-extent of the variant's widest horizontal span around its trunk, in
+   * unscaled placement-local metres. Snow pine canopies reach several times
+   * further than their trunks, and each placement rotates freely, so this is the
+   * radius of the disc a placed instance actually sweeps.
+   */
+  readonly footprintRadius: number
   readonly meshes: readonly TemplateMesh[]
 }
 
@@ -83,6 +108,33 @@ interface ForestPlacement {
   readonly variantId: string
   readonly x: number
   readonly z: number
+}
+
+/** One tree moved clear of a leaning prop footprint during initialization. */
+interface ForestRelocation {
+  readonly canopyRadius: number
+  readonly distance: number
+  readonly fromX: number
+  readonly fromZ: number
+  readonly placement: ForestPlacement
+  readonly propName: string
+  readonly toX: number
+  readonly toZ: number
+  readonly variantId: string
+}
+
+export interface SnowPineForestTreeRelocation {
+  /** Scaled canopy radius that had to clear the prop outline. */
+  readonly canopyRadius: number
+  readonly distance: number
+  readonly fromX: number
+  readonly fromZ: number
+  /** Name of the placement transform node that carries the relocated tree. */
+  readonly instanceName: string
+  readonly propName: string
+  readonly toX: number
+  readonly toZ: number
+  readonly variantId: string
 }
 
 interface ForestTierSettings {
@@ -99,6 +151,7 @@ interface SnowPineForestOptions {
   readonly config: SnowPinePackAssetDefinition
   readonly container: AssetContainer
   readonly performanceTier: WinterPerformanceTier
+  readonly propFootprints?: readonly ForestPropFootprint[]
   readonly registerCollisionMesh: (mesh: AbstractMesh) => void
   readonly scene: Scene
   readonly shadowGenerator: ShadowGenerator | null
@@ -111,13 +164,52 @@ export interface SnowPineForestResult {
   readonly boundaryTreeCount: number
   readonly bushCount: number
   readonly collisionMeshCount: number
+  readonly propExcludedBushCount: number
+  readonly propExcludedTreeCount: number
+  readonly propRelocatedTreeCount: number
   readonly roadExcludedBushCount: number
   readonly roadExcludedTreeCount: number
   readonly shadowCasterTreeCount: number
   readonly treeCount: number
+  readonly treeRelocations: readonly SnowPineForestTreeRelocation[]
   readonly variantNames: readonly string[]
   readonly visualMeshCount: number
 }
+
+// Static X/Z clearance kept between a prop anchor and a vegetation anchor. A
+// utility pole carries a wide mast plus a transformer arm, so it needs more room
+// than a streetlight column. Bushes sit low and read as ground cover, so they
+// may crowd closer without hiding either prop.
+const UTILITY_POLE_TREE_CLEARANCE = 2
+const UTILITY_POLE_BUSH_CLEARANCE = 1.25
+const STREETLIGHT_TREE_CLEARANCE = 1.6
+const STREETLIGHT_BUSH_CLEARANCE = 1
+
+const PROP_CLEARANCE_RADII = {
+  'utility-pole': {
+    tree: UTILITY_POLE_TREE_CLEARANCE,
+    bush: UTILITY_POLE_BUSH_CLEARANCE,
+  },
+  streetlight: {
+    tree: STREETLIGHT_TREE_CLEARANCE,
+    bush: STREETLIGHT_BUSH_CLEARANCE,
+  },
+} as const satisfies Readonly<
+  Record<ForestPropKind, Readonly<Record<VegetationKind, number>>>
+>
+
+// Snow branches must not brush the pole itself, so a tree's scaled canopy disc
+// is kept this far outside the pole's measured ground silhouette. Bushes stay on
+// the anchor-radius rule above: they sit below the mast and read as ground cover.
+const UTILITY_POLE_CANOPY_MARGIN = 0.2
+
+// A tree that would touch a pole is walked outwards ring by ring until the first
+// fully valid spot appears, so it lands as close to its seeded position as the
+// map allows. The search is pure arithmetic over fixed offsets: it never draws
+// from the layout's random stream, so no other placement can shift.
+const TREE_RELOCATION_RING_STEP = 0.25
+const TREE_RELOCATION_RING_SAMPLES = 48
+const TREE_RELOCATION_MAXIMUM_DISTANCE = 12
 
 const TREE_VARIANTS = [
   {
@@ -441,6 +533,88 @@ function isInsideExclusionZone(
     < zone.halfWidth * zone.halfWidth
 }
 
+function isInsidePropFootprint(
+  placement: ForestPlacement,
+  footprint: ForestPropFootprint,
+) {
+  // Props that publish a measured outline keep trees clear through the
+  // relocation pass below, which subsumes this radius, so no tree is dropped
+  // for them. Bushes keep using the anchor radius for every prop.
+  if (placement.kind === 'tree' && footprint.outline) return false
+  const radius = PROP_CLEARANCE_RADII[footprint.kind][placement.kind]
+  return distanceSquared(placement.x, placement.z, footprint.x, footprint.z)
+    < radius * radius
+}
+
+function isInsideOutline(
+  x: number,
+  z: number,
+  outline: readonly (readonly [x: number, z: number])[],
+) {
+  // The outline is convex, so the point is inside when it stays on the same side
+  // of every edge. Counting both signs keeps the test winding-agnostic.
+  let positiveCount = 0
+  let negativeCount = 0
+  for (let index = 0; index < outline.length; index += 1) {
+    const [fromX, fromZ] = outline[index]
+    const [toX, toZ] = outline[(index + 1) % outline.length]
+    const side = (toX - fromX) * (z - fromZ) - (toZ - fromZ) * (x - fromX)
+    if (side > 0) positiveCount += 1
+    else if (side < 0) negativeCount += 1
+  }
+  return positiveCount === 0 || negativeCount === 0
+}
+
+function distanceToOutlineSquared(
+  x: number,
+  z: number,
+  outline: readonly (readonly [x: number, z: number])[],
+) {
+  if (isInsideOutline(x, z, outline)) return 0
+  let nearestSquared = Number.POSITIVE_INFINITY
+  for (let index = 0; index < outline.length; index += 1) {
+    const from = outline[index]
+    const to = outline[(index + 1) % outline.length]
+    nearestSquared = Math.min(
+      nearestSquared,
+      distanceToSegmentSquared(x, z, from, to),
+    )
+  }
+  return nearestSquared
+}
+
+/**
+ * True when a tree of this canopy radius would touch the prop's real outline.
+ *
+ * The anchor radius is still honoured, so clearance can only grow relative to
+ * the previous centre-distance rule, never shrink.
+ */
+function violatesPropOutlineClearance(
+  x: number,
+  z: number,
+  canopyRadius: number,
+  footprint: ForestPropFootprint,
+) {
+  if (!footprint.outline) return false
+  const anchorRadius = PROP_CLEARANCE_RADII[footprint.kind].tree
+  if (distanceSquared(x, z, footprint.x, footprint.z) < anchorRadius * anchorRadius) {
+    return true
+  }
+  const clearance = canopyRadius + UTILITY_POLE_CANOPY_MARGIN
+  return distanceToOutlineSquared(x, z, footprint.outline) < clearance * clearance
+}
+
+function findBlockingPropOutline(
+  x: number,
+  z: number,
+  canopyRadius: number,
+  propFootprints: readonly ForestPropFootprint[],
+) {
+  return propFootprints.find(
+    (footprint) => violatesPropOutlineClearance(x, z, canopyRadius, footprint),
+  ) ?? null
+}
+
 function isExcluded(x: number, z: number) {
   // Sample against the fixed gameplay exclusions first. The road corridor is
   // applied as a final targeted filter in createForestLayout so route clearance
@@ -477,6 +651,26 @@ function isInBand(x: number, z: number, band: ForestBand) {
     )
 }
 
+function isInBoundaryBand(x: number, z: number) {
+  const settings = SNOW_PINE_FOREST_SETTINGS.boundaryBand
+  const absoluteX = Math.abs(x)
+  const absoluteZ = Math.abs(z)
+  const onEastOrWestEdge = absoluteX >= settings.minimumEdgeCoordinate
+    && absoluteX <= settings.maximumCoordinate
+    && absoluteZ <= settings.maximumAlongEdgeCoordinate
+  const onNorthOrSouthEdge = absoluteZ >= settings.minimumEdgeCoordinate
+    && absoluteZ <= settings.maximumCoordinate
+    && absoluteX <= settings.maximumAlongEdgeCoordinate
+  return onEastOrWestEdge || onNorthOrSouthEdge
+}
+
+/** Keeps a relocated tree inside the same authored band it was seeded into. */
+function isInPlacementBand(placement: ForestPlacement, x: number, z: number) {
+  return placement.boundaryDecoration === true
+    ? isInBoundaryBand(x, z)
+    : isInBand(x, z, placement.band)
+}
+
 function hasMinimumSpacing(
   x: number,
   z: number,
@@ -487,6 +681,35 @@ function hasMinimumSpacing(
   return placements.every((placement) => (
     distanceSquared(x, z, placement.x, placement.z) >= minimumDistanceSquared
   ))
+}
+
+function getTreeMinimumSpacing(placement: ForestPlacement) {
+  if (placement.boundaryDecoration === true) {
+    return SNOW_PINE_FOREST_SETTINGS.boundaryTreeMinimumSpacing
+  }
+  return placement.band === 'inner'
+    ? SNOW_PINE_FOREST_SETTINGS.innerTreeMinimumSpacing
+    : SNOW_PINE_FOREST_SETTINGS.outerTreeMinimumSpacing
+}
+
+/**
+ * Applies the same spacing rules the generator used, against the vegetation that
+ * actually survived every clearance filter.
+ */
+function hasRelocationSpacing(
+  x: number,
+  z: number,
+  placement: ForestPlacement,
+  placements: readonly ForestPlacement[],
+) {
+  const treeSpacing = getTreeMinimumSpacing(placement)
+  const bushSpacing = SNOW_PINE_FOREST_SETTINGS.bushMinimumTreeDistance
+  return placements.every((other) => {
+    if (other === placement) return true
+    const minimumSpacing = other.kind === 'bush' ? bushSpacing : treeSpacing
+    return distanceSquared(x, z, other.x, other.z)
+      >= minimumSpacing * minimumSpacing
+  })
 }
 
 function chooseTreeVariant(
@@ -767,9 +990,144 @@ function createBoundaryTreePlacements(
   return boundaryPlacements
 }
 
+interface TreeRelocationContext {
+  readonly additionalExclusionZones: readonly ForestExclusionZone[]
+  readonly canopyRadii: ReadonlyMap<string, number>
+  readonly propFootprints: readonly ForestPropFootprint[]
+}
+
+function getTreeCanopyRadius(
+  placement: ForestPlacement,
+  canopyRadii: ReadonlyMap<string, number>,
+) {
+  const variantRadius = canopyRadii.get(placement.variantId)
+  if (variantRadius === undefined || !(variantRadius > 0)) {
+    throw new Error(
+      `No measured canopy radius exists for "${placement.variantId}".`,
+    )
+  }
+  return variantRadius * placement.scale
+}
+
+/**
+ * Every rule a seeded placement had to satisfy, re-applied to a candidate spot:
+ * its own band, the road/cabin/hospital/spawn clearances, prop clearances, this
+ * tree's own canopy clearance around leaning props, and vegetation spacing.
+ */
+function isValidTreePosition(
+  x: number,
+  z: number,
+  placement: ForestPlacement,
+  canopyRadius: number,
+  placements: readonly ForestPlacement[],
+  context: TreeRelocationContext,
+) {
+  if (!isInPlacementBand(placement, x, z)) return false
+  if (isExcludedFromFinalMap(x, z)) return false
+  if (
+    context.additionalExclusionZones.some(
+      (zone) => isInsideExclusionZone(x, z, zone),
+    )
+  ) return false
+  if (
+    context.propFootprints.some((footprint) => (
+      isInsidePropFootprint({ ...placement, x, z }, footprint)
+      || violatesPropOutlineClearance(x, z, canopyRadius, footprint)
+    ))
+  ) return false
+  return hasRelocationSpacing(x, z, placement, placements)
+}
+
+/** Nearest valid spot on a fixed ring grid, or null when the map has none. */
+function findNearestValidTreePosition(
+  placement: ForestPlacement,
+  canopyRadius: number,
+  placements: readonly ForestPlacement[],
+  context: TreeRelocationContext,
+) {
+  const ringCount = Math.ceil(
+    TREE_RELOCATION_MAXIMUM_DISTANCE / TREE_RELOCATION_RING_STEP,
+  )
+  for (let ring = 1; ring <= ringCount; ring += 1) {
+    const radius = ring * TREE_RELOCATION_RING_STEP
+    for (let sample = 0; sample < TREE_RELOCATION_RING_SAMPLES; sample += 1) {
+      const angle = (Math.PI * 2 * sample) / TREE_RELOCATION_RING_SAMPLES
+      const x = placement.x + Math.cos(angle) * radius
+      const z = placement.z + Math.sin(angle) * radius
+      if (
+        isValidTreePosition(x, z, placement, canopyRadius, placements, context)
+      ) return { distance: radius, x, z }
+    }
+  }
+  return null
+}
+
+/**
+ * Moves each tree whose canopy would intersect a leaning prop, leaving every
+ * other placement, and every relocated tree's variant, rotation, and scale,
+ * exactly as the seeded layout produced them.
+ */
+function relocateTreesClearOfProps(
+  placements: readonly ForestPlacement[],
+  context: TreeRelocationContext,
+) {
+  const resolved = [...placements]
+  const replacements = new Map<ForestPlacement, ForestPlacement>()
+  const relocations: ForestRelocation[] = []
+
+  for (let index = 0; index < resolved.length; index += 1) {
+    const placement = resolved[index]
+    if (placement.kind !== 'tree') continue
+    const canopyRadius = getTreeCanopyRadius(placement, context.canopyRadii)
+    const blockingProp = findBlockingPropOutline(
+      placement.x,
+      placement.z,
+      canopyRadius,
+      context.propFootprints,
+    )
+    if (!blockingProp) continue
+
+    const target = findNearestValidTreePosition(
+      placement,
+      canopyRadius,
+      resolved,
+      context,
+    )
+    if (!target) {
+      console.warn(
+        `[Night Breach][Snow Forest] No valid spot within `
+        + `${TREE_RELOCATION_MAXIMUM_DISTANCE} m clears `
+        + `${blockingProp.name} for the ${placement.variantId} at `
+        + `${placement.x.toFixed(3)},${placement.z.toFixed(3)}; `
+        + 'it stays where the seeded layout put it.',
+      )
+      continue
+    }
+
+    const relocated: ForestPlacement = { ...placement, x: target.x, z: target.z }
+    resolved[index] = relocated
+    replacements.set(placement, relocated)
+    relocations.push({
+      canopyRadius,
+      distance: target.distance,
+      fromX: placement.x,
+      fromZ: placement.z,
+      placement: relocated,
+      propName: blockingProp.name,
+      toX: target.x,
+      toZ: target.z,
+      variantId: placement.variantId,
+    })
+  }
+
+  return { placements: resolved, relocations, replacements }
+}
+
 function createForestLayout(
   settings: ForestTierSettings,
   additionalExclusionZones: readonly ForestExclusionZone[],
+  propFootprints: readonly ForestPropFootprint[],
+  canopyRadii: ReadonlyMap<string, number>,
 ) {
   const random = createSeededRandom(SNOW_PINE_FOREST_SETTINGS.seed)
   const placements: ForestPlacement[] = []
@@ -799,6 +1157,29 @@ function createForestLayout(
       (zone) => isInsideExclusionZone(placement.x, placement.z, zone),
     ),
   )
+  const destinationFilteredPlacements = roadFilteredPlacements.filter(
+    (placement) => !additionalExcludedPlacements.includes(placement),
+  )
+  // Perimeter props are the last targeted filter, for the same reason as the
+  // road and destination clearances: dropping candidates here cannot resample or
+  // shift any other placement, so the seeded layout stays byte-identical.
+  const propExcludedPlacements = destinationFilteredPlacements.filter(
+    (placement) => propFootprints.some(
+      (footprint) => isInsidePropFootprint(placement, footprint),
+    ),
+  )
+  const survivingPlacements = destinationFilteredPlacements.filter(
+    (placement) => !propExcludedPlacements.includes(placement),
+  )
+  // The final step, after every filter has settled, so a relocated tree is
+  // checked against the exact set of neighbours that will actually exist. It
+  // substitutes placement objects rather than dropping or appending any, which
+  // keeps the total count, the seeded stream, and the stable indices intact.
+  const relocation = relocateTreesClearOfProps(survivingPlacements, {
+    additionalExclusionZones,
+    canopyRadii,
+    propFootprints,
+  })
   return {
     additionalExcludedBushCount: additionalExcludedPlacements.filter(
       (placement) => placement.kind === 'bush',
@@ -807,16 +1188,23 @@ function createForestLayout(
       (placement) => placement.kind === 'tree',
     ).length,
     boundaryTreeCount: boundaryPlacements.length,
-    originalPlacements: [...placements, ...boundaryPlacements],
-    placements: roadFilteredPlacements.filter(
-      (placement) => !additionalExcludedPlacements.includes(placement),
+    originalPlacements: [...placements, ...boundaryPlacements].map(
+      (placement) => relocation.replacements.get(placement) ?? placement,
     ),
+    placements: relocation.placements,
+    propExcludedBushCount: propExcludedPlacements.filter(
+      (placement) => placement.kind === 'bush',
+    ).length,
+    propExcludedTreeCount: propExcludedPlacements.filter(
+      (placement) => placement.kind === 'tree',
+    ).length,
     roadExcludedBushCount: roadExcludedPlacements.filter(
       (placement) => placement.kind === 'bush',
     ).length,
     roadExcludedTreeCount: roadExcludedPlacements.filter(
       (placement) => placement.kind === 'tree',
     ).length,
+    treeRelocations: relocation.relocations,
   }
 }
 
@@ -873,8 +1261,28 @@ function createForestTemplates(options: SnowPineForestOptions) {
       position.subtractInPlace(variantOrigin)
       return { source, position, rotation, scaling }
     })
+
+    // The widest horizontal reach of the authored variant, measured from the same
+    // transformed corners the renderer uses and expressed around the trunk axis
+    // the placement rotates about, so yaw cannot invalidate it.
+    let footprintRadius = 0
+    for (const mesh of variantMeshes) {
+      mesh.computeWorldMatrix(true)
+      for (const corner of mesh.getBoundingInfo().boundingBox.vectorsWorld) {
+        footprintRadius = Math.max(
+          footprintRadius,
+          Math.hypot(corner.x - variantOrigin.x, corner.z - variantOrigin.z),
+        )
+      }
+    }
+    if (!Number.isFinite(footprintRadius) || footprintRadius <= 0) {
+      throw new Error(
+        `Snow pine variant "${definition.rootName}" has no measurable canopy radius.`,
+      )
+    }
+
     materialMeshes.push(...variantMeshes)
-    templates.set(definition.id, { definition, meshes })
+    templates.set(definition.id, { definition, footprintRadius, meshes })
   }
 
   applyImportedMaterialSettings(materialMeshes, options.config.material)
@@ -960,15 +1368,58 @@ export function createSnowPineForest(
 ): SnowPineForestResult {
   const tierSettings =
     SNOW_PINE_FOREST_SETTINGS.counts[options.performanceTier]
+  // Templates are built first because the layout needs each variant's measured
+  // canopy radius before it can tell which trees would touch a leaning prop.
+  const templates = createForestTemplates(options)
+  const horizontalConfigScale = Math.max(
+    Math.abs(options.config.transform.scale[0]),
+    Math.abs(options.config.transform.scale[2]),
+  )
+  const canopyRadii = new Map(
+    [...templates].map(([variantId, template]) => [
+      variantId,
+      template.footprintRadius * horizontalConfigScale,
+    ]),
+  )
   const layout = createForestLayout(
     tierSettings,
     options.additionalExclusionZones ?? [],
+    options.propFootprints ?? [],
+    canopyRadii,
   )
   const placements = layout.placements
-  const templates = createForestTemplates(options)
   const originalPlacementIndices = new Map(
     layout.originalPlacements.map((placement, index) => [placement, index]),
   )
+  const treeRelocations: SnowPineForestTreeRelocation[] =
+    layout.treeRelocations.map((relocation) => {
+      const originalIndex = originalPlacementIndices.get(relocation.placement)
+      if (originalIndex === undefined) {
+        throw new Error('A relocated snow forest tree lost its stable index.')
+      }
+      return {
+        canopyRadius: relocation.canopyRadius,
+        distance: relocation.distance,
+        fromX: relocation.fromX,
+        fromZ: relocation.fromZ,
+        instanceName: `snowForestPlacement${originalIndex + 1}`,
+        propName: relocation.propName,
+        toX: relocation.toX,
+        toZ: relocation.toZ,
+        variantId: relocation.variantId,
+      }
+    })
+  for (const relocation of treeRelocations) {
+    console.info(
+      `[Night Breach][Snow Forest] Relocated ${relocation.instanceName} `
+      + `(${relocation.variantId}, canopy radius `
+      + `${relocation.canopyRadius.toFixed(3)} m) clear of `
+      + `${relocation.propName}: `
+      + `(${relocation.fromX.toFixed(3)}, ${relocation.fromZ.toFixed(3)}) -> `
+      + `(${relocation.toX.toFixed(3)}, ${relocation.toZ.toFixed(3)}), `
+      + `moved ${relocation.distance.toFixed(3)} m.`,
+    )
+  }
   const shadowCasterPlacements = new Set<ForestPlacement>()
   const colliderPlacements = new Set<ForestPlacement>()
   for (const placement of layout.originalPlacements) {
@@ -1107,7 +1558,11 @@ export function createSnowPineForest(
     + `${layout.roadExcludedTreeCount} trees and `
     + `${layout.roadExcludedBushCount} bushes; additional destination clearance `
     + `removed ${layout.additionalExcludedTreeCount} trees and `
-    + `${layout.additionalExcludedBushCount} bushes before collider/shadow setup).`,
+    + `${layout.additionalExcludedBushCount} bushes; perimeter prop clearance `
+    + `removed ${layout.propExcludedTreeCount} trees and `
+    + `${layout.propExcludedBushCount} bushes, and relocated `
+    + `${treeRelocations.length} trees clear of measured prop footprints `
+    + 'before collider/shadow setup).',
   )
 
   return {
@@ -1116,10 +1571,14 @@ export function createSnowPineForest(
     boundaryTreeCount: layout.boundaryTreeCount,
     bushCount,
     collisionMeshCount,
+    propExcludedBushCount: layout.propExcludedBushCount,
+    propExcludedTreeCount: layout.propExcludedTreeCount,
+    propRelocatedTreeCount: treeRelocations.length,
     roadExcludedBushCount: layout.roadExcludedBushCount,
     roadExcludedTreeCount: layout.roadExcludedTreeCount,
     shadowCasterTreeCount,
     treeCount,
+    treeRelocations,
     variantNames,
     visualMeshCount,
   }

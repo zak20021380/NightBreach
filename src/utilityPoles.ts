@@ -28,8 +28,27 @@ interface UtilityPolePlacement {
   readonly wireTarget: string
 }
 
+/**
+ * The pole's real world-space X/Z silhouette, measured once after the placement
+ * is positioned, yawed, scaled, and grounded.
+ *
+ * The authored pole leans away from its base and carries crossbeams, a
+ * transformer bank, and fuse cutouts that reach far outside the buried mast, so
+ * a single radius around `anchor` cannot describe the space it occupies. The
+ * outline is the convex hull of every transformed visual mesh corner projected
+ * to the ground plane, which stays exact for any yaw.
+ */
+export interface UtilityPoleFootprint {
+  readonly anchor: readonly [x: number, z: number]
+  /** Largest anchor-to-outline distance, for diagnostics only. */
+  readonly maximumRadius: number
+  readonly name: string
+  readonly outline: readonly (readonly [x: number, z: number])[]
+}
+
 export interface UtilityPoleResult {
   readonly collisionMeshCount: number
+  readonly footprints: readonly UtilityPoleFootprint[]
   readonly placements: readonly UtilityPolePlacement[]
   readonly visualMeshCount: number
 }
@@ -113,6 +132,67 @@ function hierarchyContains(mesh: AbstractMesh, pattern: RegExp) {
   return false
 }
 
+type GroundPoint = readonly [x: number, z: number]
+
+function crossProduct(origin: GroundPoint, left: GroundPoint, right: GroundPoint) {
+  return (left[0] - origin[0]) * (right[1] - origin[1])
+    - (left[1] - origin[1]) * (right[0] - origin[0])
+}
+
+/** Andrew's monotone chain over ground-plane points, collinear points removed. */
+function createConvexOutline(points: readonly GroundPoint[]): GroundPoint[] {
+  const sorted = [...points].sort((left, right) => (
+    left[0] === right[0] ? left[1] - right[1] : left[0] - right[0]
+  ))
+  const buildChain = (sequence: readonly GroundPoint[]) => {
+    const chain: GroundPoint[] = []
+    for (const point of sequence) {
+      while (
+        chain.length >= 2
+        && crossProduct(chain[chain.length - 2], chain[chain.length - 1], point) <= 0
+      ) chain.pop()
+      chain.push(point)
+    }
+    return chain
+  }
+  const lower = buildChain(sorted)
+  const upper = buildChain([...sorted].reverse())
+  return [...lower.slice(0, -1), ...upper.slice(0, -1)]
+}
+
+function measureWorldFootprint(
+  placement: UtilityPolePlacement,
+  anchor: GroundPoint,
+  meshes: readonly AbstractMesh[],
+): UtilityPoleFootprint {
+  const groundPoints: GroundPoint[] = []
+  for (const mesh of meshes) {
+    mesh.computeWorldMatrix(true)
+    // `vectorsWorld` are the mesh's own box corners after the full placement
+    // transform, so the leaning mast and upper arms land where they render
+    // instead of being collapsed onto the base.
+    for (const corner of mesh.getBoundingInfo().boundingBox.vectorsWorld) {
+      if (!Number.isFinite(corner.x) || !Number.isFinite(corner.z)) {
+        throw new Error(`${placement.name} produced a non-finite footprint corner.`)
+      }
+      groundPoints.push([corner.x, corner.z])
+    }
+  }
+
+  const outline = createConvexOutline(groundPoints)
+  if (outline.length < 3) {
+    throw new Error(`${placement.name} produced a degenerate ground footprint.`)
+  }
+  let maximumRadius = 0
+  for (const [x, z] of outline) {
+    maximumRadius = Math.max(
+      maximumRadius,
+      Math.hypot(x - anchor[0], z - anchor[1]),
+    )
+  }
+  return { anchor, maximumRadius, name: placement.name, outline }
+}
+
 function createPoleColliders(
   placement: UtilityPolePlacement,
   placementRoot: TransformNode,
@@ -172,6 +252,7 @@ export function createBrokenUtilityPoles(
 
   let visualMeshCount = 0
   let completedPlacementCount = 0
+  const footprints: UtilityPoleFootprint[] = []
 
   try {
     for (const placement of UTILITY_POLE_PLACEMENTS) {
@@ -215,6 +296,14 @@ export function createBrokenUtilityPoles(
       const initialBounds = getModelBounds(modelMeshes)
       placementRoot.position.y -= initialBounds.minimum.y
       placementRoot.computeWorldMatrix(true)
+
+      // Measured here, while the clones are still free: the perimeter forest
+      // needs this pole's real ground silhouette before it places any tree.
+      footprints.push(measureWorldFootprint(
+        placement,
+        [placementRoot.position.x, placementRoot.position.z],
+        modelMeshes,
+      ))
 
       for (const mesh of modelMeshes) {
         mesh.isPickable = false
@@ -265,11 +354,16 @@ export function createBrokenUtilityPoles(
   console.info(
     `[Night Breach][Utility Poles] ${completedPlacementCount} grounded GLB placements `
     + `ready from one shared container (${visualMeshCount} visual instances, `
-    + `${completedPlacementCount * 2} simple colliders).`,
+    + `${completedPlacementCount * 2} simple colliders; measured ground `
+    + `footprints: ${footprints.map((footprint) => (
+      `${footprint.name} ${footprint.outline.length} corners, `
+      + `${footprint.maximumRadius.toFixed(2)} m reach`
+    )).join('; ')}).`,
   )
 
   return {
     collisionMeshCount: completedPlacementCount * 2,
+    footprints,
     placements: UTILITY_POLE_PLACEMENTS,
     visualMeshCount,
   }

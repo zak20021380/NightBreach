@@ -90,7 +90,10 @@ import {
   logRuntimeWarning,
 } from './runtimeUtils'
 import { ShotgunAudioController } from './shotgunAudio'
-import { createSnowPineForest } from './snowPineForest'
+import {
+  createSnowPineForest,
+  type ForestPropFootprint,
+} from './snowPineForest'
 import { createRustyCars } from './rustyCars'
 import { createRustyStreetlights } from './streetlights'
 import { createBrokenUtilityPoles } from './utilityPoles'
@@ -941,6 +944,31 @@ if (secondaryCabinDoor) {
 }
 
 canvas.dataset.snowForestSource = 'unavailable'
+// Both prop systems are already built, so the forest reuses their authored
+// anchors instead of duplicating any coordinate. Utility poles also publish the
+// real ground silhouette measured from their placed meshes, so the forest can
+// keep pine canopies clear of the leaning mast and its upper arms rather than
+// only of the buried base.
+const forestPropFootprints: readonly ForestPropFootprint[] = [
+  ...utilityPoles.footprints.map((footprint) => ({
+    kind: 'utility-pole' as const,
+    name: footprint.name,
+    outline: footprint.outline,
+    x: footprint.anchor[0],
+    z: footprint.anchor[1],
+  })),
+  ...rustyStreetlights.placements.map((placement) => ({
+    kind: 'streetlight' as const,
+    name: placement.name,
+    x: placement.position[0],
+    z: placement.position[1],
+  })),
+]
+canvas.dataset.snowForestPropFootprintCount =
+  String(forestPropFootprints.length)
+canvas.dataset.utilityPoleFootprintReach = utilityPoles.footprints
+  .map((footprint) => footprint.maximumRadius.toFixed(3))
+  .join(',')
 const snowPinePackAssetResult = await localAssetManager.load('snowPinePack')
 if (snowPinePackAssetResult.status === 'loaded') {
   try {
@@ -949,6 +977,7 @@ if (snowPinePackAssetResult.status === 'loaded') {
       config: snowPinePackAssetResult.config,
       container: snowPinePackAssetResult.container,
       performanceTier,
+      propFootprints: forestPropFootprints,
       registerCollisionMesh(mesh) {
         proceduralEnvironmentMeshes.push(mesh)
       },
@@ -969,6 +998,22 @@ if (snowPinePackAssetResult.status === 'loaded') {
       String(snowForest.additionalExcludedTreeCount)
     canvas.dataset.snowForestHospitalExcludedBushCount =
       String(snowForest.additionalExcludedBushCount)
+    canvas.dataset.snowForestPropExcludedTreeCount =
+      String(snowForest.propExcludedTreeCount)
+    canvas.dataset.snowForestPropExcludedBushCount =
+      String(snowForest.propExcludedBushCount)
+    canvas.dataset.snowForestPropRelocatedTreeCount =
+      String(snowForest.propRelocatedTreeCount)
+    canvas.dataset.snowForestPropRelocations = snowForest.treeRelocations
+      .map((relocation) => (
+        `${relocation.instanceName}:${relocation.variantId}:`
+        + `${relocation.propName}:`
+        + `${relocation.fromX.toFixed(3)},${relocation.fromZ.toFixed(3)}:`
+        + `${relocation.toX.toFixed(3)},${relocation.toZ.toFixed(3)}:`
+        + `${relocation.distance.toFixed(3)}:`
+        + `${relocation.canopyRadius.toFixed(3)}`
+      ))
+      .join('|')
     canvas.dataset.snowForestBoundaryTreeCount =
       String(snowForest.boundaryTreeCount)
     canvas.dataset.snowForestShadowCasterCount =
