@@ -6,7 +6,7 @@ import { Color3 } from '@babylonjs/core/Maths/math.color'
 import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector'
 import { type AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh'
 import { Mesh } from '@babylonjs/core/Meshes/mesh'
-import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder'
+import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData'
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode'
 import { type Scene } from '@babylonjs/core/scene'
 import { applyImportedMaterialSettings } from './assetMaterialUtils'
@@ -32,6 +32,31 @@ interface RoadSegmentLayout {
   readonly renderedLength: number
   readonly yaw: number
 }
+
+// One point of the route with the lateral basis its treatment boundaries follow:
+// a boundary running at lateral offset `o` passes exactly through
+// (x + o * lateralX, z + o * lateralZ). On a straight join that is the plain
+// segment normal; on a bend it is the mitre of both neighbouring normals, which
+// is what lets the two ribbon quads meeting there share one edge instead of both
+// overshooting the joint and covering the same asphalt twice.
+interface RoadJoint {
+  readonly x: number
+  readonly z: number
+  readonly lateralX: number
+  readonly lateralZ: number
+}
+
+// One lane-parallel band of a treatment layer, measured from the centreline.
+interface TreatmentBand {
+  readonly offset: number
+  readonly width: number
+}
+
+// Millimetre clearance is all these decals need in world space; the polygon
+// offset on their materials is what keeps them ordered once depth precision
+// drops off with distance and shallow viewing angles.
+const TREATMENT_LIFT = 0.003
+const TIRE_WEAR_EXTRA_LIFT = 0.0015
 
 const ROAD_TREATMENT_MATERIAL_NAMES = new Set([
   'asphaltRoadEdgeSnowMaterial',
@@ -126,6 +151,7 @@ function createTreatmentMaterial(
   name: string,
   color: Color3,
   alpha: number,
+  depthBiasUnits: number,
   scene: Scene,
 ) {
   const material = new PBRMaterial(name, scene)
@@ -136,6 +162,14 @@ function createTreatmentMaterial(
   material.alpha = alpha
   material.transparencyMode = PBRMaterial.PBRMATERIAL_ALPHABLEND
   material.backFaceCulling = true
+  // Each layer runs a few millimetres above a surface it is exactly parallel to,
+  // and the depth buffer stops resolving that gap well before the fog does. A
+  // negative polygon offset biases the layer towards the camera in depth space
+  // only: depth testing and depth writing stay on and no vertex moves, so the
+  // strips cannot start floating. The slope factor covers grazing views, while
+  // the units keep the layers deterministically ordered against each other.
+  material.zOffset = -1
+  material.zOffsetUnits = depthBiasUnits
   return material
 }
 
@@ -158,28 +192,92 @@ function finalizeTreatmentMesh(
   return mesh
 }
 
-function mergeTreatmentPieces(
+function createRoadJoints(): readonly RoadJoint[] {
+  const points = ASPHALT_ROAD_ROUTE.points
+  const segmentNormals = points.slice(0, -1).map((from, index) => {
+    const to = points[index + 1]
+    const yaw = -Math.atan2(to[1] - from[1], to[0] - from[0])
+    return { x: Math.sin(yaw), z: Math.cos(yaw) }
+  })
+  return points.map((point, index): RoadJoint => {
+    const incoming = segmentNormals[index - 1] ?? segmentNormals[index]
+    const outgoing = segmentNormals[index] ?? segmentNormals[index - 1]
+    const alignment = incoming.x * outgoing.x + incoming.z * outgoing.z
+    // (nIn + nOut) / (1 + nIn . nOut) is the one vector whose projection onto
+    // both segment normals is exactly 1, so every offset boundary keeps its
+    // distance from the centreline through the bend. It collapses to the shared
+    // normal on a straight join; the clamp only guards a hairpin this authored
+    // route never contains.
+    const mitreScale = 1 / Math.max(0.25, 1 + alignment)
+    return {
+      x: point[0],
+      z: point[1],
+      lateralX: (incoming.x + outgoing.x) * mitreScale,
+      lateralZ: (incoming.z + outgoing.z) * mitreScale,
+    }
+  })
+}
+
+/**
+ * Builds one treatment layer as a mitred ribbon: consecutive quads reuse the
+ * corners of the joint between them, so the layer covers every point of the
+ * route exactly once. The previous per-segment rectangles were each stretched
+ * past both of their joints, which left two coplanar copies of the same snow at
+ * every bend - the exact tie a depth buffer cannot break.
+ */
+function createTreatmentLayer(
   name: string,
-  pieces: Mesh[],
+  joints: readonly RoadJoint[],
+  bands: readonly TreatmentBand[],
+  y: number,
   material: PBRMaterial,
-  worldLayerMask: number,
+  options: AsphaltRoadOptions,
 ) {
-  const merged = Mesh.MergeMeshes(
-    pieces,
-    true,
-    true,
-    undefined,
-    false,
-    true,
-  )
-  if (!merged) throw new Error(`Could not merge asphalt treatment "${name}".`)
-  merged.name = name
-  return finalizeTreatmentMesh(merged, material, worldLayerMask)
+  const positions: number[] = []
+  const normals: number[] = []
+  const uvs: number[] = []
+  const indices: number[] = []
+  for (const band of bands) {
+    const lateralHigh = band.offset + band.width * 0.5
+    const lateralLow = band.offset - band.width * 0.5
+    for (let index = 0; index < joints.length - 1; index += 1) {
+      const base = positions.length / 3
+      // Corner order, upward normals, per-quad 0..1 UVs, and winding all match
+      // MeshBuilder.CreateGround, so the layer keeps the facing and the texture
+      // density the merged ground pieces had.
+      for (const lateral of [lateralHigh, lateralLow]) {
+        for (const joint of [joints[index], joints[index + 1]]) {
+          positions.push(
+            joint.x + joint.lateralX * lateral,
+            y,
+            joint.z + joint.lateralZ * lateral,
+          )
+          normals.push(0, 1, 0)
+        }
+      }
+      uvs.push(0, 1, 1, 1, 0, 0, 1, 0)
+      indices.push(
+        base + 3,
+        base + 1,
+        base,
+        base + 2,
+        base + 3,
+        base,
+      )
+    }
+  }
+  const mesh = new Mesh(name, options.scene)
+  const vertexData = new VertexData()
+  vertexData.positions = positions
+  vertexData.normals = normals
+  vertexData.uvs = uvs
+  vertexData.indices = indices
+  vertexData.applyToMesh(mesh, false)
+  return finalizeTreatmentMesh(mesh, material, options.worldLayerMask)
 }
 
 function createRoadTreatment(
   options: AsphaltRoadOptions,
-  segments: readonly RoadSegmentLayout[],
   asphaltSurfaceY: number,
   edgeSurfaceY: number,
 ) {
@@ -187,6 +285,7 @@ function createRoadTreatment(
     'asphaltRoadEdgeSnowMaterial',
     new Color3(0.9, 0.94, 0.97),
     0.78,
+    -2,
     options.scene,
   )
   snowMaterial.albedoTexture = createSnowTexture(options.scene)
@@ -194,93 +293,52 @@ function createRoadTreatment(
     'asphaltRoadCompactedCenterMaterial',
     new Color3(0.12, 0.15, 0.17),
     0.13,
+    -2,
     options.scene,
   )
+  // The tyre tracks run inside the compacted centre, so they take the deeper of
+  // the two biases to stay the layer that wins where they overlap it.
   const tireMaterial = createTreatmentMaterial(
     'asphaltRoadTireWearMaterial',
     new Color3(0.055, 0.065, 0.07),
     0.16,
+    -4,
     options.scene,
   )
-  const createStrip = (
-    name: string,
-    segment: RoadSegmentLayout,
-    width: number,
-    offset: number,
-    y: number,
-  ) => {
-    const strip = MeshBuilder.CreateGround(
-      name,
-      { width: segment.renderedLength, height: width, subdivisions: 1 },
-      options.scene,
-    )
-    const normalX = Math.sin(segment.yaw)
-    const normalZ = Math.cos(segment.yaw)
-    strip.position.set(
-      segment.centerX + normalX * offset,
-      y,
-      segment.centerZ + normalZ * offset,
-    )
-    strip.rotation.y = segment.yaw
-    return strip
-  }
 
+  const joints = createRoadJoints()
   const halfWidth = ASPHALT_ROAD_ROUTE.surfaceWidth * 0.5
   const snowStripWidth = 0.5
   const snowStripOffset = halfWidth - snowStripWidth * 0.6
-  const edgeSnow = mergeTreatmentPieces(
+  const edgeSnow = createTreatmentLayer(
     'asphaltRoadEdgeSnow',
-    segments.flatMap((segment, index) => [
-      createStrip(
-        `asphaltRoadLeftEdgeSnow${index + 1}`,
-        segment,
-        snowStripWidth,
-        snowStripOffset,
-        edgeSurfaceY,
-      ),
-      createStrip(
-        `asphaltRoadRightEdgeSnow${index + 1}`,
-        segment,
-        snowStripWidth,
-        -snowStripOffset,
-        edgeSurfaceY,
-      ),
-    ]),
+    joints,
+    [
+      { offset: snowStripOffset, width: snowStripWidth },
+      { offset: -snowStripOffset, width: snowStripWidth },
+    ],
+    edgeSurfaceY,
     snowMaterial,
-    options.worldLayerMask,
+    options,
   )
-  const compactedCenter = mergeTreatmentPieces(
+  const compactedCenter = createTreatmentLayer(
     'asphaltRoadCompactedCenter',
-    segments.map((segment, index) => createStrip(
-      `asphaltRoadCompactedCenter${index + 1}`,
-      segment,
-      3.9,
-      0,
-      asphaltSurfaceY,
-    )),
+    joints,
+    [{ offset: 0, width: 3.9 }],
+    asphaltSurfaceY,
     compactedMaterial,
-    options.worldLayerMask,
+    options,
   )
-  const tireWear = mergeTreatmentPieces(
+  const tireWear = createTreatmentLayer(
     'asphaltRoadTireWear',
-    segments.flatMap((segment, index) => [
-      createStrip(
-        `asphaltRoadLeftTireWear${index + 1}`,
-        segment,
-        0.34,
-        1.28,
-        asphaltSurfaceY + 0.0015,
-      ),
-      createStrip(
-        `asphaltRoadRightTireWear${index + 1}`,
-        segment,
-        0.34,
-        -1.28,
-        asphaltSurfaceY + 0.0015,
-      ),
-    ]),
+    joints,
+    [
+      { offset: 1.28, width: 0.34 },
+      { offset: -1.28, width: 0.34 },
+    ],
+    asphaltSurfaceY + TIRE_WEAR_EXTRA_LIFT,
     tireMaterial,
-    options.worldLayerMask,
+    options,
   )
   return [edgeSnow, compactedCenter, tireWear]
 }
@@ -453,17 +511,19 @@ export function createAsphaltRoad(
     visualMeshes.push(instance)
   }
 
+  // The imported cross-section is a flat carriageway at the model's own origin
+  // plane with a raised snow verge along each side, so the centre treatments sit
+  // just over the asphalt while the edge snow sits just over the verge tops.
   const asphaltSurfaceY =
     ASPHALT_ROAD_ROUTE.baseY
     + Math.max(0, -bounds.minimum.y) * ASPHALT_ROAD_ROUTE.verticalScale
-    + 0.003
+    + TREATMENT_LIFT
   const edgeSurfaceY =
     ASPHALT_ROAD_ROUTE.baseY
     + modelHeight * ASPHALT_ROAD_ROUTE.verticalScale
-    + 0.003
+    + TREATMENT_LIFT
   const treatmentMeshes = createRoadTreatment(
     options,
-    routeSegments,
     asphaltSurfaceY,
     edgeSurfaceY,
   )
