@@ -45,7 +45,7 @@ const UTILITY_POLE_PLACEMENTS = [
     position: [-23, -14],
     rotationY: -Math.PI * 0.5,
     scale: 0.96,
-    setting: 'west perimeter beside the sandbag service lane',
+    setting: 'west perimeter beside the service lane',
     wireTarget: 'west perimeter wall / map edge',
   },
   {

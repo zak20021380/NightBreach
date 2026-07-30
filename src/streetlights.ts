@@ -80,7 +80,7 @@ interface RoadSample {
 // coordinates. Their 16/15/12/13 m gaps follow the route through its bend, and
 // the alternating sides remain 1.2-1.7 m beyond the 3.4 m asphalt half-width.
 // The resulting bases were checked against all seeded forest tiers and every
-// fixed cabin, spawn, travel lane, boundary prop, car, pole, and sandbag zone.
+// fixed cabin, spawn, travel lane, boundary prop, car, pole, and clearing zone.
 const STREETLIGHT_DEFINITIONS = [
   {
     name: 'southApproachRustyStreetlight',

@@ -76,7 +76,7 @@ interface ModelBounds {
 // Both footprints stay inside |x| < 17.25 and |z| < 17.25, the box no
 // snowPineForest band can seed into, so neither wreck can overlap a tree or a
 // bush. They also clear both cabins and their doorways and approach corridor,
-// both sandbag walls, every primary and fallback zombie spawn, the ammo crate,
+// both cleared yard pockets, every primary and fallback zombie spawn, the ammo crate,
 // the remaining streetlights and utility poles, and the non-colliding natural
 // boundary props beyond +/-26 m.
 const RUSTY_CAR_PLACEMENTS = [

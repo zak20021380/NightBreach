@@ -562,11 +562,6 @@ const groundMaterial = createMaterial(
   Color3.FromHexString('#5b6158'),
   0.96,
 )
-const sandbagMaterial = createMaterial(
-  'weatheredCanvas',
-  Color3.FromHexString('#716b59'),
-  0.96,
-)
 const darkMetalMaterial = createMaterial(
   'darkOxidizedMetal',
   Color3.FromHexString('#343a38'),
@@ -584,17 +579,6 @@ applyProceduralSurface(groundMaterial, 'yardHardstand', {
   textureScale: 3.2,
   normalStrength: 1.8,
 })
-applyProceduralSurface(sandbagMaterial, 'sandbagCanvas', {
-  kind: 'canvas',
-  baseColor: Color3.FromHexString('#716b59'),
-  roughness: 0.96,
-  roughnessVariation: 0.06,
-  metallic: 0,
-  seed: 337,
-  size: 128,
-  textureScale: 2.8,
-  normalStrength: 0.85,
-})
 applyProceduralSurface(darkMetalMaterial, 'oxidizedMetal', {
   kind: 'metal',
   baseColor: Color3.FromHexString('#343a38'),
@@ -607,33 +591,6 @@ applyProceduralSurface(darkMetalMaterial, 'oxidizedMetal', {
   normalStrength: 0.9,
 })
 const proceduralEnvironmentMeshes: AbstractMesh[] = []
-
-function prepareWorldMesh(
-  mesh: Mesh,
-  collisions = true,
-  castsShadow = true,
-  registerAsEnvironment = true,
-) {
-  mesh.checkCollisions = collisions
-  mesh.receiveShadows = true
-  if (castsShadow) shadowGenerator?.addShadowCaster(mesh)
-  if (registerAsEnvironment) proceduralEnvironmentMeshes.push(mesh)
-  return mesh
-}
-
-function createSharedMesh(source: Mesh, name: string) {
-  try {
-    const instance = source.createInstance(name)
-    proceduralEnvironmentMeshes.push(instance)
-    return instance
-  } catch (error) {
-    logRuntimeWarning(`Instancing "${name}" failed; using a shared clone.`, error)
-    const clone = source.clone(name)
-    if (!clone) throw new Error(`Could not create fallback mesh: ${name}`)
-    proceduralEnvironmentMeshes.push(clone)
-    return clone
-  }
-}
 
 // The render ground extends beyond the collision limit so the road and forest
 // fade into fog instead of revealing an empty void at the former wall line.
@@ -703,41 +660,6 @@ canvas.dataset.visiblePerimeterWallCount = '0'
 canvas.dataset.invisibleBoundaryColliderCount = '4'
 canvas.dataset.naturalBoundaryPropCount = String(naturalBoundary.propCount)
 canvas.dataset.naturalBoundaryMeshCount = String(naturalBoundary.meshCount)
-
-const sandbagLayouts = [
-  new Vector3(-20, 0.22, -7.8),
-  new Vector3(-18.9, 0.22, -7.8),
-  new Vector3(-17.8, 0.22, -7.8),
-  new Vector3(-16.7, 0.22, -7.8),
-  new Vector3(-19.45, 0.58, -7.8),
-  new Vector3(-18.35, 0.58, -7.8),
-  new Vector3(-17.25, 0.58, -7.8),
-  new Vector3(11.8, 0.22, 4.8),
-  new Vector3(12.9, 0.22, 4.65),
-  new Vector3(14, 0.22, 4.5),
-  new Vector3(15.1, 0.22, 4.35),
-  new Vector3(12.4, 0.58, 4.7),
-  new Vector3(13.5, 0.58, 4.55),
-  new Vector3(14.6, 0.58, 4.4),
-]
-const sandbagSource = MeshBuilder.CreateSphere(
-  'sandbag1',
-  { diameter: 1, segments: 8 },
-  scene,
-)
-sandbagSource.material = sandbagMaterial
-sandbagSource.position.copyFrom(sandbagLayouts[0])
-sandbagSource.scaling.set(1.18, 0.38, 0.52)
-sandbagSource.rotation.y = 0.04
-prepareWorldMesh(sandbagSource, false)
-
-sandbagLayouts.slice(1).forEach((position, index) => {
-  const sandbag = createSharedMesh(sandbagSource, `sandbag${index + 2}`)
-  sandbag.position.copyFrom(position)
-  sandbag.scaling.set(1.18, 0.38, 0.52)
-  sandbag.rotation.y = index < 6 ? 0.04 : -0.14
-  sandbag.receiveShadows = true
-})
 
 const shedAssetResult = await localAssetManager.load('shed')
 if (shedAssetResult.status !== 'loaded') {
@@ -1232,37 +1154,6 @@ console.info(
   + `${winterEnvironment.surfaceMeshCount} snow-covered surfaces, `
   + `${winterEnvironment.particleCapacity} pooled flakes at `
   + `${winterEnvironment.particleEmitRate}/second.`,
-)
-
-function createInvisibleCollider(
-  name: string,
-  position: Vector3,
-  size: Vector3,
-  rotationY = 0,
-) {
-  const collider = MeshBuilder.CreateBox(
-    name,
-    { width: size.x, height: size.y, depth: size.z },
-    scene,
-  )
-  collider.position.copyFrom(position)
-  collider.rotation.y = rotationY
-  collider.visibility = 0
-  collider.isPickable = false
-  collider.checkCollisions = true
-}
-
-createInvisibleCollider(
-  'westSandbagCollider',
-  new Vector3(-18.35, 0.45, -7.8),
-  new Vector3(4.8, 0.9, 0.75),
-  0.04,
-)
-createInvisibleCollider(
-  'eastSandbagCollider',
-  new Vector3(13.45, 0.45, 4.55),
-  new Vector3(4.8, 0.9, 0.75),
-  -0.14,
 )
 
 canvas.dataset.mapReady = 'true'
