@@ -796,7 +796,7 @@ const asphaltRoad = createAsphaltRoad({
 })
 canvas.dataset.asphaltRoadSource = 'glb'
 canvas.dataset.asphaltRoadSharing =
-  'hardware-instanced-shared-geometry-materials-textures'
+  'mitred-static-segments-shared-materials-textures'
 canvas.dataset.asphaltRoadSegmentCount = String(asphaltRoad.segmentCount)
 canvas.dataset.asphaltRoadModelDimensions =
   asphaltRoad.modelDimensions.join(',')

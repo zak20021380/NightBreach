@@ -1,13 +1,14 @@
 import { type AssetContainer } from '@babylonjs/core/assetContainer'
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer'
+import { type Material } from '@babylonjs/core/Materials/material'
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial'
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture'
 import { Texture } from '@babylonjs/core/Materials/Textures/texture'
 import { Color3 } from '@babylonjs/core/Maths/math.color'
-import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector'
+import { Vector3 } from '@babylonjs/core/Maths/math.vector'
 import { type AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh'
 import { Mesh } from '@babylonjs/core/Meshes/mesh'
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData'
-import { TransformNode } from '@babylonjs/core/Meshes/transformNode'
 import { type Scene } from '@babylonjs/core/scene'
 import { applyImportedMaterialSettings } from './assetMaterialUtils'
 import { type AsphaltRoadAssetDefinition } from './assets/assetConfig'
@@ -25,20 +26,45 @@ interface ModelBounds {
   readonly maximum: Vector3
 }
 
-interface RoadSegmentLayout {
+// One placed road segment. `startMitreShift` and `endMitreShift` are how far
+// along the segment its end cross-section has to slide per metre of lateral
+// offset for that end to land on the bisector of the joint, which is the one
+// cut both neighbours of the joint can share. Zero on a straight join, so those
+// stay plain perpendicular butt joins.
+interface RoadSegmentPlacement {
   readonly centerX: number
   readonly centerZ: number
+  readonly endMitreShift: number
   readonly length: number
-  readonly renderedLength: number
+  readonly startMitreShift: number
   readonly yaw: number
 }
 
-// One point of the route with the lateral basis its treatment boundaries follow:
-// a boundary running at lateral offset `o` passes exactly through
-// (x + o * lateralX, z + o * lateralZ). On a straight join that is the plain
-// segment normal; on a bend it is the mitre of both neighbouring normals, which
-// is what lets the two ribbon quads meeting there share one edge instead of both
-// overshooting the joint and covering the same asphalt twice.
+// The imported road cross-section, resolved once out of the GLB and into the
+// frame every segment is placed in: X along the route, Y up from the road base,
+// Z lateral from the centreline, still in unscaled model metres so one template
+// serves every segment. Normals and tangents are the imported ones in that same
+// frame; the per-segment scaling that shapes them into the finished road stays
+// on each mesh, so shading and normal mapping keep behaving exactly as they did
+// on the instances.
+interface RoadSectionTemplate {
+  readonly along: readonly number[]
+  readonly height: readonly number[]
+  readonly indices: number[]
+  readonly lateral: readonly number[]
+  readonly normals: number[]
+  readonly tangents: number[] | null
+  readonly uvs: number[] | null
+}
+
+// One point of the route with the lateral basis every surface of the road
+// follows through it: a boundary running at lateral offset `o` passes exactly
+// through (x + o * lateralX, z + o * lateralZ). On a straight join that is the
+// plain segment normal; on a bend it is the mitre of both neighbouring normals,
+// which is what lets the two surfaces meeting there share one edge instead of
+// both overshooting the joint and covering the same asphalt twice. The base
+// slabs and the treatment ribbons are cut against the same joints, so they stay
+// aligned by construction.
 interface RoadJoint {
   readonly x: number
   readonly z: number
@@ -278,6 +304,7 @@ function createTreatmentLayer(
 
 function createRoadTreatment(
   options: AsphaltRoadOptions,
+  joints: readonly RoadJoint[],
   asphaltSurfaceY: number,
   edgeSurfaceY: number,
 ) {
@@ -306,7 +333,6 @@ function createRoadTreatment(
     options.scene,
   )
 
-  const joints = createRoadJoints()
   const halfWidth = ASPHALT_ROAD_ROUTE.surfaceWidth * 0.5
   const snowStripWidth = 0.5
   const snowStripOffset = halfWidth - snowStripWidth * 0.6
@@ -351,6 +377,8 @@ function disposePreviousRoadPlacement(scene: Scene) {
     ) mesh.dispose()
   }
   for (const node of [...scene.transformNodes]) {
+    // Placement roots are no longer created, but a dev-time reload of a build
+    // that still used them must not leave the empty nodes behind.
     if (node.name.startsWith('asphaltRoadSegmentRoot')) node.dispose()
   }
   for (const material of [...scene.materials]) {
@@ -360,57 +388,182 @@ function disposePreviousRoadPlacement(scene: Scene) {
   }
 }
 
-function createRoadSegmentLayouts() {
-  const points = ASPHALT_ROAD_ROUTE.points
-  const baseSegments = points.slice(0, -1).map((from, index) => {
-    const to = points[index + 1]
-    const deltaX = to[0] - from[0]
-    const deltaZ = to[1] - from[1]
+/**
+ * Turns the mitred joints into one placement per segment. Each segment now spans
+ * exactly its own two joints - no rectangle is extended past a bend any more -
+ * and carries the two shear factors that pull its end cross-sections onto the
+ * joint bisectors it shares with its neighbours.
+ */
+function createRoadSegmentPlacements(joints: readonly RoadJoint[]) {
+  return joints.slice(0, -1).map((from, index): RoadSegmentPlacement => {
+    const to = joints[index + 1]
+    const deltaX = to.x - from.x
+    const deltaZ = to.z - from.z
     const length = Math.hypot(deltaX, deltaZ)
+    const directionX = deltaX / length
+    const directionZ = deltaZ / length
+    // A joint's lateral vector already resolves to distance 1 along this
+    // segment's own normal, so its component along the segment direction is the
+    // whole mitre: the bisector at lateral offset `o` runs `o * shift` metres
+    // further along the road than a perpendicular cut would.
     return {
-      directionX: deltaX / length,
-      directionZ: deltaZ / length,
+      centerX: (from.x + to.x) * 0.5,
+      centerZ: (from.z + to.z) * 0.5,
+      endMitreShift: to.lateralX * directionX + to.lateralZ * directionZ,
       length,
-      midpointX: (from[0] + to[0]) * 0.5,
-      midpointZ: (from[1] + to[1]) * 0.5,
+      startMitreShift: from.lateralX * directionX + from.lateralZ * directionZ,
       yaw: -Math.atan2(deltaZ, deltaX),
-    }
-  })
-  const joinExtensions = new Array<number>(points.length).fill(0)
-  const roadHalfWidth = ASPHALT_ROAD_ROUTE.surfaceWidth * 0.5
-  for (let index = 1; index < baseSegments.length; index += 1) {
-    const previous = baseSegments[index - 1]
-    const current = baseSegments[index]
-    const turnAngle = Math.abs(Math.atan2(
-      Math.sin(current.yaw - previous.yaw),
-      Math.cos(current.yaw - previous.yaw),
-    ))
-    // Extend both neighbouring rectangles to the outer miter of each gentle
-    // bend. Straight joins remain exact butt joins, while curved joins gain
-    // only the overlap needed to close their otherwise triangular edge gap.
-    joinExtensions[index] = turnAngle <= 0.0001
-      ? 0
-      : roadHalfWidth * Math.tan(turnAngle * 0.5) + 0.012
-  }
-  return baseSegments.map((segment, index): RoadSegmentLayout => {
-    const startExtension = joinExtensions[index]
-    const endExtension = joinExtensions[index + 1]
-    const centerShift = (endExtension - startExtension) * 0.5
-    return {
-      centerX: segment.midpointX + segment.directionX * centerShift,
-      centerZ: segment.midpointZ + segment.directionZ * centerShift,
-      length: segment.length,
-      renderedLength:
-        segment.length + startExtension + endExtension,
-      yaw: segment.yaw,
     }
   })
 }
 
 /**
- * Extends the one short downloaded road mesh across the complete map using
- * hardware instances. The imported geometry, PBR material, and embedded
- * textures remain shared; only one small static treatment layer is added.
+ * Reads the imported cross-section once into the frame the segments are placed
+ * in. Positions, normals and tangents are resolved through the GLB's own wrapper
+ * transforms and recentred on the model's horizontal centre and its underside,
+ * which is exactly what the old instance-local transform did, so nothing about
+ * the profile, its UVs, its winding or its shading inputs changes.
+ */
+function createRoadSectionTemplate(
+  source: Mesh,
+  center: Vector3,
+): RoadSectionTemplate {
+  const positions = source.getVerticesData(VertexBuffer.PositionKind)
+  const normals = source.getVerticesData(VertexBuffer.NormalKind)
+  const tangents = source.getVerticesData(VertexBuffer.TangentKind)
+  const uvs = source.getVerticesData(VertexBuffer.UVKind)
+  const indices = source.getIndices()
+  if (!positions || !normals || !indices) {
+    throw new Error(
+      'The asphalt road GLB did not expose the positions, normals and indices the road surface is built from.',
+    )
+  }
+  const world = source.getWorldMatrix()
+  // The GLB's wrapper transforms mirror one axis. The shader builds the
+  // bitangent from the tangent frame before that transform is applied, so a
+  // frame resolved after it would cross the other way round; flipping the stored
+  // handedness cancels exactly that and the normal map keeps reading as it does
+  // on the instanced road.
+  const handedness = world.determinant() < 0 ? -1 : 1
+  const along: number[] = []
+  const height: number[] = []
+  const lateral: number[] = []
+  const sectionNormals: number[] = []
+  const sectionTangents: number[] | null = tangents ? [] : null
+  const scratch = new Vector3()
+  for (let index = 0; index < positions.length; index += 3) {
+    scratch.set(positions[index], positions[index + 1], positions[index + 2])
+    Vector3.TransformCoordinatesToRef(scratch, world, scratch)
+    along.push(scratch.x - center.x)
+    height.push(scratch.y - center.y)
+    lateral.push(scratch.z - center.z)
+    scratch.set(normals[index], normals[index + 1], normals[index + 2])
+    Vector3.TransformNormalToRef(scratch, world, scratch)
+    scratch.normalize()
+    sectionNormals.push(scratch.x, scratch.y, scratch.z)
+  }
+  if (tangents && sectionTangents) {
+    for (let index = 0; index < tangents.length; index += 4) {
+      scratch.set(tangents[index], tangents[index + 1], tangents[index + 2])
+      Vector3.TransformNormalToRef(scratch, world, scratch)
+      scratch.normalize()
+      // The handedness stays as authored; the shader still derives the
+      // bitangent from it and the normal map keeps reading the same way.
+      sectionTangents.push(
+        scratch.x,
+        scratch.y,
+        scratch.z,
+        tangents[index + 3] * handedness,
+      )
+    }
+  }
+  return {
+    along,
+    height,
+    indices: Array.from(indices),
+    lateral,
+    normals: sectionNormals,
+    tangents: sectionTangents,
+    uvs: uvs ? Array.from(uvs) : null,
+  }
+}
+
+/**
+ * Builds one segment of the base road: the imported cross-section swept between
+ * two joints, with both end cross-sections sheared onto their joint bisector.
+ * Since neighbouring segments shear onto the same bisector from opposite sides,
+ * their carriageway, gutter, kerb and verge surfaces meet along one shared edge
+ * at every bend, covering the road exactly once - the coplanar duplicate the
+ * depth buffer used to have to break is simply not built.
+ *
+ * The mesh keeps the placement transform the instance had, scaling included, so
+ * the non-uniform scale that shapes the profile still reaches the shader and the
+ * lit and normal-mapped result is unchanged.
+ */
+function createRoadSegmentMesh(
+  name: string,
+  section: RoadSectionTemplate,
+  placement: RoadSegmentPlacement,
+  modelLength: number,
+  widthScale: number,
+  material: Material | null,
+  options: AsphaltRoadOptions,
+) {
+  const lengthScale = placement.length / modelLength
+  const positions: number[] = []
+  for (let index = 0; index < section.along.length; index += 1) {
+    const alongFraction = section.along[index] / modelLength + 0.5
+    const mitreShift =
+      placement.startMitreShift * (1 - alongFraction)
+      + placement.endMitreShift * alongFraction
+    // The shift is metres of finished road per metre of finished lateral offset,
+    // so the lateral coordinate is widened first and the result divided back
+    // through this segment's own length scale to stay exact once placed.
+    positions.push(
+      section.along[index]
+      + section.lateral[index] * widthScale * mitreShift / lengthScale,
+      section.height[index],
+      section.lateral[index],
+    )
+  }
+  const vertexData = new VertexData()
+  vertexData.positions = positions
+  vertexData.normals = section.normals
+  vertexData.indices = section.indices
+  if (section.uvs) vertexData.uvs = section.uvs
+  if (section.tangents) vertexData.tangents = section.tangents
+  const mesh = new Mesh(name, options.scene)
+  vertexData.applyToMesh(mesh, false)
+  mesh.position.set(
+    placement.centerX,
+    ASPHALT_ROAD_ROUTE.baseY,
+    placement.centerZ,
+  )
+  mesh.rotation.y = placement.yaw
+  mesh.scaling.set(
+    lengthScale,
+    ASPHALT_ROAD_ROUTE.verticalScale,
+    widthScale,
+  )
+  mesh.material = material
+  mesh.isPickable = true
+  mesh.checkCollisions = false
+  mesh.receiveShadows = true
+  mesh.layerMask = options.worldLayerMask
+  mesh.metadata = {
+    asphaltRoadSegment: true,
+    preserveWithImportedEnvironment: true,
+  }
+  mesh.computeWorldMatrix(true)
+  mesh.freezeWorldMatrix()
+  return mesh
+}
+
+/**
+ * Extends the one short downloaded road mesh across the complete map as a mitred
+ * sweep: one static segment per route leg, each carrying a copy of the imported
+ * 50-vertex cross-section and sharing the GLB's PBR material and embedded
+ * textures. Only one small static treatment layer is added on top.
  */
 export function createAsphaltRoad(
   options: AsphaltRoadOptions,
@@ -428,7 +581,9 @@ export function createAsphaltRoad(
   }
   const source = sourceMeshes[0]
   if (source.skeleton || source.morphTargetManager) {
-    throw new Error('The asphalt road source is not safe for static instancing.')
+    throw new Error(
+      'The asphalt road source is not safe to sweep as static geometry.',
+    )
   }
   source.computeWorldMatrix(true)
   const bounds = getModelBounds(sourceMeshes)
@@ -448,24 +603,17 @@ export function createAsphaltRoad(
     )
   }
 
-  const templatePosition = Vector3.Zero()
-  const templateRotation = Quaternion.Identity()
-  const templateScaling = Vector3.One()
-  source.getWorldMatrix().decompose(
-    templateScaling,
-    templateRotation,
-    templatePosition,
-  )
-  const horizontalCenterX = (bounds.minimum.x + bounds.maximum.x) * 0.5
-  const horizontalCenterZ = (bounds.minimum.z + bounds.maximum.z) * 0.5
-  templatePosition.subtractInPlace(new Vector3(
-    horizontalCenterX,
-    bounds.minimum.y,
-    horizontalCenterZ,
-  ))
-
   applyImportedMaterialSettings(sourceMeshes, options.config.material)
-  const routeSegments = createRoadSegmentLayouts()
+  // The same recentring the instances used: horizontally on the model's own
+  // middle, vertically on its underside, so the road base still lands on baseY.
+  const sectionCenter = new Vector3(
+    (bounds.minimum.x + bounds.maximum.x) * 0.5,
+    bounds.minimum.y,
+    (bounds.minimum.z + bounds.maximum.z) * 0.5,
+  )
+  const section = createRoadSectionTemplate(source, sectionCenter)
+  const joints = createRoadJoints()
+  const routeSegments = createRoadSegmentPlacements(joints)
   const routeLength = routeSegments.reduce(
     (total, segment) => total + segment.length,
     0,
@@ -475,40 +623,15 @@ export function createAsphaltRoad(
   const visualMeshes: AbstractMesh[] = []
 
   for (let index = 0; index < segmentCount; index += 1) {
-    const segment = routeSegments[index]
-    const placementRoot = new TransformNode(
-      `asphaltRoadSegmentRoot${index + 1}`,
-      options.scene,
-    )
-    placementRoot.position.set(
-      segment.centerX,
-      ASPHALT_ROAD_ROUTE.baseY,
-      segment.centerZ,
-    )
-    placementRoot.rotation.y = segment.yaw
-    placementRoot.scaling.set(
-      segment.renderedLength / modelLength,
-      ASPHALT_ROAD_ROUTE.verticalScale,
+    visualMeshes.push(createRoadSegmentMesh(
+      `asphaltRoadSegment${index + 1}`,
+      section,
+      routeSegments[index],
+      modelLength,
       widthScale,
-    )
-    const instance = source.createInstance(`asphaltRoadSegment${index + 1}`)
-    instance.parent = placementRoot
-    instance.position.copyFrom(templatePosition)
-    instance.rotationQuaternion = templateRotation.clone()
-    instance.scaling.copyFrom(templateScaling)
-    instance.isPickable = true
-    instance.checkCollisions = false
-    instance.receiveShadows = true
-    instance.layerMask = options.worldLayerMask
-    instance.metadata = {
-      asphaltRoadSegment: true,
-      preserveWithImportedEnvironment: true,
-    }
-    placementRoot.computeWorldMatrix(true)
-    instance.computeWorldMatrix(true)
-    instance.freezeWorldMatrix()
-    placementRoot.freezeWorldMatrix()
-    visualMeshes.push(instance)
+      source.material,
+      options,
+    ))
   }
 
   // The imported cross-section is a flat carriageway at the model's own origin
@@ -524,6 +647,7 @@ export function createAsphaltRoad(
     + TREATMENT_LIFT
   const treatmentMeshes = createRoadTreatment(
     options,
+    joints,
     asphaltSurfaceY,
     edgeSurfaceY,
   )
@@ -542,10 +666,11 @@ export function createAsphaltRoad(
     ),
   ]
   console.info(
-    `[Night Breach][Asphalt Road] ${segmentCount} hardware instances from one cached GLB `
+    `[Night Breach][Asphalt Road] ${segmentCount} mitred static segments from one cached GLB `
     + `cover ${routeLength.toFixed(2)} m from `
     + `(${ASPHALT_ROAD_ROUTE.from.join(', ')}) to `
-    + `(${ASPHALT_ROAD_ROUTE.to.join(', ')}); audited source `
+    + `(${ASPHALT_ROAD_ROUTE.to.join(', ')}) with no overlapping surface at any `
+    + `bend; audited source `
     + `${modelLength.toFixed(3)} x ${modelHeight.toFixed(3)} x `
     + `${modelWidth.toFixed(3)} m (X length, Y height, Z width).`,
   )
