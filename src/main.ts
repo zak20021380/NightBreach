@@ -550,7 +550,6 @@ if (enableSoftShadows) {
 const {
   applyProceduralSurface,
   createMaterial,
-  setMaterialColor,
 } = createProceduralSurfaceHelpers({
   isLowEndMobile,
   isMobile,
@@ -574,29 +573,6 @@ const darkMetalMaterial = createMaterial(
   0.64,
   0.76,
 )
-const coldLampMaterial = createMaterial(
-  'coldSecurityLampLens',
-  new Color3(0.65, 0.82, 0.92),
-  0.42,
-  0.08,
-)
-const warmLampMaterial = createMaterial(
-  'warmSecurityLampLens',
-  new Color3(0.92, 0.56, 0.25),
-  0.48,
-  0.08,
-)
-setMaterialColor(
-  coldLampMaterial,
-  new Color3(0.42, 0.62, 0.72),
-  new Color3(0.32, 0.56, 0.7),
-)
-setMaterialColor(
-  warmLampMaterial,
-  new Color3(0.7, 0.39, 0.16),
-  new Color3(0.82, 0.39, 0.09),
-)
-
 applyProceduralSurface(groundMaterial, 'yardHardstand', {
   kind: 'ground',
   baseColor: Color3.FromHexString('#5b6158'),
@@ -1257,101 +1233,6 @@ console.info(
   + `${winterEnvironment.particleCapacity} pooled flakes at `
   + `${winterEnvironment.particleEmitRate}/second.`,
 )
-
-function createVisualDetailBox(
-  name: string,
-  position: Vector3,
-  size: Vector3,
-  material: SurfaceMaterial,
-  rotationY = 0,
-) {
-  const mesh = MeshBuilder.CreateBox(
-    name,
-    { width: size.x, height: size.y, depth: size.z },
-    scene,
-  )
-  mesh.position.copyFrom(position)
-  mesh.rotation.y = rotationY
-  mesh.material = material
-  mesh.isPickable = false
-  mesh.checkCollisions = false
-  mesh.receiveShadows = true
-  mesh.layerMask = WORLD_RENDER_LAYER_MASK
-  return mesh
-}
-
-function mergeVisualDetails(
-  name: string,
-  meshes: Mesh[],
-  material: SurfaceMaterial,
-) {
-  if (meshes.length === 0) return
-  const merged = Mesh.MergeMeshes(meshes, true, true)
-  if (!merged) {
-    meshes.forEach((mesh) => proceduralEnvironmentMeshes.push(mesh))
-    return
-  }
-  merged.name = name
-  merged.material = material
-  merged.isPickable = false
-  merged.checkCollisions = false
-  merged.receiveShadows = true
-  merged.layerMask = WORLD_RENDER_LAYER_MASK
-  proceduralEnvironmentMeshes.push(merged)
-}
-
-const lampHousingDetails: Mesh[] = []
-const lampLensDetails: Mesh[] = []
-const practicalLightDefinitions = [
-  {
-    name: 'coldYardLight',
-    x: -11.5,
-    color: new Color3(0.42, 0.68, 0.86),
-    intensity: 1.1,
-    material: coldLampMaterial,
-  },
-  {
-    name: 'warmYardLight',
-    x: 11.5,
-    color: new Color3(1, 0.48, 0.17),
-    intensity: 0.96,
-    material: warmLampMaterial,
-  },
-] as const
-
-practicalLightDefinitions.forEach((definition) => {
-  lampHousingDetails.push(createVisualDetailBox(
-    `${definition.name}Post`,
-    new Vector3(definition.x, 1.85, -25.47),
-    new Vector3(0.16, 3.7, 0.16),
-    darkMetalMaterial,
-  ))
-  lampHousingDetails.push(createVisualDetailBox(
-    `${definition.name}Housing`,
-    new Vector3(definition.x, 3.72, -25.47),
-    new Vector3(1.02, 0.42, 0.3),
-    darkMetalMaterial,
-  ))
-  lampLensDetails.push(createVisualDetailBox(
-    `${definition.name}Lens`,
-    new Vector3(definition.x, 3.72, -25.3),
-    new Vector3(0.7, 0.22, 0.045),
-    definition.material,
-  ))
-  const light = new PointLight(
-    definition.name,
-    new Vector3(definition.x, 3.62, -24.35),
-    scene,
-  )
-  light.diffuse = definition.color
-  light.specular = definition.color.scale(0.45)
-  light.intensity = definition.intensity
-  light.range = 22
-  light.shadowEnabled = false
-  light.includeOnlyWithLayerMask = WORLD_RENDER_LAYER_MASK
-})
-mergeVisualDetails('yardLampHousings', lampHousingDetails, darkMetalMaterial)
-lampLensDetails.forEach((mesh) => proceduralEnvironmentMeshes.push(mesh))
 
 function createInvisibleCollider(
   name: string,
