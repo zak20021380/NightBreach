@@ -77,6 +77,10 @@ import {
   type SurfaceMaterial,
 } from './proceduralSurfaces'
 import { createAsphaltRoad } from './asphaltRoad'
+import {
+  createHospitalExterior,
+  HOSPITAL_EXTERIOR_FOREST_EXCLUSIONS,
+} from './hospitalExterior'
 import { createNaturalBoundary } from './naturalBoundary'
 import {
   clamp,
@@ -807,6 +811,48 @@ canvas.dataset.asphaltRoadRoute =
 canvas.dataset.asphaltRoadSnowTreatmentMeshCount =
   String(asphaltRoad.snowTreatmentMeshCount)
 
+const hospitalExteriorAssetResult =
+  await localAssetManager.load('hospitalExterior')
+if (hospitalExteriorAssetResult.status !== 'loaded') {
+  throw new Error(
+    `Required hospital exterior GLB failed to load: `
+    + hospitalExteriorAssetResult.reason,
+  )
+}
+const hospitalExterior = createHospitalExterior({
+  castShadows: !isMobile && shadowGenerator !== null,
+  config: hospitalExteriorAssetResult.config,
+  container: hospitalExteriorAssetResult.container,
+  registerCollisionMesh(mesh) {
+    proceduralEnvironmentMeshes.push(mesh)
+  },
+  scene,
+  shadowGenerator,
+  worldLayerMask: WORLD_RENDER_LAYER_MASK,
+})
+canvas.dataset.hospitalExteriorSource = 'glb'
+canvas.dataset.hospitalExteriorRootName = hospitalExterior.root.name
+canvas.dataset.hospitalExteriorRootPosition =
+  hospitalExterior.rootPosition.join(',')
+canvas.dataset.hospitalExteriorRootRotation =
+  hospitalExterior.rootRotation.join(',')
+canvas.dataset.hospitalExteriorUniformScale =
+  String(hospitalExterior.uniformScale)
+canvas.dataset.hospitalExteriorDimensions =
+  hospitalExterior.finalDimensions.join(',')
+canvas.dataset.hospitalExteriorRoadEndpoint =
+  hospitalExterior.roadEndpoint.join(',')
+canvas.dataset.hospitalExteriorRoadTravelDirection =
+  hospitalExterior.roadTravelDirection.join(',')
+canvas.dataset.hospitalExteriorArrivalSpaceDistance =
+  String(hospitalExterior.arrivalSpaceDistance)
+canvas.dataset.hospitalExteriorCollisionCount =
+  String(hospitalExterior.collisionMeshCount)
+canvas.dataset.hospitalExteriorShadowCasterCount =
+  String(hospitalExterior.shadowCasterCount)
+canvas.dataset.hospitalExteriorVisualMeshCount =
+  String(hospitalExterior.visualMeshCount)
+
 const streetlightAssetResult = await localAssetManager.load('streetlight')
 if (streetlightAssetResult.status !== 'loaded') {
   throw new Error(
@@ -899,6 +945,7 @@ const snowPinePackAssetResult = await localAssetManager.load('snowPinePack')
 if (snowPinePackAssetResult.status === 'loaded') {
   try {
     const snowForest = createSnowPineForest({
+      additionalExclusionZones: HOSPITAL_EXTERIOR_FOREST_EXCLUSIONS,
       config: snowPinePackAssetResult.config,
       container: snowPinePackAssetResult.container,
       performanceTier,
@@ -918,6 +965,10 @@ if (snowPinePackAssetResult.status === 'loaded') {
       String(snowForest.roadExcludedTreeCount)
     canvas.dataset.snowForestRoadExcludedBushCount =
       String(snowForest.roadExcludedBushCount)
+    canvas.dataset.snowForestHospitalExcludedTreeCount =
+      String(snowForest.additionalExcludedTreeCount)
+    canvas.dataset.snowForestHospitalExcludedBushCount =
+      String(snowForest.additionalExcludedBushCount)
     canvas.dataset.snowForestBoundaryTreeCount =
       String(snowForest.boundaryTreeCount)
     canvas.dataset.snowForestShadowCasterCount =

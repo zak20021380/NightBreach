@@ -10,6 +10,7 @@ export type LocalAssetKey =
   | 'asphaltRoad'
   | 'streetlight'
   | 'snowPinePack'
+  | 'hospitalExterior'
 
 export type LocalGlbPath = `/assets/${string}.glb`
 export type LocalTexturePath = `/assets/${string}/`
@@ -119,6 +120,8 @@ export interface StreetlightAssetDefinition extends LocalGlbAssetDefinition<'str
 
 export interface SnowPinePackAssetDefinition extends LocalGlbAssetDefinition<'snowPinePack'> {}
 
+export interface HospitalExteriorAssetDefinition extends LocalGlbAssetDefinition<'hospitalExterior'> {}
+
 export interface LocalAssetDefinitions {
   readonly rifle: RifleAssetDefinition
   readonly shotgun: ShotgunAssetDefinition
@@ -131,6 +134,7 @@ export interface LocalAssetDefinitions {
   readonly asphaltRoad: AsphaltRoadAssetDefinition
   readonly streetlight: StreetlightAssetDefinition
   readonly snowPinePack: SnowPinePackAssetDefinition
+  readonly hospitalExterior: HospitalExteriorAssetDefinition
 }
 
 export interface LocalAssetConfiguration {
@@ -402,6 +406,20 @@ export const ASSET_CONFIG = {
         minimumRoughness: 0.5,
         maximumEnvironmentIntensity: 0.62,
       },
+    },
+    hospitalExterior: {
+      key: 'hospitalExterior',
+      label: 'Hospital Exterior',
+      path: '/assets/levels/hospital/exterior/hospital-exterior.glb',
+      transform: {
+        // The complete authored hierarchy is placed, uniformly scaled, and
+        // grounded by hospitalExterior.ts after its actual bounds are measured.
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+      },
+      animation: { speed: 1, autoplay: false, loop: false },
+      material: { mode: 'source' },
     },
   },
 } as const satisfies LocalAssetConfiguration

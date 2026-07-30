@@ -20,7 +20,7 @@ interface ForestCluster {
   readonly radius: number
 }
 
-type ForestExclusionZone =
+export type ForestExclusionZone =
   | {
       readonly kind: 'circle'
       readonly name: string
@@ -42,6 +42,14 @@ type ForestExclusionZone =
       readonly from: readonly [x: number, z: number]
       readonly to: readonly [x: number, z: number]
       readonly halfWidth: number
+    }
+  | {
+      readonly kind: 'box'
+      readonly name: string
+      readonly minimumX: number
+      readonly maximumX: number
+      readonly minimumZ: number
+      readonly maximumZ: number
     }
 
 interface ForestVariantDefinition {
@@ -87,6 +95,7 @@ interface ForestTierSettings {
 }
 
 interface SnowPineForestOptions {
+  readonly additionalExclusionZones?: readonly ForestExclusionZone[]
   readonly config: SnowPinePackAssetDefinition
   readonly container: AssetContainer
   readonly performanceTier: WinterPerformanceTier
@@ -97,6 +106,8 @@ interface SnowPineForestOptions {
 }
 
 export interface SnowPineForestResult {
+  readonly additionalExcludedBushCount: number
+  readonly additionalExcludedTreeCount: number
   readonly boundaryTreeCount: number
   readonly bushCount: number
   readonly collisionMeshCount: number
@@ -419,6 +430,12 @@ function isInsideExclusionZone(
     const normalizedX = (x - zone.x) / zone.radiusX
     const normalizedZ = (z - zone.z) / zone.radiusZ
     return normalizedX * normalizedX + normalizedZ * normalizedZ < 1
+  }
+  if (zone.kind === 'box') {
+    return x > zone.minimumX
+      && x < zone.maximumX
+      && z > zone.minimumZ
+      && z < zone.maximumZ
   }
   return distanceToSegmentSquared(x, z, zone.from, zone.to)
     < zone.halfWidth * zone.halfWidth
@@ -750,7 +767,10 @@ function createBoundaryTreePlacements(
   return boundaryPlacements
 }
 
-function createForestLayout(settings: ForestTierSettings) {
+function createForestLayout(
+  settings: ForestTierSettings,
+  additionalExclusionZones: readonly ForestExclusionZone[],
+) {
   const random = createSeededRandom(SNOW_PINE_FOREST_SETTINGS.seed)
   const placements: ForestPlacement[] = []
   fillTreeBand(random, placements, settings.innerTreeCount, 'inner')
@@ -773,10 +793,24 @@ function createForestLayout(settings: ForestTierSettings) {
   // forest is complete. This keeps the cluster stream and stable indices
   // independent from boundary density while respecting the final road corridor.
   const boundaryPlacements = createBoundaryTreePlacements(settings, placements)
+  const roadFilteredPlacements = [...retainedPlacements, ...boundaryPlacements]
+  const additionalExcludedPlacements = roadFilteredPlacements.filter(
+    (placement) => additionalExclusionZones.some(
+      (zone) => isInsideExclusionZone(placement.x, placement.z, zone),
+    ),
+  )
   return {
+    additionalExcludedBushCount: additionalExcludedPlacements.filter(
+      (placement) => placement.kind === 'bush',
+    ).length,
+    additionalExcludedTreeCount: additionalExcludedPlacements.filter(
+      (placement) => placement.kind === 'tree',
+    ).length,
     boundaryTreeCount: boundaryPlacements.length,
     originalPlacements: [...placements, ...boundaryPlacements],
-    placements: [...retainedPlacements, ...boundaryPlacements],
+    placements: roadFilteredPlacements.filter(
+      (placement) => !additionalExcludedPlacements.includes(placement),
+    ),
     roadExcludedBushCount: roadExcludedPlacements.filter(
       (placement) => placement.kind === 'bush',
     ).length,
@@ -926,7 +960,10 @@ export function createSnowPineForest(
 ): SnowPineForestResult {
   const tierSettings =
     SNOW_PINE_FOREST_SETTINGS.counts[options.performanceTier]
-  const layout = createForestLayout(tierSettings)
+  const layout = createForestLayout(
+    tierSettings,
+    options.additionalExclusionZones ?? [],
+  )
   const placements = layout.placements
   const templates = createForestTemplates(options)
   const originalPlacementIndices = new Map(
@@ -1068,10 +1105,14 @@ export function createSnowPineForest(
     + `${shadowCasterTreeCount} nearby shadow-casting trees; variants: `
     + `${variantNames.join(', ')}; road clearance removed `
     + `${layout.roadExcludedTreeCount} trees and `
-    + `${layout.roadExcludedBushCount} bushes before collider/shadow setup).`,
+    + `${layout.roadExcludedBushCount} bushes; additional destination clearance `
+    + `removed ${layout.additionalExcludedTreeCount} trees and `
+    + `${layout.additionalExcludedBushCount} bushes before collider/shadow setup).`,
   )
 
   return {
+    additionalExcludedBushCount: layout.additionalExcludedBushCount,
+    additionalExcludedTreeCount: layout.additionalExcludedTreeCount,
     boundaryTreeCount: layout.boundaryTreeCount,
     bushCount,
     collisionMeshCount,
