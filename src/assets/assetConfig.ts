@@ -5,6 +5,7 @@ export type LocalAssetKey =
   | 'environment'
   | 'shed'
   | 'ammoCrate'
+  | 'oldWoodenTable'
   | 'utilityPole'
   | 'rustyCar'
   | 'asphaltRoad'
@@ -110,6 +111,9 @@ export interface ShedAssetDefinition extends LocalGlbAssetDefinition<'shed'> {}
 
 export interface AmmoCrateAssetDefinition extends LocalGlbAssetDefinition<'ammoCrate'> {}
 
+export interface OldWoodenTableAssetDefinition
+  extends LocalGlbAssetDefinition<'oldWoodenTable'> {}
+
 export interface UtilityPoleAssetDefinition extends LocalGlbAssetDefinition<'utilityPole'> {}
 
 export interface RustyCarAssetDefinition extends LocalGlbAssetDefinition<'rustyCar'> {}
@@ -129,6 +133,7 @@ export interface LocalAssetDefinitions {
   readonly environment: EnvironmentAssetDefinition
   readonly shed: ShedAssetDefinition
   readonly ammoCrate: AmmoCrateAssetDefinition
+  readonly oldWoodenTable: OldWoodenTableAssetDefinition
   readonly utilityPole: UtilityPoleAssetDefinition
   readonly rustyCar: RustyCarAssetDefinition
   readonly asphaltRoad: AsphaltRoadAssetDefinition
@@ -303,6 +308,22 @@ export const ASSET_CONFIG = {
         // The GLB is already authored at a natural 0.904 x 0.527 x 0.550 m.
         // Keep that meter scale and let the cabin placement wrapper provide
         // only its world position, wall-aligned yaw, and ground correction.
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+      },
+      animation: { speed: 1, autoplay: false, loop: false },
+      material: { mode: 'source' },
+    },
+    oldWoodenTable: {
+      key: 'oldWoodenTable',
+      label: 'Old Wooden Table',
+      path: '/assets/props/furniture/old-wooden-table.glb',
+      transform: {
+        // The authored hierarchy resolves to 2.007 x 0.871 x 0.888 m, which is
+        // workbench height rather than table height. oldWoodenTable.ts measures
+        // that for itself and derives the one uniform scale, cabin-relative
+        // position, yaw and grounding correction from it.
         position: [0, 0, 0],
         rotation: [0, 0, 0],
         scale: [1, 1, 1],

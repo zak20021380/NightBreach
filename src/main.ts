@@ -82,6 +82,7 @@ import {
   HOSPITAL_EXTERIOR_FOREST_EXCLUSIONS,
 } from './hospitalExterior'
 import { createNaturalBoundary } from './naturalBoundary'
+import { createOldWoodenTable } from './oldWoodenTable'
 import {
   clamp,
   damp,
@@ -732,6 +733,55 @@ const ammoCrate = createAmmoCrate({
 canvas.dataset.ammoCrateCabin = abandonedStructures.enterableHouse.cabinId
 canvas.dataset.ammoCrateSource = 'glb'
 canvas.dataset.ammoCrateVisualMeshCount = String(ammoCrate.visualMeshCount)
+
+// The second cabin is the one without the ammo crate, so it is the one that
+// receives the table. The first cabin's interior is deliberately left alone.
+canvas.dataset.oldWoodenTableSource = 'unavailable'
+const oldWoodenTableAssetResult = await localAssetManager.load('oldWoodenTable')
+if (oldWoodenTableAssetResult.status === 'loaded') {
+  try {
+    const oldWoodenTable = createOldWoodenTable({
+      cabin: abandonedStructures.secondaryHouse,
+      castShadows: !isMobile && shadowGenerator !== null,
+      config: oldWoodenTableAssetResult.config,
+      container: oldWoodenTableAssetResult.container,
+      scene,
+      shadowGenerator,
+      worldLayerMask: WORLD_RENDER_LAYER_MASK,
+    })
+    canvas.dataset.oldWoodenTableSource = 'glb'
+    canvas.dataset.oldWoodenTableCabin = oldWoodenTable.cabinId
+    canvas.dataset.oldWoodenTablePosition = oldWoodenTable.position
+      .map((value) => value.toFixed(3))
+      .join(',')
+    canvas.dataset.oldWoodenTableRotationY = oldWoodenTable.rotationY.toFixed(6)
+    canvas.dataset.oldWoodenTableUniformScale =
+      oldWoodenTable.uniformScale.toFixed(6)
+    canvas.dataset.oldWoodenTableSourceDimensions =
+      oldWoodenTable.sourceDimensions.map((value) => value.toFixed(3)).join(',')
+    canvas.dataset.oldWoodenTableDimensions = oldWoodenTable.dimensions
+      .map((value) => value.toFixed(3))
+      .join(',')
+    canvas.dataset.oldWoodenTableColliderDimensions =
+      oldWoodenTable.colliderDimensions.join(',')
+    canvas.dataset.oldWoodenTableCollisionCount =
+      String(oldWoodenTable.collisionMeshCount)
+    canvas.dataset.oldWoodenTableShadowCasterCount =
+      String(oldWoodenTable.shadowCasterCount)
+    canvas.dataset.oldWoodenTableVisualMeshCount =
+      String(oldWoodenTable.visualMeshCount)
+  } catch (error) {
+    logRuntimeWarning(
+      'Old wooden table placement failed; the second cabin stays empty.',
+      error,
+    )
+  }
+} else {
+  logRuntimeWarning(
+    'Old wooden table asset was unavailable; the second cabin stays empty.',
+    oldWoodenTableAssetResult.reason,
+  )
+}
 
 const utilityPoleAssetResult = await localAssetManager.load('utilityPole')
 if (utilityPoleAssetResult.status !== 'loaded') {
