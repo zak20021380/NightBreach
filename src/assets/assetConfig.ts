@@ -6,6 +6,7 @@ export type LocalAssetKey =
   | 'shed'
   | 'ammoCrate'
   | 'oldWoodenTable'
+  | 'dirtyMedkit'
   | 'utilityPole'
   | 'rustyCar'
   | 'asphaltRoad'
@@ -114,6 +115,9 @@ export interface AmmoCrateAssetDefinition extends LocalGlbAssetDefinition<'ammoC
 export interface OldWoodenTableAssetDefinition
   extends LocalGlbAssetDefinition<'oldWoodenTable'> {}
 
+export interface DirtyMedkitAssetDefinition
+  extends LocalGlbAssetDefinition<'dirtyMedkit'> {}
+
 export interface UtilityPoleAssetDefinition extends LocalGlbAssetDefinition<'utilityPole'> {}
 
 export interface RustyCarAssetDefinition extends LocalGlbAssetDefinition<'rustyCar'> {}
@@ -134,6 +138,7 @@ export interface LocalAssetDefinitions {
   readonly shed: ShedAssetDefinition
   readonly ammoCrate: AmmoCrateAssetDefinition
   readonly oldWoodenTable: OldWoodenTableAssetDefinition
+  readonly dirtyMedkit: DirtyMedkitAssetDefinition
   readonly utilityPole: UtilityPoleAssetDefinition
   readonly rustyCar: RustyCarAssetDefinition
   readonly asphaltRoad: AsphaltRoadAssetDefinition
@@ -324,6 +329,23 @@ export const ASSET_CONFIG = {
         // workbench height rather than table height. oldWoodenTable.ts measures
         // that for itself and derives the one uniform scale, cabin-relative
         // position, yaw and grounding correction from it.
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+      },
+      animation: { speed: 1, autoplay: false, loop: false },
+      material: { mode: 'source' },
+    },
+    dirtyMedkit: {
+      key: 'dirtyMedkit',
+      label: 'Dirty Medkit',
+      path: '/assets/props/medical/dirty-medkit/dirty_medkit.glb',
+      transform: {
+        // The authored hierarchy resolves to 0.130 x 0.224 x 0.287 m with +Y up,
+        // its long axis on local Z and a flat base, which is already a real
+        // medkit in metres. dirtyMedkit.ts keeps that authored scale and derives
+        // only the cabin-relative position, the yaw, and the rest height it
+        // measures from the table's own tabletop vertices.
         position: [0, 0, 0],
         rotation: [0, 0, 0],
         scale: [1, 1, 1],

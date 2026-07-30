@@ -35,6 +35,10 @@ import {
 import { createAbandonedStructures } from './abandonedStructures'
 import { createAmmoCrate } from './ammoCrate'
 import {
+  createDirtyMedkit,
+  type DirtyMedkitResult,
+} from './dirtyMedkit'
+import {
   type EnterableHouseResult,
   type InteractiveHouseDoor,
 } from './enterableHouse'
@@ -49,6 +53,7 @@ import {
   DESKTOP_HIP_FIRE_MOUSE_SENSITIVITY,
   MUZZLE_FLASH_DURATION,
   MUZZLE_SMOKE_LIFETIME,
+  PLAYER_MAX_HEALTH,
   PROCEDURAL_RELOAD_DURATION_SECONDS,
   RELOAD_AMMO_PROGRESS,
   RELOAD_COMPLETION_GRACE_SECONDS,
@@ -82,7 +87,10 @@ import {
   HOSPITAL_EXTERIOR_FOREST_EXCLUSIONS,
 } from './hospitalExterior'
 import { createNaturalBoundary } from './naturalBoundary'
-import { createOldWoodenTable } from './oldWoodenTable'
+import {
+  createOldWoodenTable,
+  type OldWoodenTableResult,
+} from './oldWoodenTable'
 import {
   clamp,
   damp,
@@ -196,6 +204,8 @@ let startZombieWave: () => void = () => undefined
 let releaseZombiePlayerTargets: () => void = () => undefined
 let resupplyFromAmmoCrate: () => string | null = () => null
 let resetAmmoCrateForNextWave: () => void = () => undefined
+let collectDirtyMedkit: () => string | null = () => null
+let resetDirtyMedkit: () => void = () => undefined
 let portraitInputPaused = isTouchDevice && window.innerHeight > window.innerWidth
 
 function gameplayInputEnabled() {
@@ -737,6 +747,9 @@ canvas.dataset.ammoCrateVisualMeshCount = String(ammoCrate.visualMeshCount)
 // The second cabin is the one without the ammo crate, so it is the one that
 // receives the table. The first cabin's interior is deliberately left alone.
 canvas.dataset.oldWoodenTableSource = 'unavailable'
+// Kept so the medkit that rests on the tabletop can be placed against the table
+// that was actually accepted, rather than re-measuring it.
+let placedOldWoodenTable: OldWoodenTableResult | null = null
 const oldWoodenTableAssetResult = await localAssetManager.load('oldWoodenTable')
 if (oldWoodenTableAssetResult.status === 'loaded') {
   try {
@@ -749,6 +762,7 @@ if (oldWoodenTableAssetResult.status === 'loaded') {
       shadowGenerator,
       worldLayerMask: WORLD_RENDER_LAYER_MASK,
     })
+    placedOldWoodenTable = oldWoodenTable
     canvas.dataset.oldWoodenTableSource = 'glb'
     canvas.dataset.oldWoodenTableCabin = oldWoodenTable.cabinId
     canvas.dataset.oldWoodenTablePosition = oldWoodenTable.position
@@ -781,6 +795,60 @@ if (oldWoodenTableAssetResult.status === 'loaded') {
     'Old wooden table asset was unavailable; the second cabin stays empty.',
     oldWoodenTableAssetResult.reason,
   )
+}
+
+// Exactly one medkit, and only when the table it rests on was actually placed:
+// its whole placement is derived from that table's own tabletop vertices.
+canvas.dataset.dirtyMedkitSource = 'unavailable'
+let dirtyMedkit: DirtyMedkitResult | null = null
+if (placedOldWoodenTable !== null) {
+  const dirtyMedkitAssetResult = await localAssetManager.load('dirtyMedkit')
+  if (dirtyMedkitAssetResult.status === 'loaded') {
+    try {
+      dirtyMedkit = createDirtyMedkit({
+        cabin: abandonedStructures.secondaryHouse,
+        castShadows: !isMobile && shadowGenerator !== null,
+        config: dirtyMedkitAssetResult.config,
+        container: dirtyMedkitAssetResult.container,
+        scene,
+        shadowGenerator,
+        table: placedOldWoodenTable,
+        worldLayerMask: WORLD_RENDER_LAYER_MASK,
+      })
+      canvas.dataset.dirtyMedkitSource = 'glb'
+      canvas.dataset.dirtyMedkitCabin = dirtyMedkit.cabinId
+      canvas.dataset.dirtyMedkitPosition = dirtyMedkit.position
+        .map((value) => value.toFixed(3))
+        .join(',')
+      canvas.dataset.dirtyMedkitRotationY = dirtyMedkit.rotationY.toFixed(6)
+      canvas.dataset.dirtyMedkitUniformScale =
+        dirtyMedkit.uniformScale.toFixed(6)
+      canvas.dataset.dirtyMedkitSourceDimensions =
+        dirtyMedkit.sourceDimensions.map((value) => value.toFixed(3)).join(',')
+      canvas.dataset.dirtyMedkitDimensions = dirtyMedkit.dimensions
+        .map((value) => value.toFixed(3))
+        .join(',')
+      canvas.dataset.dirtyMedkitSupportY = dirtyMedkit.supportY.toFixed(4)
+      canvas.dataset.dirtyMedkitSupportSampleCount =
+        String(dirtyMedkit.supportSampleCount)
+      canvas.dataset.dirtyMedkitInteractionDistance =
+        dirtyMedkit.interactionDistance.toFixed(2)
+      canvas.dataset.dirtyMedkitShadowCasterCount =
+        String(dirtyMedkit.shadowCasterCount)
+      canvas.dataset.dirtyMedkitVisualMeshCount =
+        String(dirtyMedkit.visualMeshCount)
+    } catch (error) {
+      logRuntimeWarning(
+        'Dirty medkit placement failed; the cabin tabletop stays bare.',
+        error,
+      )
+    }
+  } else {
+    logRuntimeWarning(
+      'Dirty medkit asset was unavailable; the cabin tabletop stays bare.',
+      dirtyMedkitAssetResult.reason,
+    )
+  }
 }
 
 const utilityPoleAssetResult = await localAssetManager.load('utilityPole')
@@ -1088,11 +1156,12 @@ let activeCabinDoor: CabinDoorBinding | null = null
 let doorInteractionAvailable = false
 let doorPromptAction: 'Open' | 'Close' = 'Open'
 let ammoCrateInteractionAvailable = false
+let medkitInteractionAvailable = false
 let interactionFeedbackText: string | null = null
 let interactionFeedbackExpiresAt = 0
 let renderedInteractionUiVisible = false
 let renderedInteractionUiText: string | null = null
-let renderedInteractionTarget: 'door' | 'ammoCrate' | null = null
+let renderedInteractionTarget: 'door' | 'ammoCrate' | 'medkit' | null = null
 const AMMO_CRATE_INTERACTION_DISTANCE_SQUARED = 1.65 * 1.65
 const INTERACTION_FEEDBACK_DURATION_MS = 1_800
 
@@ -1123,9 +1192,14 @@ function showInteractionFeedback(text: string) {
 function setDoorInteractionUi(
   binding: CabinDoorBinding | null,
   ammoCrateInRange = false,
+  medkitInRange = false,
 ) {
   activeCabinDoor = binding
   ammoCrateInteractionAvailable = ammoCrateInRange
+  medkitInteractionAvailable = medkitInRange
+  // The medkit's only per-frame cost: one boolean compare inside the prop, which
+  // writes an emissive uniform exclusively on an actual change.
+  dirtyMedkit?.setHighlighted(medkitInRange)
   doorInteractionAvailable = binding !== null
   // With no cabin in range the prompt still reports the first cabin's action,
   // exactly as the single-cabin version did.
@@ -1139,14 +1213,18 @@ function setDoorInteractionUi(
     && performance.now() >= interactionFeedbackExpiresAt
   ) clearInteractionFeedback()
   const feedbackVisible = interactionFeedbackText !== null
-  const target = ammoCrateInRange ? 'ammoCrate' : binding ? 'door' : null
+  const target = ammoCrateInRange
+    ? 'ammoCrate'
+    : medkitInRange ? 'medkit' : binding ? 'door' : null
   const visible = feedbackVisible || target !== null
   const text = interactionFeedbackText
     ?? (target === 'ammoCrate'
       ? 'Press E to Resupply'
-      : target === 'door'
-        ? `Press E to ${action}`
-        : null)
+      : target === 'medkit'
+        ? 'Press E to use Medkit'
+        : target === 'door'
+          ? `Press E to ${action}`
+          : null)
   if (
     visible === renderedInteractionUiVisible
     && text === renderedInteractionUiText
@@ -1169,11 +1247,14 @@ function setDoorInteractionUi(
     useButton.textContent = target === 'ammoCrate' ? 'SUPPLY' : 'USE'
     useButton.setAttribute(
       'aria-label',
-      target === 'ammoCrate' ? 'Resupply ammunition' : 'Use door',
+      target === 'ammoCrate'
+        ? 'Resupply ammunition'
+        : target === 'medkit' ? 'Use medkit' : 'Use door',
     )
   }
   canvas.dataset.doorInteractionAvailable = String(binding !== null)
   canvas.dataset.ammoCrateInteractionAvailable = String(ammoCrateInRange)
+  canvas.dataset.dirtyMedkitInteractionAvailable = String(medkitInRange)
 }
 
 function updateDoorInteractionUi() {
@@ -1199,6 +1280,27 @@ function updateDoorInteractionUi() {
   let nearestDistanceSquared = ammoCrateInRange
     ? ammoCrateDistanceSquared
     : Number.POSITIVE_INFINITY
+  // The medkit is only offered from inside its own cabin. The rectangle test is
+  // what stops it being taken through the rear or side wall: a player standing
+  // just outside is within the short range but outside the interior.
+  let medkitInRange = false
+  if (dirtyMedkit !== null && dirtyMedkit.isAvailable()) {
+    const medkitDistanceX =
+      dirtyMedkit.interactionPosition.x - camera.globalPosition.x
+    const medkitDistanceZ =
+      dirtyMedkit.interactionPosition.z - camera.globalPosition.z
+    const medkitDistanceSquared =
+      medkitDistanceX * medkitDistanceX + medkitDistanceZ * medkitDistanceZ
+    if (
+      medkitDistanceSquared <= dirtyMedkit.interactionDistanceSquared
+      && dirtyMedkit.isInsideCabin(camera.globalPosition)
+    ) {
+      medkitInRange = true
+      if (medkitDistanceSquared < nearestDistanceSquared) {
+        nearestDistanceSquared = medkitDistanceSquared
+      }
+    }
+  }
   for (const binding of cabinDoors) {
     if (binding.door.isAnimating) continue
     const distanceX = binding.doorwayPosition.x - camera.globalPosition.x
@@ -1209,13 +1311,23 @@ function updateDoorInteractionUi() {
     nearestBinding = binding
     nearestDistanceSquared = distanceSquared
   }
-  setDoorInteractionUi(nearestBinding, ammoCrateInRange && nearestBinding === null)
+  setDoorInteractionUi(
+    nearestBinding,
+    ammoCrateInRange && nearestBinding === null,
+    medkitInRange && nearestBinding === null && !ammoCrateInRange,
+  )
 }
 
 useDoorInteraction = () => {
   if (!gameplayInputEnabled()) return false
   if (ammoCrateInteractionAvailable) {
     const feedback = resupplyFromAmmoCrate()
+    if (feedback === null) return false
+    showInteractionFeedback(feedback)
+    return true
+  }
+  if (medkitInteractionAvailable) {
+    const feedback = collectDirtyMedkit()
     if (feedback === null) return false
     showInteractionFeedback(feedback)
     return true
@@ -7081,6 +7193,60 @@ resupplyFromAmmoCrate = () => {
 }
 
 publishAmmoCrateState()
+
+// The medkit reuses the existing health controller rather than adding a system:
+// `resetHealth` assigns exactly PLAYER_MAX_HEALTH, so the cap stays the single
+// source of truth and a heal can never overshoot it.
+const MEDKIT_HEAL_PULSE_DURATION_MS = 620
+let medkitHealPulseTimer: number | undefined
+
+function publishDirtyMedkitState() {
+  canvas.dataset.dirtyMedkitAvailable =
+    String(dirtyMedkit?.isAvailable() ?? false)
+}
+
+// Pickup feedback: one CSS class on the health bar that is already on screen.
+// No audio buffer to decode, no new element, and no per-frame work.
+function pulseHealthHud() {
+  healthHud.classList.remove('healed')
+  void healthHud.offsetWidth
+  healthHud.classList.add('healed')
+  if (medkitHealPulseTimer !== undefined) {
+    window.clearTimeout(medkitHealPulseTimer)
+  }
+  medkitHealPulseTimer = window.setTimeout(() => {
+    medkitHealPulseTimer = undefined
+    healthHud.classList.remove('healed')
+  }, MEDKIT_HEAL_PULSE_DURATION_MS)
+}
+
+collectDirtyMedkit = () => {
+  if (dirtyMedkit === null || !dirtyMedkit.isAvailable()) return null
+  // Nothing to restore means nothing is consumed: the medkit stays on the table.
+  if (playerHealthController.health >= PLAYER_MAX_HEALTH) {
+    return 'Health already full'
+  }
+
+  playerHealthController.resetHealth()
+  dirtyMedkit.collect()
+  publishDirtyMedkitState()
+  pulseHealthHud()
+  return 'Health restored'
+}
+
+resetDirtyMedkit = () => {
+  if (medkitHealPulseTimer !== undefined) {
+    window.clearTimeout(medkitHealPulseTimer)
+    medkitHealPulseTimer = undefined
+  }
+  healthHud.classList.remove('healed')
+  // Hidden rather than disposed on collection, so a restart puts the same
+  // instantiated meshes and textures straight back.
+  dirtyMedkit?.reset()
+  publishDirtyMedkitState()
+}
+
+publishDirtyMedkitState()
 let movementPointerId: number | null = null
 let aimPointerId: number | null = null
 let firePointerId: number | null = null
@@ -7783,6 +7949,10 @@ function restartPrototype() {
   camera.cameraDirection.set(0, 0, 0)
   camera.cameraRotation.set(0, 0)
   for (const binding of cabinDoors) binding.door.reset()
+  // The medkit comes back for the new run, and any stale prompt or heal pulse is
+  // dropped with it.
+  resetDirtyMedkit()
+  clearInteractionFeedback()
   setDoorInteractionUi(null)
   previousCameraPosition.copyFrom(camera.position)
   previousCameraRotation.copyFrom(camera.rotation)

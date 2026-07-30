@@ -42,8 +42,15 @@ export interface OldWoodenTableResult {
     height: number,
     depth: number,
   ]
+  /**
+   * World height of the highest authored tabletop vertex, so a prop can be
+   * rested on the slab without re-measuring the table or moving it.
+   */
+  readonly tabletopY: number
   readonly uniformScale: number
   readonly visualMeshCount: number
+  /** Read-only view of the placed visual meshes, for support sampling. */
+  readonly visualMeshes: readonly AbstractMesh[]
 }
 
 interface ModelBounds {
@@ -339,8 +346,10 @@ export function createOldWoodenTable(
         sourceBounds.size.y,
         sourceBounds.size.z,
       ],
+      tabletopY: placedBounds.maximum.y,
       uniformScale,
       visualMeshCount: modelMeshes.length,
+      visualMeshes: modelMeshes,
     }
 
     console.info(

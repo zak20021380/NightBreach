@@ -365,6 +365,46 @@ body {
   background: #a5453c;
 }
 
+/* Medkit pickup feedback: one short pulse on the bar that is already on screen,
+   driven by a class the collection handler adds and removes. Compositor-only
+   properties, so it costs no layout and no extra element. */
+#healthHud.healed {
+  animation: medkitHeal 620ms ease-out 1;
+}
+
+#healthHud.healed #healthFill {
+  animation: medkitHealFill 620ms ease-out 1;
+}
+
+@keyframes medkitHeal {
+  0% {
+    border-left-color: #d8f0c0;
+  }
+
+  100% {
+    border-left-color: #83906d;
+  }
+}
+
+@keyframes medkitHealFill {
+  0% {
+    box-shadow: 0 0 14px rgb(206 240 176 / 78%);
+    filter: brightness(1.55);
+  }
+
+  100% {
+    box-shadow: 0 0 5px rgb(138 157 110 / 34%);
+    filter: brightness(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #healthHud.healed,
+  #healthHud.healed #healthFill {
+    animation: none;
+  }
+}
+
 #ammo {
   position: fixed;
   right: clamp(18px, 4vw, 56px);
