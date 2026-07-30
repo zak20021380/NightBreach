@@ -7,6 +7,7 @@ export type LocalAssetKey =
   | 'ammoCrate'
   | 'utilityPole'
   | 'rustyCar'
+  | 'snowPinePack'
 
 export type LocalGlbPath = `/assets/${string}.glb`
 export type LocalTexturePath = `/assets/${string}/`
@@ -110,6 +111,8 @@ export interface UtilityPoleAssetDefinition extends LocalGlbAssetDefinition<'uti
 
 export interface RustyCarAssetDefinition extends LocalGlbAssetDefinition<'rustyCar'> {}
 
+export interface SnowPinePackAssetDefinition extends LocalGlbAssetDefinition<'snowPinePack'> {}
+
 export interface LocalAssetDefinitions {
   readonly rifle: RifleAssetDefinition
   readonly shotgun: ShotgunAssetDefinition
@@ -119,6 +122,7 @@ export interface LocalAssetDefinitions {
   readonly ammoCrate: AmmoCrateAssetDefinition
   readonly utilityPole: UtilityPoleAssetDefinition
   readonly rustyCar: RustyCarAssetDefinition
+  readonly snowPinePack: SnowPinePackAssetDefinition
 }
 
 export interface LocalAssetConfiguration {
@@ -331,6 +335,25 @@ export const ASSET_CONFIG = {
         mode: 'source',
         minimumRoughness: 0.4,
         maximumEnvironmentIntensity: 0.65,
+      },
+    },
+    snowPinePack: {
+      key: 'snowPinePack',
+      label: 'Snow Pine Pack',
+      path: '/assets/environment/trees/snow-pine-pack.glb',
+      transform: {
+        // Individual authored vegetation roots are extracted by name. Their
+        // pack-preview offsets are removed while their axis conversion and
+        // authored proportions remain intact.
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+      },
+      animation: { speed: 1, autoplay: false, loop: false },
+      material: {
+        mode: 'source',
+        minimumRoughness: 0.5,
+        maximumEnvironmentIntensity: 0.62,
       },
     },
   },

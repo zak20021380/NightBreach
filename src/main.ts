@@ -84,6 +84,7 @@ import {
   logRuntimeWarning,
 } from './runtimeUtils'
 import { ShotgunAudioController } from './shotgunAudio'
+import { createSnowPineForest } from './snowPineForest'
 import { createRustyCars } from './rustyCars'
 import { createBrokenUtilityPoles } from './utilityPoles'
 import {
@@ -890,6 +891,45 @@ if (secondaryCabinDoor) {
     `${secondaryCabinDoor.doorwayPosition.x.toFixed(3)},`
     + `${secondaryCabinDoor.doorwayPosition.z.toFixed(3)}`
 }
+
+canvas.dataset.snowForestSource = 'unavailable'
+const snowPinePackAssetResult = await localAssetManager.load('snowPinePack')
+if (snowPinePackAssetResult.status === 'loaded') {
+  try {
+    const snowForest = createSnowPineForest({
+      config: snowPinePackAssetResult.config,
+      container: snowPinePackAssetResult.container,
+      performanceTier,
+      registerCollisionMesh(mesh) {
+        proceduralEnvironmentMeshes.push(mesh)
+      },
+      scene,
+      shadowGenerator,
+      worldLayerMask: WORLD_RENDER_LAYER_MASK,
+    })
+    canvas.dataset.snowForestSource = 'glb'
+    canvas.dataset.snowForestTreeCount = String(snowForest.treeCount)
+    canvas.dataset.snowForestBushCount = String(snowForest.bushCount)
+    canvas.dataset.snowForestCollisionCount =
+      String(snowForest.collisionMeshCount)
+    canvas.dataset.snowForestShadowCasterCount =
+      String(snowForest.shadowCasterTreeCount)
+    canvas.dataset.snowForestSharing =
+      'hardware-instanced-shared-geometry-materials-textures'
+    canvas.dataset.snowForestVariants = snowForest.variantNames.join(',')
+  } catch (error) {
+    logRuntimeWarning(
+      'Snow pine forest setup failed; gameplay will continue without forest vegetation.',
+      error,
+    )
+  }
+} else {
+  logRuntimeWarning(
+    'Snow pine forest asset was unavailable; gameplay will continue without forest vegetation.',
+    snowPinePackAssetResult.reason,
+  )
+}
+
 let activeCabinDoor: CabinDoorBinding | null = null
 let doorInteractionAvailable = false
 let doorPromptAction: 'Open' | 'Close' = 'Open'
