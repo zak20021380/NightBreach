@@ -25,6 +25,20 @@ interface ModelBounds {
   readonly maximum: Vector3
 }
 
+interface RoadSegmentLayout {
+  readonly centerX: number
+  readonly centerZ: number
+  readonly length: number
+  readonly renderedLength: number
+  readonly yaw: number
+}
+
+const ROAD_TREATMENT_MATERIAL_NAMES = new Set([
+  'asphaltRoadEdgeSnowMaterial',
+  'asphaltRoadCompactedCenterMaterial',
+  'asphaltRoadTireWearMaterial',
+])
+
 export interface AsphaltRoadResult {
   readonly materialNames: readonly string[]
   readonly modelDimensions: readonly [
@@ -35,6 +49,7 @@ export interface AsphaltRoadResult {
   readonly modelMeshNames: readonly string[]
   readonly route: {
     readonly from: readonly [x: number, z: number]
+    readonly points: readonly (readonly [x: number, z: number])[]
     readonly to: readonly [x: number, z: number]
   }
   readonly segmentCount: number
@@ -164,10 +179,7 @@ function mergeTreatmentPieces(
 
 function createRoadTreatment(
   options: AsphaltRoadOptions,
-  routeLength: number,
-  routeYaw: number,
-  midpointX: number,
-  midpointZ: number,
+  segments: readonly RoadSegmentLayout[],
   asphaltSurfaceY: number,
   edgeSurfaceY: number,
 ) {
@@ -190,25 +202,26 @@ function createRoadTreatment(
     0.16,
     options.scene,
   )
-  const normalX = Math.sin(routeYaw)
-  const normalZ = Math.cos(routeYaw)
   const createStrip = (
     name: string,
+    segment: RoadSegmentLayout,
     width: number,
     offset: number,
     y: number,
   ) => {
     const strip = MeshBuilder.CreateGround(
       name,
-      { width: routeLength, height: width, subdivisions: 1 },
+      { width: segment.renderedLength, height: width, subdivisions: 1 },
       options.scene,
     )
+    const normalX = Math.sin(segment.yaw)
+    const normalZ = Math.cos(segment.yaw)
     strip.position.set(
-      midpointX + normalX * offset,
+      segment.centerX + normalX * offset,
       y,
-      midpointZ + normalZ * offset,
+      segment.centerZ + normalZ * offset,
     )
-    strip.rotation.y = routeYaw
+    strip.rotation.y = segment.yaw
     return strip
   }
 
@@ -217,53 +230,123 @@ function createRoadTreatment(
   const snowStripOffset = halfWidth - snowStripWidth * 0.6
   const edgeSnow = mergeTreatmentPieces(
     'asphaltRoadEdgeSnow',
-    [
+    segments.flatMap((segment, index) => [
       createStrip(
-        'asphaltRoadLeftEdgeSnow',
+        `asphaltRoadLeftEdgeSnow${index + 1}`,
+        segment,
         snowStripWidth,
         snowStripOffset,
         edgeSurfaceY,
       ),
       createStrip(
-        'asphaltRoadRightEdgeSnow',
+        `asphaltRoadRightEdgeSnow${index + 1}`,
+        segment,
         snowStripWidth,
         -snowStripOffset,
         edgeSurfaceY,
       ),
-    ],
+    ]),
     snowMaterial,
     options.worldLayerMask,
   )
-  const compactedCenter = finalizeTreatmentMesh(
-    createStrip(
-      'asphaltRoadCompactedCenter',
+  const compactedCenter = mergeTreatmentPieces(
+    'asphaltRoadCompactedCenter',
+    segments.map((segment, index) => createStrip(
+      `asphaltRoadCompactedCenter${index + 1}`,
+      segment,
       3.9,
       0,
       asphaltSurfaceY,
-    ),
+    )),
     compactedMaterial,
     options.worldLayerMask,
   )
   const tireWear = mergeTreatmentPieces(
     'asphaltRoadTireWear',
-    [
+    segments.flatMap((segment, index) => [
       createStrip(
-        'asphaltRoadLeftTireWear',
+        `asphaltRoadLeftTireWear${index + 1}`,
+        segment,
         0.34,
         1.28,
         asphaltSurfaceY + 0.0015,
       ),
       createStrip(
-        'asphaltRoadRightTireWear',
+        `asphaltRoadRightTireWear${index + 1}`,
+        segment,
         0.34,
         -1.28,
         asphaltSurfaceY + 0.0015,
       ),
-    ],
+    ]),
     tireMaterial,
     options.worldLayerMask,
   )
   return [edgeSnow, compactedCenter, tireWear]
+}
+
+function disposePreviousRoadPlacement(scene: Scene) {
+  for (const mesh of [...scene.meshes]) {
+    if (
+      mesh.metadata?.asphaltRoadSegment === true
+      || mesh.metadata?.asphaltRoadSnowTreatment === true
+    ) mesh.dispose()
+  }
+  for (const node of [...scene.transformNodes]) {
+    if (node.name.startsWith('asphaltRoadSegmentRoot')) node.dispose()
+  }
+  for (const material of [...scene.materials]) {
+    if (ROAD_TREATMENT_MATERIAL_NAMES.has(material.name)) {
+      material.dispose(true, true)
+    }
+  }
+}
+
+function createRoadSegmentLayouts() {
+  const points = ASPHALT_ROAD_ROUTE.points
+  const baseSegments = points.slice(0, -1).map((from, index) => {
+    const to = points[index + 1]
+    const deltaX = to[0] - from[0]
+    const deltaZ = to[1] - from[1]
+    const length = Math.hypot(deltaX, deltaZ)
+    return {
+      directionX: deltaX / length,
+      directionZ: deltaZ / length,
+      length,
+      midpointX: (from[0] + to[0]) * 0.5,
+      midpointZ: (from[1] + to[1]) * 0.5,
+      yaw: -Math.atan2(deltaZ, deltaX),
+    }
+  })
+  const joinExtensions = new Array<number>(points.length).fill(0)
+  const roadHalfWidth = ASPHALT_ROAD_ROUTE.surfaceWidth * 0.5
+  for (let index = 1; index < baseSegments.length; index += 1) {
+    const previous = baseSegments[index - 1]
+    const current = baseSegments[index]
+    const turnAngle = Math.abs(Math.atan2(
+      Math.sin(current.yaw - previous.yaw),
+      Math.cos(current.yaw - previous.yaw),
+    ))
+    // Extend both neighbouring rectangles to the outer miter of each gentle
+    // bend. Straight joins remain exact butt joins, while curved joins gain
+    // only the overlap needed to close their otherwise triangular edge gap.
+    joinExtensions[index] = turnAngle <= 0.0001
+      ? 0
+      : roadHalfWidth * Math.tan(turnAngle * 0.5) + 0.012
+  }
+  return baseSegments.map((segment, index): RoadSegmentLayout => {
+    const startExtension = joinExtensions[index]
+    const endExtension = joinExtensions[index + 1]
+    const centerShift = (endExtension - startExtension) * 0.5
+    return {
+      centerX: segment.midpointX + segment.directionX * centerShift,
+      centerZ: segment.midpointZ + segment.directionZ * centerShift,
+      length: segment.length,
+      renderedLength:
+        segment.length + startExtension + endExtension,
+      yaw: segment.yaw,
+    }
+  })
 }
 
 /**
@@ -274,6 +357,9 @@ function createRoadTreatment(
 export function createAsphaltRoad(
   options: AsphaltRoadOptions,
 ): AsphaltRoadResult {
+  // A recreated scene/HMR pass cannot leave any meshes or transparent
+  // treatment layers from the superseded route behind.
+  disposePreviousRoadPlacement(options.scene)
   const sourceMeshes = options.container.meshes.filter(
     (mesh): mesh is Mesh => mesh instanceof Mesh && mesh.getTotalVertices() > 0,
   )
@@ -321,34 +407,29 @@ export function createAsphaltRoad(
   ))
 
   applyImportedMaterialSettings(sourceMeshes, options.config.material)
-  const routeDeltaX =
-    ASPHALT_ROAD_ROUTE.to[0] - ASPHALT_ROAD_ROUTE.from[0]
-  const routeDeltaZ =
-    ASPHALT_ROAD_ROUTE.to[1] - ASPHALT_ROAD_ROUTE.from[1]
-  const routeLength = Math.hypot(routeDeltaX, routeDeltaZ)
-  const routeYaw = -Math.atan2(routeDeltaZ, routeDeltaX)
-  const segmentCount = Math.ceil(routeLength / modelLength)
-  const segmentSpan = routeLength / segmentCount
-  // Every centred instance spans exactly one route interval. Exact butt joins
-  // avoid both cracks and coplanar overlap/z-fighting at the eleven seams.
-  const lengthScale = segmentSpan / modelLength
+  const routeSegments = createRoadSegmentLayouts()
+  const routeLength = routeSegments.reduce(
+    (total, segment) => total + segment.length,
+    0,
+  )
+  const segmentCount = routeSegments.length
   const widthScale = ASPHALT_ROAD_ROUTE.surfaceWidth / modelWidth
   const visualMeshes: AbstractMesh[] = []
 
   for (let index = 0; index < segmentCount; index += 1) {
-    const routeProgress = (index + 0.5) / segmentCount
+    const segment = routeSegments[index]
     const placementRoot = new TransformNode(
       `asphaltRoadSegmentRoot${index + 1}`,
       options.scene,
     )
     placementRoot.position.set(
-      ASPHALT_ROAD_ROUTE.from[0] + routeDeltaX * routeProgress,
+      segment.centerX,
       ASPHALT_ROAD_ROUTE.baseY,
-      ASPHALT_ROAD_ROUTE.from[1] + routeDeltaZ * routeProgress,
+      segment.centerZ,
     )
-    placementRoot.rotation.y = routeYaw
+    placementRoot.rotation.y = segment.yaw
     placementRoot.scaling.set(
-      lengthScale,
+      segment.renderedLength / modelLength,
       ASPHALT_ROAD_ROUTE.verticalScale,
       widthScale,
     )
@@ -372,10 +453,6 @@ export function createAsphaltRoad(
     visualMeshes.push(instance)
   }
 
-  const midpointX =
-    (ASPHALT_ROAD_ROUTE.from[0] + ASPHALT_ROAD_ROUTE.to[0]) * 0.5
-  const midpointZ =
-    (ASPHALT_ROAD_ROUTE.from[1] + ASPHALT_ROAD_ROUTE.to[1]) * 0.5
   const asphaltSurfaceY =
     ASPHALT_ROAD_ROUTE.baseY
     + Math.max(0, -bounds.minimum.y) * ASPHALT_ROAD_ROUTE.verticalScale
@@ -386,10 +463,7 @@ export function createAsphaltRoad(
     + 0.003
   const treatmentMeshes = createRoadTreatment(
     options,
-    routeLength,
-    routeYaw,
-    midpointX,
-    midpointZ,
+    routeSegments,
     asphaltSurfaceY,
     edgeSurfaceY,
   )
@@ -422,6 +496,7 @@ export function createAsphaltRoad(
     modelMeshNames: sourceMeshes.map((mesh) => mesh.name),
     route: {
       from: ASPHALT_ROAD_ROUTE.from,
+      points: ASPHALT_ROAD_ROUTE.points,
       to: ASPHALT_ROAD_ROUTE.to,
     },
     segmentCount,

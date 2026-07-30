@@ -868,7 +868,7 @@ canvas.dataset.asphaltRoadModelDimensions =
 canvas.dataset.asphaltRoadMeshNames = asphaltRoad.modelMeshNames.join(',')
 canvas.dataset.asphaltRoadMaterialNames = asphaltRoad.materialNames.join(',')
 canvas.dataset.asphaltRoadRoute =
-  `${asphaltRoad.route.from.join(',')}|${asphaltRoad.route.to.join(',')}`
+  asphaltRoad.route.points.map((point) => point.join(',')).join('|')
 canvas.dataset.asphaltRoadSnowTreatmentMeshCount =
   String(asphaltRoad.snowTreatmentMeshCount)
 

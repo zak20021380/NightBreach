@@ -8,7 +8,7 @@ import { TransformNode } from '@babylonjs/core/Meshes/transformNode'
 import { type Scene } from '@babylonjs/core/scene'
 import { applyImportedMaterialSettings } from './assetMaterialUtils'
 import { type SnowPinePackAssetDefinition } from './assets/assetConfig'
-import { ASPHALT_ROAD_FOREST_EXCLUSION } from './roadLayout'
+import { ASPHALT_ROAD_FOREST_EXCLUSIONS } from './roadLayout'
 import { type WinterPerformanceTier } from './winterConfig'
 
 type ForestBand = 'inner' | 'outer'
@@ -265,7 +265,7 @@ const BASE_FOREST_EXCLUSION_ZONES = [
 
 const FOREST_EXCLUSION_ZONES = [
   ...BASE_FOREST_EXCLUSION_ZONES,
-  ASPHALT_ROAD_FOREST_EXCLUSION,
+  ...ASPHALT_ROAD_FOREST_EXCLUSIONS,
 ] as const satisfies readonly ForestExclusionZone[]
 
 export const SNOW_PINE_FOREST_SETTINGS = {
@@ -635,10 +635,8 @@ function createForestLayout(settings: ForestTierSettings) {
   )
   addBushes(random, placements, settings.bushCount)
   const roadExcludedPlacements = placements.filter(
-    (placement) => isInsideExclusionZone(
-      placement.x,
-      placement.z,
-      ASPHALT_ROAD_FOREST_EXCLUSION,
+    (placement) => ASPHALT_ROAD_FOREST_EXCLUSIONS.some(
+      (zone) => isInsideExclusionZone(placement.x, placement.z, zone),
     ),
   )
   const retainedPlacements = placements.filter(
