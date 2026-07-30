@@ -7,6 +7,7 @@ export type LocalAssetKey =
   | 'ammoCrate'
   | 'utilityPole'
   | 'rustyCar'
+  | 'asphaltRoad'
   | 'snowPinePack'
 
 export type LocalGlbPath = `/assets/${string}.glb`
@@ -111,6 +112,8 @@ export interface UtilityPoleAssetDefinition extends LocalGlbAssetDefinition<'uti
 
 export interface RustyCarAssetDefinition extends LocalGlbAssetDefinition<'rustyCar'> {}
 
+export interface AsphaltRoadAssetDefinition extends LocalGlbAssetDefinition<'asphaltRoad'> {}
+
 export interface SnowPinePackAssetDefinition extends LocalGlbAssetDefinition<'snowPinePack'> {}
 
 export interface LocalAssetDefinitions {
@@ -122,6 +125,7 @@ export interface LocalAssetDefinitions {
   readonly ammoCrate: AmmoCrateAssetDefinition
   readonly utilityPole: UtilityPoleAssetDefinition
   readonly rustyCar: RustyCarAssetDefinition
+  readonly asphaltRoad: AsphaltRoadAssetDefinition
   readonly snowPinePack: SnowPinePackAssetDefinition
 }
 
@@ -335,6 +339,26 @@ export const ASSET_CONFIG = {
         mode: 'source',
         minimumRoughness: 0.4,
         maximumEnvironmentIntensity: 0.65,
+      },
+    },
+    asphaltRoad: {
+      key: 'asphaltRoad',
+      label: 'Asphalt Road',
+      path: '/assets/environment/road/asphalt-road.glb',
+      transform: {
+        // The four authored wrapper transforms resolve the one 50-vertex mesh
+        // to 7.247 m on X, 0.217 m on Y, and 4.242 m on Z. asphaltRoad.ts
+        // recentres that real pivot, compresses only its vertical relief, and
+        // widens the complete road/edge profile for vehicle clearance.
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+      },
+      animation: { speed: 1, autoplay: false, loop: false },
+      material: {
+        mode: 'source',
+        minimumRoughness: 0.58,
+        maximumEnvironmentIntensity: 0.62,
       },
     },
     snowPinePack: {

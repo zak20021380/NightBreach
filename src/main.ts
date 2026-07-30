@@ -76,6 +76,7 @@ import {
   createProceduralSurfaceHelpers,
   type SurfaceMaterial,
 } from './proceduralSurfaces'
+import { createAsphaltRoad } from './asphaltRoad'
 import {
   clamp,
   damp,
@@ -846,6 +847,31 @@ canvas.dataset.rustyCarPlacements = rustyCars.placements
   ))
   .join('|')
 
+const asphaltRoadAssetResult = await localAssetManager.load('asphaltRoad')
+if (asphaltRoadAssetResult.status !== 'loaded') {
+  throw new Error(
+    `Required asphalt road GLB failed to load: ${asphaltRoadAssetResult.reason}`,
+  )
+}
+const asphaltRoad = createAsphaltRoad({
+  config: asphaltRoadAssetResult.config,
+  container: asphaltRoadAssetResult.container,
+  scene,
+  worldLayerMask: WORLD_RENDER_LAYER_MASK,
+})
+canvas.dataset.asphaltRoadSource = 'glb'
+canvas.dataset.asphaltRoadSharing =
+  'hardware-instanced-shared-geometry-materials-textures'
+canvas.dataset.asphaltRoadSegmentCount = String(asphaltRoad.segmentCount)
+canvas.dataset.asphaltRoadModelDimensions =
+  asphaltRoad.modelDimensions.join(',')
+canvas.dataset.asphaltRoadMeshNames = asphaltRoad.modelMeshNames.join(',')
+canvas.dataset.asphaltRoadMaterialNames = asphaltRoad.materialNames.join(',')
+canvas.dataset.asphaltRoadRoute =
+  `${asphaltRoad.route.from.join(',')}|${asphaltRoad.route.to.join(',')}`
+canvas.dataset.asphaltRoadSnowTreatmentMeshCount =
+  String(asphaltRoad.snowTreatmentMeshCount)
+
 // One binding per cabin. Every cabin keeps its own door reference, doorway
 // position, and interaction range, so the prompt and the toggle always act on
 // the cabin the player is actually standing at.
@@ -912,6 +938,10 @@ if (snowPinePackAssetResult.status === 'loaded') {
     canvas.dataset.snowForestBushCount = String(snowForest.bushCount)
     canvas.dataset.snowForestCollisionCount =
       String(snowForest.collisionMeshCount)
+    canvas.dataset.snowForestRoadExcludedTreeCount =
+      String(snowForest.roadExcludedTreeCount)
+    canvas.dataset.snowForestRoadExcludedBushCount =
+      String(snowForest.roadExcludedBushCount)
     canvas.dataset.snowForestShadowCasterCount =
       String(snowForest.shadowCasterTreeCount)
     canvas.dataset.snowForestSharing =
@@ -1320,6 +1350,9 @@ for (const mesh of scene.meshes) {
     mesh.metadata?.importedOldWoodenShed === true
     && mesh.metadata?.abandonedStructureCollider !== true
   ) bloodDecalSurfaces.add(mesh)
+}
+for (const mesh of asphaltRoad.visualMeshes) {
+  if (mesh.metadata?.asphaltRoadSegment === true) bloodDecalSurfaces.add(mesh)
 }
 
 function isBloodDecalSurface(mesh: AbstractMesh) {

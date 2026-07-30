@@ -8,6 +8,7 @@ import { TransformNode } from '@babylonjs/core/Meshes/transformNode'
 import { type Scene } from '@babylonjs/core/scene'
 import { applyImportedMaterialSettings } from './assetMaterialUtils'
 import { type SnowPinePackAssetDefinition } from './assets/assetConfig'
+import { ASPHALT_ROAD_FOREST_EXCLUSION } from './roadLayout'
 import { type WinterPerformanceTier } from './winterConfig'
 
 type ForestBand = 'inner' | 'outer'
@@ -96,6 +97,8 @@ interface SnowPineForestOptions {
 export interface SnowPineForestResult {
   readonly bushCount: number
   readonly collisionMeshCount: number
+  readonly roadExcludedBushCount: number
+  readonly roadExcludedTreeCount: number
   readonly shadowCasterTreeCount: number
   readonly treeCount: number
   readonly variantNames: readonly string[]
@@ -183,7 +186,7 @@ const OUTER_CLUSTERS = [
 // These zones mirror the established map layout. They protect the open combat
 // read, both cabin footprints and approaches, player/zombie travel corridors,
 // all eight zombie spawn points, and the existing perimeter props.
-const FOREST_EXCLUSION_ZONES = [
+const BASE_FOREST_EXCLUSION_ZONES = [
   {
     kind: 'ellipse',
     name: 'central combat arena',
@@ -258,6 +261,11 @@ const FOREST_EXCLUSION_ZONES = [
   { kind: 'circle', name: 'east utility pole', x: 23, z: -11.5, radius: 2.3 },
   { kind: 'circle', name: 'south utility pole', x: 11.5, z: -23, radius: 2.3 },
   { kind: 'circle', name: 'southwest yard light', x: -11.5, z: -25.3, radius: 1.9 },
+] as const satisfies readonly ForestExclusionZone[]
+
+const FOREST_EXCLUSION_ZONES = [
+  ...BASE_FOREST_EXCLUSION_ZONES,
+  ASPHALT_ROAD_FOREST_EXCLUSION,
 ] as const satisfies readonly ForestExclusionZone[]
 
 export const SNOW_PINE_FOREST_SETTINGS = {
@@ -365,19 +373,30 @@ function distanceToSegmentSquared(
   )
 }
 
+function isInsideExclusionZone(
+  x: number,
+  z: number,
+  zone: ForestExclusionZone,
+) {
+  if (zone.kind === 'circle') {
+    return distanceSquared(x, z, zone.x, zone.z) < zone.radius * zone.radius
+  }
+  if (zone.kind === 'ellipse') {
+    const normalizedX = (x - zone.x) / zone.radiusX
+    const normalizedZ = (z - zone.z) / zone.radiusZ
+    return normalizedX * normalizedX + normalizedZ * normalizedZ < 1
+  }
+  return distanceToSegmentSquared(x, z, zone.from, zone.to)
+    < zone.halfWidth * zone.halfWidth
+}
+
 function isExcluded(x: number, z: number) {
-  return SNOW_PINE_FOREST_SETTINGS.exclusionZones.some((zone) => {
-    if (zone.kind === 'circle') {
-      return distanceSquared(x, z, zone.x, zone.z) < zone.radius * zone.radius
-    }
-    if (zone.kind === 'ellipse') {
-      const normalizedX = (x - zone.x) / zone.radiusX
-      const normalizedZ = (z - zone.z) / zone.radiusZ
-      return normalizedX * normalizedX + normalizedZ * normalizedZ < 1
-    }
-    return distanceToSegmentSquared(x, z, zone.from, zone.to)
-      < zone.halfWidth * zone.halfWidth
-  })
+  // Reproduce the exact established seeded layout first. The road corridor is
+  // applied as a final targeted filter in createForestLayout so adding the road
+  // never resamples or shifts unrelated vegetation.
+  return BASE_FOREST_EXCLUSION_ZONES.some(
+    (zone) => isInsideExclusionZone(x, z, zone),
+  )
 }
 
 function isInBand(x: number, z: number, band: ForestBand) {
@@ -615,7 +634,26 @@ function createForestLayout(settings: ForestTierSettings) {
     'outer',
   )
   addBushes(random, placements, settings.bushCount)
-  return placements
+  const roadExcludedPlacements = placements.filter(
+    (placement) => isInsideExclusionZone(
+      placement.x,
+      placement.z,
+      ASPHALT_ROAD_FOREST_EXCLUSION,
+    ),
+  )
+  const retainedPlacements = placements.filter(
+    (placement) => !roadExcludedPlacements.includes(placement),
+  )
+  return {
+    originalPlacements: placements,
+    placements: retainedPlacements,
+    roadExcludedBushCount: roadExcludedPlacements.filter(
+      (placement) => placement.kind === 'bush',
+    ).length,
+    roadExcludedTreeCount: roadExcludedPlacements.filter(
+      (placement) => placement.kind === 'tree',
+    ).length,
+  }
 }
 
 function belongsToVariant(mesh: AbstractMesh, rootName: string) {
@@ -758,8 +796,29 @@ export function createSnowPineForest(
 ): SnowPineForestResult {
   const tierSettings =
     SNOW_PINE_FOREST_SETTINGS.counts[options.performanceTier]
-  const placements = createForestLayout(tierSettings)
+  const layout = createForestLayout(tierSettings)
+  const placements = layout.placements
   const templates = createForestTemplates(options)
+  const originalPlacementIndices = new Map(
+    layout.originalPlacements.map((placement, index) => [placement, index]),
+  )
+  const shadowCasterPlacements = new Set<ForestPlacement>()
+  const colliderPlacements = new Set<ForestPlacement>()
+  for (const placement of layout.originalPlacements) {
+    if (placement.kind !== 'tree' || placement.band !== 'inner') continue
+    if (shadowCasterPlacements.size < tierSettings.shadowCasterTreeLimit) {
+      shadowCasterPlacements.add(placement)
+    }
+    const definition = FOREST_VARIANTS.find(
+      (variant) => variant.id === placement.variantId,
+    )
+    if (
+      definition?.supportsTrunkCollision
+      && colliderPlacements.size < tierSettings.trunkColliderLimit
+    ) {
+      colliderPlacements.add(placement)
+    }
+  }
   let visualMeshCount = 0
   let collisionMeshCount = 0
   let shadowCasterTreeCount = 0
@@ -768,12 +827,16 @@ export function createSnowPineForest(
   try {
     for (let index = 0; index < placements.length; index += 1) {
       const placement = placements[index]
+      const originalIndex = originalPlacementIndices.get(placement)
+      if (originalIndex === undefined) {
+        throw new Error('A retained snow forest placement lost its stable index.')
+      }
       const template = templates.get(placement.variantId)
       if (!template) {
         throw new Error(`No snow forest template exists for "${placement.variantId}".`)
       }
       const placementRoot = new TransformNode(
-        `snowForestPlacement${index + 1}`,
+        `snowForestPlacement${originalIndex + 1}`,
         options.scene,
       )
       placementRoot.position.set(
@@ -794,7 +857,7 @@ export function createSnowPineForest(
 
       const instances = template.meshes.map((templateMesh, meshIndex) => {
         const instance = templateMesh.source.createInstance(
-          `snowForest${index + 1}_${meshIndex + 1}_${templateMesh.source.name}`,
+          `snowForest${originalIndex + 1}_${meshIndex + 1}_${templateMesh.source.name}`,
         )
         instance.parent = placementRoot
         instance.position.copyFrom(templateMesh.position)
@@ -822,9 +885,7 @@ export function createSnowPineForest(
         SNOW_PINE_FOREST_SETTINGS.groundY - initialBounds.minimum.y
       placementRoot.computeWorldMatrix(true)
 
-      const castsShadow = placement.kind === 'tree'
-        && placement.band === 'inner'
-        && shadowCasterTreeCount < tierSettings.shadowCasterTreeLimit
+      const castsShadow = shadowCasterPlacements.has(placement)
         && options.shadowGenerator !== null
       for (const instance of instances) {
         instance.computeWorldMatrix(true)
@@ -837,12 +898,11 @@ export function createSnowPineForest(
       if (castsShadow) shadowCasterTreeCount += 1
 
       if (
-        placement.kind === 'tree'
-        && placement.band === 'inner'
-        && template.definition.supportsTrunkCollision
-        && collisionMeshCount < tierSettings.trunkColliderLimit
+        colliderPlacements.has(placement)
       ) {
-        collisionMeshes.push(createTrunkCollider(placement, index, options))
+        collisionMeshes.push(
+          createTrunkCollider(placement, originalIndex, options),
+        )
         collisionMeshCount += 1
       }
     }
@@ -872,12 +932,16 @@ export function createSnowPineForest(
     + `placed from one cached GLB (${visualMeshCount} hardware instances; `
     + `${collisionMeshCount} simple inner trunk colliders; `
     + `${shadowCasterTreeCount} nearby shadow-casting trees; variants: `
-    + `${variantNames.join(', ')}).`,
+    + `${variantNames.join(', ')}; road clearance removed `
+    + `${layout.roadExcludedTreeCount} trees and `
+    + `${layout.roadExcludedBushCount} bushes before collider/shadow setup).`,
   )
 
   return {
     bushCount,
     collisionMeshCount,
+    roadExcludedBushCount: layout.roadExcludedBushCount,
+    roadExcludedTreeCount: layout.roadExcludedTreeCount,
     shadowCasterTreeCount,
     treeCount,
     variantNames,
