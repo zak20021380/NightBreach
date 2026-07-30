@@ -77,6 +77,7 @@ import {
   type SurfaceMaterial,
 } from './proceduralSurfaces'
 import { createAsphaltRoad } from './asphaltRoad'
+import { createNaturalBoundary } from './naturalBoundary'
 import {
   clamp,
   damp,
@@ -359,7 +360,7 @@ scene.gravity = new Vector3(0, -0.24, 0)
 scene.fogEnabled = true
 scene.fogMode = Scene.FOGMODE_LINEAR
 scene.fogStart = 24
-scene.fogEnd = 68
+scene.fogEnd = 62
 scene.fogColor = new Color3(0.07, 0.09, 0.096)
 try {
   scene.imageProcessingConfiguration.exposure = 1.06
@@ -556,11 +557,6 @@ const {
   scene,
 })
 
-const wallConcreteMaterial = createMaterial(
-  'stainedWallConcrete',
-  Color3.FromHexString('#6a716d'),
-  0.94,
-)
 const groundMaterial = createMaterial(
   'oilStainedHardstand',
   Color3.FromHexString('#5b6158'),
@@ -600,17 +596,6 @@ setMaterialColor(
   new Color3(0.82, 0.39, 0.09),
 )
 
-applyProceduralSurface(wallConcreteMaterial, 'wallConcrete', {
-  kind: 'concrete',
-  baseColor: Color3.FromHexString('#6a716d'),
-  roughness: 0.94,
-  roughnessVariation: 0.1,
-  metallic: 0,
-  seed: 113,
-  size: 128,
-  textureScale: 4.2,
-  normalStrength: 1.35,
-})
 applyProceduralSurface(groundMaterial, 'yardHardstand', {
   kind: 'ground',
   baseColor: Color3.FromHexString('#5b6158'),
@@ -673,23 +658,74 @@ function createSharedMesh(source: Mesh, name: string) {
   }
 }
 
-const ground = MeshBuilder.CreateGround('ground', { width: 52, height: 52 }, scene)
+// The render ground extends beyond the collision limit so the road and forest
+// fade into fog instead of revealing an empty void at the former wall line.
+const ground = MeshBuilder.CreateGround('ground', { width: 180, height: 180 }, scene)
 ground.material = groundMaterial
 ground.checkCollisions = true
 ground.receiveShadows = true
 proceduralEnvironmentMeshes.push(ground)
 
-function createWall(name: string, position: Vector3, width: number, depth: number) {
-  const wall = MeshBuilder.CreateBox(name, { width, height: 4.4, depth }, scene)
-  wall.position = position
-  wall.material = wallConcreteMaterial
-  return prepareWorldMesh(wall)
+function createInvisibleBoundary(
+  name: string,
+  position: Vector3,
+  width: number,
+  depth: number,
+) {
+  const boundary = MeshBuilder.CreateBox(
+    name,
+    { width, height: 4.4, depth },
+    scene,
+  )
+  boundary.position.copyFrom(position)
+  boundary.visibility = 0
+  boundary.isPickable = false
+  boundary.checkCollisions = true
+  boundary.receiveShadows = false
+  boundary.layerMask = WORLD_RENDER_LAYER_MASK
+  boundary.metadata = {
+    naturalBoundaryCollider: true,
+    preserveWithImportedEnvironment: true,
+  }
+  boundary.computeWorldMatrix(true)
+  boundary.freezeWorldMatrix()
+  proceduralEnvironmentMeshes.push(boundary)
+  return boundary
 }
 
-createWall('northWall', new Vector3(0, 2.2, 26), 52, 0.8)
-createWall('southWall', new Vector3(0, 2.2, -26), 52, 0.8)
-createWall('eastWall', new Vector3(26, 2.2, 0), 0.8, 52)
-createWall('westWall', new Vector3(-26, 2.2, 0), 0.8, 52)
+createInvisibleBoundary(
+  'northMapBoundary',
+  new Vector3(0, 2.2, 26),
+  52,
+  0.8,
+)
+createInvisibleBoundary(
+  'southMapBoundary',
+  new Vector3(0, 2.2, -26),
+  52,
+  0.8,
+)
+createInvisibleBoundary(
+  'eastMapBoundary',
+  new Vector3(26, 2.2, 0),
+  0.8,
+  52,
+)
+createInvisibleBoundary(
+  'westMapBoundary',
+  new Vector3(-26, 2.2, 0),
+  0.8,
+  52,
+)
+
+const naturalBoundary = createNaturalBoundary({
+  scene,
+  worldLayerMask: WORLD_RENDER_LAYER_MASK,
+})
+canvas.dataset.visiblePerimeterWallCount = '0'
+canvas.dataset.invisibleBoundaryColliderCount = '4'
+canvas.dataset.naturalBoundaryPropCount = String(naturalBoundary.propCount)
+canvas.dataset.naturalBoundaryMeshCount = String(naturalBoundary.meshCount)
 
 const sandbagLayouts = [
   new Vector3(-20, 0.22, -7.8),
@@ -942,6 +978,8 @@ if (snowPinePackAssetResult.status === 'loaded') {
       String(snowForest.roadExcludedTreeCount)
     canvas.dataset.snowForestRoadExcludedBushCount =
       String(snowForest.roadExcludedBushCount)
+    canvas.dataset.snowForestBoundaryTreeCount =
+      String(snowForest.boundaryTreeCount)
     canvas.dataset.snowForestShadowCasterCount =
       String(snowForest.shadowCasterTreeCount)
     canvas.dataset.snowForestSharing =
@@ -1125,11 +1163,7 @@ publishDoorDatasets()
 // Winter is a separate, non-pickable render layer. These planes sit just above
 // the existing surfaces and never replace or modify gameplay geometry.
 const winterSurfaces: WinterSurface[] = [
-  { name: 'ground', x: 0, y: 0.018, z: 0, width: 51.8, depth: 51.8 },
-  { name: 'northWall', x: 0, y: 4.48, z: 26, width: 52, depth: 0.86 },
-  { name: 'southWall', x: 0, y: 4.48, z: -26, width: 52, depth: 0.86 },
-  { name: 'eastWall', x: 26, y: 4.48, z: 0, width: 0.86, depth: 52 },
-  { name: 'westWall', x: -26, y: 4.48, z: 0, width: 0.86, depth: 52 },
+  { name: 'ground', x: 0, y: 0.018, z: 0, width: 179.8, depth: 179.8 },
   ...abandonedStructures.winterSurfaces,
 ]
 const winterEnvironment = new WinterEnvironment({
@@ -1224,34 +1258,6 @@ function mergeVisualDetails(
   proceduralEnvironmentMeshes.push(merged)
 }
 
-const metalEdgeDetails: Mesh[] = [
-  createVisualDetailBox(
-    'northWallCap',
-    new Vector3(0, 4.43, 26),
-    new Vector3(52, 0.06, 0.86),
-    darkMetalMaterial,
-  ),
-  createVisualDetailBox(
-    'southWallCap',
-    new Vector3(0, 4.43, -26),
-    new Vector3(52, 0.06, 0.86),
-    darkMetalMaterial,
-  ),
-  createVisualDetailBox(
-    'eastWallCap',
-    new Vector3(26, 4.43, 0),
-    new Vector3(0.86, 0.06, 50.3),
-    darkMetalMaterial,
-  ),
-  createVisualDetailBox(
-    'westWallCap',
-    new Vector3(-26, 4.43, 0),
-    new Vector3(0.86, 0.06, 50.3),
-    darkMetalMaterial,
-  ),
-]
-mergeVisualDetails('rustedWallCaps', metalEdgeDetails, darkMetalMaterial)
-
 const lampHousingDetails: Mesh[] = []
 const lampLensDetails: Mesh[] = []
 const practicalLightDefinitions = [
@@ -1272,6 +1278,12 @@ const practicalLightDefinitions = [
 ] as const
 
 practicalLightDefinitions.forEach((definition) => {
+  lampHousingDetails.push(createVisualDetailBox(
+    `${definition.name}Post`,
+    new Vector3(definition.x, 1.85, -25.47),
+    new Vector3(0.16, 3.7, 0.16),
+    darkMetalMaterial,
+  ))
   lampHousingDetails.push(createVisualDetailBox(
     `${definition.name}Housing`,
     new Vector3(definition.x, 3.72, -25.47),
@@ -1332,7 +1344,9 @@ createInvisibleCollider(
 
 canvas.dataset.mapReady = 'true'
 console.info(
-  `[Night Breach][Map] Procedural map ready (${proceduralEnvironmentMeshes.length} visible meshes plus gameplay colliders).`,
+  `[Night Breach][Map] Procedural map ready (four invisible edge colliders; `
+  + `${naturalBoundary.propCount} natural boundary props; `
+  + `${proceduralEnvironmentMeshes.length} registered environment meshes).`,
 )
 
 // Persistent blood can only attach to geometry that is actually rendered.

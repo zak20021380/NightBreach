@@ -8,8 +8,8 @@ export const WINTER_CONFIG = {
   lighting: {
     clearColor: [0.13, 0.17, 0.21, 1],
     fogColor: [0.24, 0.3, 0.35],
-    fogStart: 28,
-    fogEnd: 72,
+    fogStart: 26,
+    fogEnd: 64,
     exposure: 1.04,
     contrast: 1.26,
     sky: {

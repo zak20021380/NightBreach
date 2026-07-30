@@ -68,6 +68,7 @@ interface ForestTemplate {
 
 interface ForestPlacement {
   readonly band: ForestBand
+  readonly boundaryDecoration?: boolean
   readonly kind: VegetationKind
   readonly rotationY: number
   readonly scale: number
@@ -77,6 +78,7 @@ interface ForestPlacement {
 }
 
 interface ForestTierSettings {
+  readonly boundaryTreeCount: number
   readonly bushCount: number
   readonly innerTreeCount: number
   readonly shadowCasterTreeLimit: number
@@ -95,6 +97,7 @@ interface SnowPineForestOptions {
 }
 
 export interface SnowPineForestResult {
+  readonly boundaryTreeCount: number
   readonly bushCount: number
   readonly collisionMeshCount: number
   readonly roadExcludedBushCount: number
@@ -275,6 +278,7 @@ export const SNOW_PINE_FOREST_SETTINGS = {
     'mobile-low': {
       treeCount: 28,
       innerTreeCount: 7,
+      boundaryTreeCount: 8,
       bushCount: 4,
       shadowCasterTreeLimit: 0,
       trunkColliderLimit: 5,
@@ -282,6 +286,7 @@ export const SNOW_PINE_FOREST_SETTINGS = {
     mobile: {
       treeCount: 34,
       innerTreeCount: 9,
+      boundaryTreeCount: 12,
       bushCount: 5,
       shadowCasterTreeLimit: 0,
       trunkColliderLimit: 7,
@@ -289,6 +294,7 @@ export const SNOW_PINE_FOREST_SETTINGS = {
     desktop: {
       treeCount: 46,
       innerTreeCount: 13,
+      boundaryTreeCount: 16,
       bushCount: 8,
       shadowCasterTreeLimit: 8,
       trunkColliderLimit: 10,
@@ -298,6 +304,8 @@ export const SNOW_PINE_FOREST_SETTINGS = {
   bushScaleRange: [0.58, 0.84],
   innerTreeMinimumSpacing: 2.35,
   outerTreeMinimumSpacing: 2.05,
+  boundaryTreeMinimumSpacing: 1.7,
+  boundaryTreeSeedSalt: 0xa341316c,
   bushMinimumSpacing: 1.1,
   bushMinimumTreeDistance: 0.9,
   innerBand: {
@@ -307,6 +315,11 @@ export const SNOW_PINE_FOREST_SETTINGS = {
   outerBand: {
     maximumCoordinate: 37,
     minimumEdgeCoordinate: 27.4,
+  },
+  boundaryBand: {
+    maximumCoordinate: 36.4,
+    minimumEdgeCoordinate: 28.2,
+    maximumAlongEdgeCoordinate: 35.5,
   },
   trunkColliderRadius: 0.38,
   trunkColliderHeight: 2.8,
@@ -395,6 +408,12 @@ function isExcluded(x: number, z: number) {
   // applied as a final targeted filter in createForestLayout so adding the road
   // never resamples or shifts unrelated vegetation.
   return BASE_FOREST_EXCLUSION_ZONES.some(
+    (zone) => isInsideExclusionZone(x, z, zone),
+  )
+}
+
+function isExcludedFromFinalMap(x: number, z: number) {
+  return FOREST_EXCLUSION_ZONES.some(
     (zone) => isInsideExclusionZone(x, z, zone),
   )
 }
@@ -623,6 +642,93 @@ function addBushes(
   }
 }
 
+function createBoundaryTreePlacements(
+  settings: ForestTierSettings,
+  establishedPlacements: readonly ForestPlacement[],
+) {
+  const random = createSeededRandom(
+    SNOW_PINE_FOREST_SETTINGS.seed
+    ^ SNOW_PINE_FOREST_SETTINGS.boundaryTreeSeedSalt,
+  )
+  const boundaryPlacements: ForestPlacement[] = []
+  const spacingPlacements = [...establishedPlacements]
+  const previousVariantIds = establishedPlacements
+    .filter((placement) => placement.kind === 'tree')
+    .map((placement) => placement.variantId)
+  const sides = ['north', 'south', 'east', 'west'] as const
+  const treesPerSide = settings.boundaryTreeCount / sides.length
+  if (!Number.isInteger(treesPerSide)) {
+    throw new Error(
+      'The natural boundary tree count must divide evenly across four edges.',
+    )
+  }
+  const band = SNOW_PINE_FOREST_SETTINGS.boundaryBand
+
+  for (const side of sides) {
+    const initialCount = boundaryPlacements.length
+    const maximumAttempts = treesPerSide * 420
+    for (
+      let attempt = 0;
+      boundaryPlacements.length - initialCount < treesPerSide
+        && attempt < maximumAttempts;
+      attempt += 1
+    ) {
+      const edgeCoordinate = randomBetween(
+        random,
+        band.minimumEdgeCoordinate,
+        band.maximumCoordinate,
+      )
+      const alongEdgeCoordinate = randomBetween(
+        random,
+        -band.maximumAlongEdgeCoordinate,
+        band.maximumAlongEdgeCoordinate,
+      )
+      const x = side === 'east'
+        ? edgeCoordinate
+        : side === 'west'
+          ? -edgeCoordinate
+          : alongEdgeCoordinate
+      const z = side === 'north'
+        ? edgeCoordinate
+        : side === 'south'
+          ? -edgeCoordinate
+          : alongEdgeCoordinate
+      if (
+        isExcludedFromFinalMap(x, z)
+        || !hasMinimumSpacing(
+          x,
+          z,
+          spacingPlacements,
+          SNOW_PINE_FOREST_SETTINGS.boundaryTreeMinimumSpacing,
+        )
+      ) continue
+
+      const placement: ForestPlacement = {
+        ...createTreePlacement(
+          random,
+          'outer',
+          x,
+          z,
+          previousVariantIds,
+        ),
+        boundaryDecoration: true,
+      }
+      boundaryPlacements.push(placement)
+      spacingPlacements.push(placement)
+      previousVariantIds.push(placement.variantId)
+    }
+
+    if (boundaryPlacements.length - initialCount !== treesPerSide) {
+      throw new Error(
+        `The seeded natural boundary placed `
+        + `${boundaryPlacements.length - initialCount}/${treesPerSide} `
+        + `requested trees along the ${side} edge.`,
+      )
+    }
+  }
+  return boundaryPlacements
+}
+
 function createForestLayout(settings: ForestTierSettings) {
   const random = createSeededRandom(SNOW_PINE_FOREST_SETTINGS.seed)
   const placements: ForestPlacement[] = []
@@ -642,9 +748,14 @@ function createForestLayout(settings: ForestTierSettings) {
   const retainedPlacements = placements.filter(
     (placement) => !roadExcludedPlacements.includes(placement),
   )
+  // A separate random stream appends the new edge screen after the established
+  // forest is complete. This keeps every pre-existing placement and stable
+  // index unchanged while respecting the final road corridor.
+  const boundaryPlacements = createBoundaryTreePlacements(settings, placements)
   return {
-    originalPlacements: placements,
-    placements: retainedPlacements,
+    boundaryTreeCount: boundaryPlacements.length,
+    originalPlacements: [...placements, ...boundaryPlacements],
+    placements: [...retainedPlacements, ...boundaryPlacements],
     roadExcludedBushCount: roadExcludedPlacements.filter(
       (placement) => placement.kind === 'bush',
     ).length,
@@ -864,9 +975,12 @@ export function createSnowPineForest(
         instance.isPickable = false
         instance.checkCollisions = false
         instance.receiveShadows = options.performanceTier === 'desktop'
+          && placement.boundaryDecoration !== true
         instance.layerMask = options.worldLayerMask
         instance.metadata = {
           ...instance.metadata,
+          snowPineForestBoundaryDecoration:
+            placement.boundaryDecoration === true,
           snowPineForestVisual: true,
           snowPineForestBand: placement.band,
           snowPineForestKind: placement.kind,
@@ -928,6 +1042,7 @@ export function createSnowPineForest(
   console.info(
     `[Night Breach][Snow Forest] ${treeCount} trees and ${bushCount} bushes `
     + `placed from one cached GLB (${visualMeshCount} hardware instances; `
+    + `${layout.boundaryTreeCount} shadow-free boundary trees; `
     + `${collisionMeshCount} simple inner trunk colliders; `
     + `${shadowCasterTreeCount} nearby shadow-casting trees; variants: `
     + `${variantNames.join(', ')}; road clearance removed `
@@ -936,6 +1051,7 @@ export function createSnowPineForest(
   )
 
   return {
+    boundaryTreeCount: layout.boundaryTreeCount,
     bushCount,
     collisionMeshCount,
     roadExcludedBushCount: layout.roadExcludedBushCount,
