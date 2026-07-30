@@ -6,6 +6,7 @@ import { Color3 } from '@babylonjs/core/Maths/math.color'
 import { Vector3 } from '@babylonjs/core/Maths/math.vector'
 import { type AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh'
 import { Mesh } from '@babylonjs/core/Meshes/mesh'
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder'
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode'
 import { type Scene } from '@babylonjs/core/scene'
 import { applyImportedMaterialSettings } from './assetMaterialUtils'
@@ -79,18 +80,19 @@ export const DIRTY_MEDKIT_SOURCE_PATH =
 // hierarchy resolves to 0.130 x 0.224 x 0.287 m with +Y up, its long axis on
 // local Z, a flat base (56 vertices within 5 mm of the lowest one, spanning the
 // complete footprint) and its carry handle on top. That is already a real
-// medkit in metres, so it is placed at the authored scale with a yaw only.
+// medkit in metres. A restrained 8% lift makes its silhouette and markings
+// survive the cabin's normal approach distance without turning it into loot UI.
 const MEDKIT_SOURCE_SIZE = [0.130000, 0.224031, 0.286695] as const
 const MEDKIT_SOURCE_SIZE_TOLERANCE = 0.002
-const MEDKIT_UNIFORM_SCALE = 1
+const MEDKIT_UNIFORM_SCALE = 1.08
 
 // Footprint centre in the cabin's collision frame, the same frame the table's
 // own placement constants are audited in. The table covers x -1.430..0.298,
 // z 0.375..1.139 there, so this sits the medkit on the near half of the
 // tabletop toward its east end:
 //
-//   medkit footprint   x -0.153..0.153   z 0.508..0.692
-//   tabletop margin    0.145 m to the east edge, 0.133 m to the near edge
+//   medkit footprint   x -0.164..0.164   z 0.506..0.694
+//   tabletop margin    0.134 m to the east edge, 0.131 m to the near edge
 //   player stances     0.66 m from the near long edge, 0.73 m past the east
 //                      end (both outside the table's box collider)
 //
@@ -99,9 +101,35 @@ const MEDKIT_UNIFORM_SCALE = 1
 const MEDKIT_LOCAL_X = 0
 const MEDKIT_LOCAL_Z = 0.6
 
-// A quarter turn lines the medkit's long axis up with the table's long axis;
-// the extra 0.2 rad reads as something set down rather than arranged.
-const MEDKIT_YAW_OFFSET = Math.PI * 0.5 + 0.2
+// A quarter turn lines the medkit's long axis up with the table's long axis.
+// The small counter-turn aims its broad +X lid face toward the off-centre cabin
+// doorway while keeping it visibly set down rather than perfectly squared.
+const MEDKIT_YAW_OFFSET = Math.PI * 0.5 - 0.16
+
+// The source model is a worn red hard case. Keep its authored base-colour,
+// normal and metallic/roughness textures, but treat the shell as painted steel
+// rather than bare metal and restore enough clean red saturation to separate it
+// from the brown tabletop under the cabin lights.
+const MEDKIT_BODY_ALBEDO_TINT = new Color3(1, 0.9, 0.86)
+const MEDKIT_BODY_METALLIC = 0.08
+const MEDKIT_BODY_ROUGHNESS = 0.72
+const MEDKIT_BODY_MINIMUM_ENVIRONMENT_INTENSITY = 0.68
+
+// Audited model-local faces after the GLB wrapper transforms are applied. The
+// broad +X face is the lid panel aimed at the doorway; Y=0.105 is the flat,
+// unobstructed lane on top beside the handle and centre hardware. Each stencil
+// is a sub-millimetre coating that slightly bites into the shell, so it reads as
+// painted onto the prop without z-fighting or floating above it.
+const MEDKIT_FRONT_PANEL_X = 0.06
+const MEDKIT_TOP_PANEL_Y = 0.105
+const MEDKIT_PAINT_THICKNESS = 0.0006
+const MEDKIT_FRONT_CROSS_SIZE = 0.132
+const MEDKIT_FRONT_CROSS_BAR_WIDTH = 0.038
+const MEDKIT_FRONT_CROSS_CENTER_Y = -0.005
+const MEDKIT_TOP_CROSS_SIZE = 0.038
+const MEDKIT_TOP_CROSS_BAR_WIDTH = 0.012
+const MEDKIT_TOP_CROSS_CENTER_X = 0.038
+const MEDKIT_STENCIL_COLOR = new Color3(0.96, 0.94, 0.82)
 
 // The authored tabletop is not flat: its planks vary by about 6 mm across the
 // slab. Resting on the table's single highest vertex would float the medkit
@@ -229,6 +257,109 @@ function measureSupportHeight(
   }
 
   return { highest, samples }
+}
+
+function createPaintedMarkingPart(
+  name: string,
+  dimensions: {
+    readonly width: number
+    readonly height: number
+    readonly depth: number
+  },
+  position: Vector3,
+  parent: TransformNode,
+  material: PBRMaterial,
+  worldLayerMask: number,
+) {
+  const mesh = MeshBuilder.CreateBox(name, dimensions, parent.getScene())
+  mesh.parent = parent
+  mesh.position.copyFrom(position)
+  mesh.material = material
+  mesh.isPickable = false
+  mesh.checkCollisions = false
+  // The matte ivory still responds to the cabin lights, but a shadow cannot
+  // muddy the symbol back into the already worn red texture underneath it.
+  mesh.receiveShadows = false
+  mesh.layerMask = worldLayerMask
+  mesh.metadata = {
+    dirtyMedkitMarking: true,
+    paintedOntoMedkit: true,
+    preserveWithImportedEnvironment: true,
+  }
+  return mesh
+}
+
+function createMedicalMarkings(
+  parent: TransformNode,
+  scene: Scene,
+  worldLayerMask: number,
+) {
+  const material = new PBRMaterial('dirtyMedkitIvoryStencilMaterial', scene)
+  material.albedoColor = MEDKIT_STENCIL_COLOR
+  material.metallic = 0
+  material.roughness = 0.9
+  material.environmentIntensity = 0.82
+  material.backFaceCulling = true
+
+  const halfPaintThickness = MEDKIT_PAINT_THICKNESS * 0.5
+  const frontX = MEDKIT_FRONT_PANEL_X + halfPaintThickness * 0.5
+  const topY = MEDKIT_TOP_PANEL_Y + halfPaintThickness * 0.5
+
+  // Large doorway-facing + on the broad lid panel.
+  const meshes = [
+    createPaintedMarkingPart(
+      'dirtyMedkitFrontCrossVertical',
+      {
+        width: MEDKIT_PAINT_THICKNESS,
+        height: MEDKIT_FRONT_CROSS_SIZE,
+        depth: MEDKIT_FRONT_CROSS_BAR_WIDTH,
+      },
+      new Vector3(frontX, MEDKIT_FRONT_CROSS_CENTER_Y, 0),
+      parent,
+      material,
+      worldLayerMask,
+    ),
+    createPaintedMarkingPart(
+      'dirtyMedkitFrontCrossHorizontal',
+      {
+        width: MEDKIT_PAINT_THICKNESS,
+        height: MEDKIT_FRONT_CROSS_BAR_WIDTH,
+        depth: MEDKIT_FRONT_CROSS_SIZE,
+      },
+      new Vector3(frontX, MEDKIT_FRONT_CROSS_CENTER_Y, 0),
+      parent,
+      material,
+      worldLayerMask,
+    ),
+    // Smaller top + fills the clear strip beside the handle. It is the first
+    // marking seen while looking down during the final step toward the table.
+    createPaintedMarkingPart(
+      'dirtyMedkitTopCrossLong',
+      {
+        width: MEDKIT_TOP_CROSS_BAR_WIDTH,
+        height: MEDKIT_PAINT_THICKNESS,
+        depth: MEDKIT_TOP_CROSS_SIZE,
+      },
+      new Vector3(MEDKIT_TOP_CROSS_CENTER_X, topY, 0),
+      parent,
+      material,
+      worldLayerMask,
+    ),
+    createPaintedMarkingPart(
+      'dirtyMedkitTopCrossShort',
+      {
+        width: MEDKIT_TOP_CROSS_SIZE,
+        height: MEDKIT_PAINT_THICKNESS,
+        depth: MEDKIT_TOP_CROSS_BAR_WIDTH,
+      },
+      new Vector3(MEDKIT_TOP_CROSS_CENTER_X, topY, 0),
+      parent,
+      material,
+      worldLayerMask,
+    ),
+  ]
+
+  return meshes
 }
 
 /**
@@ -374,8 +505,29 @@ export function createDirtyMedkit(
         preserveWithImportedEnvironment: true,
       }
     }
-    // `source` mode, so the authored PBR inputs, textures and UVs are untouched.
+    // `source` mode keeps every authored PBR input, texture and UV. The scalar
+    // tuning below then makes that same dirty red shell read as coated emergency
+    // equipment; no grime, scratches or normal-map detail is replaced.
     applyImportedMaterialSettings(modelMeshes, config.material)
+    for (const mesh of modelMeshes) {
+      const material = mesh.material
+      if (!(material instanceof PBRMaterial)) continue
+      material.albedoColor = material.albedoColor.multiply(
+        MEDKIT_BODY_ALBEDO_TINT,
+      )
+      material.metallic = MEDKIT_BODY_METALLIC
+      material.roughness = MEDKIT_BODY_ROUGHNESS
+      material.environmentIntensity = Math.max(
+        material.environmentIntensity,
+        MEDKIT_BODY_MINIMUM_ENVIRONMENT_INTENSITY,
+      )
+    }
+
+    const markingMeshes = createMedicalMarkings(
+      placementRoot,
+      scene,
+      worldLayerMask,
+    )
 
     const shadowCasters = castShadows && shadowGenerator !== null
       ? modelMeshes.slice(0, MEDKIT_SHADOW_CASTER_LIMIT)
@@ -459,7 +611,7 @@ export function createDirtyMedkit(
       supportSampleCount: supportSample.samples,
       supportY,
       uniformScale: MEDKIT_UNIFORM_SCALE,
-      visualMeshCount: modelMeshes.length,
+      visualMeshCount: modelMeshes.length + markingMeshes.length,
     }
 
     console.info(
@@ -472,6 +624,7 @@ export function createDirtyMedkit(
       + `${supportY.toFixed(4)} from ${supportSample.samples} slab vertices `
       + `(slab peak ${table.tabletopY.toFixed(4)}), lid at y `
       + `${placedBounds.maximum.y.toFixed(3)}, `
+      + `${markingMeshes.length} static matte-ivory stencil parts, `
       + `${MEDKIT_INTERACTION_DISTANCE} m interaction range, no collider, and `
       + `${shadowCasters.length} shadow caster(s).`,
     )

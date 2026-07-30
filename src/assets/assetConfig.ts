@@ -343,9 +343,9 @@ export const ASSET_CONFIG = {
       transform: {
         // The authored hierarchy resolves to 0.130 x 0.224 x 0.287 m with +Y up,
         // its long axis on local Z and a flat base, which is already a real
-        // medkit in metres. dirtyMedkit.ts keeps that authored scale and derives
-        // only the cabin-relative position, the yaw, and the rest height it
-        // measures from the table's own tabletop vertices.
+        // medkit in metres. dirtyMedkit.ts adds only a restrained visual scale
+        // lift, then derives the cabin-relative position, doorway-facing yaw,
+        // and rest height it measures from the table's own tabletop vertices.
         position: [0, 0, 0],
         rotation: [0, 0, 0],
         scale: [1, 1, 1],
