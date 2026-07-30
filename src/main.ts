@@ -234,8 +234,6 @@ function requestLandscapeSafely() {
 }
 
 updateOrientationState()
-window.addEventListener('orientationchange', updateOrientationState)
-screen.orientation?.addEventListener('change', updateOrientationState)
 
 if (import.meta.env.PROD) {
   document.addEventListener('contextmenu', (event) => event.preventDefault())
@@ -350,21 +348,148 @@ try {
   let engine: Engine
   try {
     engine = new Engine(canvas, true, {
+      adaptToDeviceRatio: false,
       preserveDrawingBuffer: false,
       stencil: false,
-    })
+    }, false)
   } catch (error) {
     logRuntimeWarning('Antialiased WebGL initialization failed; retrying safely.', error)
     engine = new Engine(canvas, false, {
+      adaptToDeviceRatio: false,
       preserveDrawingBuffer: false,
       stencil: false,
+    }, false)
+  }
+
+  type TelegramViewportWebApp = {
+    onEvent?: (eventType: 'viewportChanged', eventHandler: () => void) => void
+  }
+
+  const MOBILE_MIN_RENDER_SCALE = 1
+  const MOBILE_MAX_RENDER_SCALE = 1.25
+  const MOBILE_TARGET_RENDER_PIXELS = 960 * 540
+  let settledResizeFrameOne = 0
+  let settledResizeFrameTwo = 0
+  let initialResolutionSettled = false
+  let initialResolutionLogged = false
+  let renderLoopRegistrationCount = 0
+
+  function getCanvasCssSize() {
+    const bounds = canvas.getBoundingClientRect()
+    return {
+      width: Math.max(
+        1,
+        bounds.width
+          || canvas.clientWidth
+          || window.visualViewport?.width
+          || window.innerWidth,
+      ),
+      height: Math.max(
+        1,
+        bounds.height
+          || canvas.clientHeight
+          || window.visualViewport?.height
+          || window.innerHeight,
+      ),
+    }
+  }
+
+  function getMobileRenderScale(cssWidth: number, cssHeight: number) {
+    if (isLowEndMobile) return MOBILE_MIN_RENDER_SCALE
+    const cssPixelCount = Math.max(1, cssWidth * cssHeight)
+    return clamp(
+      Math.sqrt(MOBILE_TARGET_RENDER_PIXELS / cssPixelCount),
+      MOBILE_MIN_RENDER_SCALE,
+      MOBILE_MAX_RENDER_SCALE,
+    )
+  }
+
+  function logInitialResolutionIfReady() {
+    if (!import.meta.env.DEV
+      || initialResolutionLogged
+      || !initialResolutionSettled
+      || renderLoopRegistrationCount !== 1) return
+
+    initialResolutionLogged = true
+    const cssSize = getCanvasCssSize()
+    console.info('[Night Breach][Resolution] Settled initial render size.', {
+      devicePixelRatio: window.devicePixelRatio,
+      canvasCssDimensions: {
+        width: Number(cssSize.width.toFixed(2)),
+        height: Number(cssSize.height.toFixed(2)),
+      },
+      canvasBackingDimensions: {
+        width: canvas.width,
+        height: canvas.height,
+      },
+      engineRenderDimensions: {
+        width: engine.getRenderWidth(),
+        height: engine.getRenderHeight(),
+      },
+      hardwareScalingLevel: engine.getHardwareScalingLevel(),
+      renderLoopRegistrationCount,
     })
   }
 
-  try {
-    engine.setHardwareScalingLevel(isLowEndMobile ? 1.45 : isMobile ? 1.2 : 1)
-  } catch (error) {
-    logRuntimeWarning('Device render scaling was unavailable; using the engine default.', error)
+  function applySettledResolutionPolicy() {
+    settledResizeFrameOne = 0
+    settledResizeFrameTwo = 0
+    updateOrientationState()
+
+    const cssSize = getCanvasCssSize()
+    const renderScale = isMobile
+      ? getMobileRenderScale(cssSize.width, cssSize.height)
+      : 1
+    // Babylon hardware scaling is the inverse of render scale. DPR is
+    // deliberately excluded so Telegram cannot request a 2x-4x backing buffer.
+    const hardwareScalingLevel = 1 / renderScale
+
+    try {
+      if (Math.abs(engine.getHardwareScalingLevel() - hardwareScalingLevel) > 0.0001) {
+        // This is the only runtime writer of hardwareScalingLevel. There is no
+        // SceneOptimizer or FPS feedback loop allowed to alter resolution. The
+        // setter performs this settled resize internally.
+        engine.setHardwareScalingLevel(hardwareScalingLevel)
+      } else {
+        // Re-read the settled CSS dimensions after Telegram has updated its
+        // viewport. Babylon derives the backing buffer from client size / HSL.
+        engine.resize()
+      }
+      canvas.dataset.renderScale = renderScale.toFixed(3)
+      canvas.dataset.hardwareScalingLevel = hardwareScalingLevel.toFixed(3)
+      initialResolutionSettled = true
+    } catch (error) {
+      logRuntimeWarning('Settled canvas render sizing was unavailable.', error)
+    }
+
+    logInitialResolutionIfReady()
+  }
+
+  function scheduleSettledResize() {
+    updateOrientationState()
+    if (settledResizeFrameOne) cancelAnimationFrame(settledResizeFrameOne)
+    if (settledResizeFrameTwo) cancelAnimationFrame(settledResizeFrameTwo)
+
+    settledResizeFrameOne = requestAnimationFrame(() => {
+      settledResizeFrameOne = 0
+      settledResizeFrameTwo = requestAnimationFrame(applySettledResolutionPolicy)
+    })
+  }
+
+  // Telegram publishes its final viewport over several events. Every source
+  // shares this one debounced handler and applies sizing after two animation
+  // frames, avoiding repeated WebGL backing-buffer reallocations mid-transition.
+  window.addEventListener('resize', scheduleSettledResize)
+  window.addEventListener('orientationchange', scheduleSettledResize)
+  window.visualViewport?.addEventListener('resize', scheduleSettledResize)
+  const telegramWebApp = (window as Window & {
+    Telegram?: { WebApp?: TelegramViewportWebApp }
+  }).Telegram?.WebApp
+  telegramWebApp?.onEvent?.('viewportChanged', scheduleSettledResize)
+  if (document.readyState === 'complete') {
+    scheduleSettledResize()
+  } else {
+    window.addEventListener('load', scheduleSettledResize, { once: true })
   }
 
   const scene = new Scene(engine)
@@ -8184,15 +8309,21 @@ function renderFrame() {
 
 function setRenderLoopActive(active: boolean) {
   if (active === renderLoopRunning) return
-  if (active) {
-    engine.runRenderLoop(renderFrame)
-    console.info('[Night Breach][Render] Render loop started.')
-  } else {
-    engine.stopRenderLoop(renderFrame)
-    console.info('[Night Breach][Render] Render loop paused by page lifecycle.')
-  }
   renderLoopRunning = active
   canvas.dataset.renderLoop = active ? 'running' : 'paused'
+  console.info(active
+    ? '[Night Breach][Render] Render loop resumed.'
+    : '[Night Breach][Render] Render loop paused by page lifecycle.')
+}
+
+function registerRenderLoopOnce() {
+  if (renderLoopRegistrationCount !== 0) return
+  engine.runRenderLoop(() => {
+    if (renderLoopRunning) renderFrame()
+  })
+  renderLoopRegistrationCount += 1
+  canvas.dataset.renderLoopRegistrationCount = String(renderLoopRegistrationCount)
+  console.info('[Night Breach][Render] Render loop registered.')
 }
 
 function setWebViewActive(active: boolean) {
@@ -8271,7 +8402,11 @@ document.addEventListener('visibilitychange', handleVisibilityChange)
 
 canvas.dataset.webViewActive = String(webViewActive)
 // Do not gate the first frame on an occasionally stale mobile visibility flag.
+registerRenderLoopOnce()
 setRenderLoopActive(true)
+// Settle once more now that the sole render loop is registered so the
+// development diagnostic describes the buffer used by live rendering.
+scheduleSettledResize()
 
 // Vite removes this entire block from production. It gives the runtime smoke
 // test read-only state plus narrowly scoped combat setup helpers in development.
@@ -8781,11 +8916,6 @@ if (import.meta.env.DEV) {
     },
   })
 }
-
-  window.addEventListener('resize', () => {
-    updateOrientationState()
-    engine.resize()
-  })
 
   gameReady = true
   canvas.dataset.sceneReady = 'true'
