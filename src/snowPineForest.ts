@@ -268,8 +268,14 @@ const BASE_FOREST_EXCLUSION_ZONES = [
   { kind: 'circle', name: 'northwest fallback spawn', x: -22, z: 22, radius: 3.2 },
   { kind: 'circle', name: 'west sandbags', x: -18.35, z: -7.8, radius: 3.3 },
   { kind: 'circle', name: 'east sandbags', x: 13.45, z: 4.55, radius: 3.3 },
-  { kind: 'circle', name: 'west rusty car', x: -20.25, z: -14.25, radius: 3.4 },
-  { kind: 'circle', name: 'east rusty car', x: 21.3, z: -4.9, radius: 3.4 },
+  // The two rusty cars moved to the road (see rustyCars.ts), and their new
+  // footprints sit inside the tree-free |x| < 17.25 / |z| < 17.25 box, so they
+  // need no zone of their own. These two discs stay exactly where they were:
+  // they are part of the seeded accept/reject stream, so retargeting them would
+  // reshuffle the whole vegetation layout for two clearings that read fine as
+  // open snow.
+  { kind: 'circle', name: 'west service-corridor clearing', x: -20.25, z: -14.25, radius: 3.4 },
+  { kind: 'circle', name: 'east perimeter clearing', x: 21.3, z: -4.9, radius: 3.4 },
   { kind: 'circle', name: 'west utility pole', x: -23, z: -14, radius: 2.3 },
   { kind: 'circle', name: 'north utility pole', x: 4, z: 23, radius: 2.3 },
   { kind: 'circle', name: 'east utility pole', x: 23, z: -11.5, radius: 2.3 },

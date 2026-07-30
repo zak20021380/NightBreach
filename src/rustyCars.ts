@@ -24,6 +24,12 @@ export interface RustyCarPlacement {
   readonly position: readonly [x: number, z: number]
   readonly rotationY: number
   readonly scale: number
+  // Height, in metres, the lowest imported vertex is grounded to. The winter
+  // snow surface sits at 0.02 m while the asphalt crown sits at 0.086 m
+  // (ASPHALT_ROAD_ROUTE baseY 0.025 + the 0.217 m road model height x its 0.28
+  // verticalScale), so a wreck lying across the asphalt edge is grounded
+  // between the two instead of on the abstract y = 0 plane.
+  readonly groundY: number
   readonly setting: string
 }
 
@@ -43,26 +49,55 @@ interface ModelBounds {
   readonly maximum: Vector3
 }
 
-// Both placements sit beside, rather than across, a possible future road line.
-// The west car is 2.75 m east of the broken pole and leaves a broad service
-// corridor along the west side. The east car is north of a plausible
-// east-west road entry; its long side remains about 1.85 m from the inner wall.
-// Both clear every cabin/doorway, primary and fallback zombie spawn, the player
-// start, the ammo crate, and the central cover/sightline cluster.
+// Both wrecks are now placed against the authored ASPHALT_ROAD_CENTERLINE
+// rather than out in the open field, so they read as landmarks along the road
+// instead of distant props. Every number is measured against that route (6.8 m
+// of asphalt, so a 3.4 m half-width, plus 0.85 m of shoulder) with each car's
+// 1.74 x 4.48 m template footprint taken at its own placement scale.
+//
+// roadBendRustyCar is the focal wreck: 13.8 m up the road from the player start
+// at (0, -18) and ~21 deg right of the opening view, on the bend where the route
+// turns from northeast to north. It straddles the west asphalt edge of segment
+// (7,-8)->(10,-3) with its rear-right corner 1.62 m from the centreline and its
+// nose-left corner 1.20 m out in the snow, so about half the body lies on the
+// road while 5.0 m of asphalt stays open for the player and zombies to pass and
+// to cross. Its 15 deg yaw off the road heading swings the nose toward the
+// shoulder, reading as slid-off rather than parked. The nearest corner still
+// clears the (0,-24)->(0,1) player-start lane by 0.37 m, and the stable-warm
+// streetlight at (-0.32, -9.74) side-lights it from 4.7 m away.
+//
+// northShoulderRustyCar is the secondary wreck 20 m further along the route,
+// shoved onto the west shoulder beside the flickering-cold streetlight at
+// (9.18, 11.57) and 2.5 m clear of that pole. It lies 60 deg across the road
+// line; only its road-side bumper corner overhangs the asphalt edge, by 0.16 m,
+// while the rest of the 4.6 m footprint rests on shoulder snow, leaving 6.6 m
+// of road clear there and letting it ground flat on the winter surface.
+//
+// Both footprints stay inside |x| < 17.25 and |z| < 17.25, the box no
+// snowPineForest band can seed into, so neither wreck can overlap a tree or a
+// bush. They also clear both cabins and their doorways and approach corridor,
+// both sandbag walls, every primary and fallback zombie spawn, the ammo crate,
+// the remaining streetlights and utility poles, and the non-colliding natural
+// boundary props beyond +/-26 m.
 const RUSTY_CAR_PLACEMENTS = [
   {
-    name: 'westRoadsideRustyCar',
-    position: [-20.25, -14.25],
-    rotationY: -0.17,
-    scale: 0.98,
-    setting: 'west service corridor beside the west broken utility pole',
+    name: 'roadBendRustyCar',
+    position: [5.05, -5.13],
+    rotationY: 0.28,
+    scale: 1.02,
+    // Half on/half off, so it is grounded midway between the 0.02 m snow
+    // surface and the 0.086 m asphalt crown: no wheel ends up more than 3.5 cm
+    // from the surface under it, which is well inside a tyre's contact patch.
+    groundY: 0.055,
+    setting: 'straddling the west asphalt edge on the road bend north of the player start',
   },
   {
-    name: 'eastPerimeterRustyCar',
-    position: [21.3, -4.9],
-    rotationY: 1.36,
-    scale: 1.03,
-    setting: 'north shoulder of a future east-perimeter forest-road entry',
+    name: 'northShoulderRustyCar',
+    position: [8.45, 14.6],
+    rotationY: 1.05,
+    scale: 0.97,
+    groundY: 0.02,
+    setting: 'west road shoulder beside the flickering-cold streetlight',
   },
 ] as const satisfies readonly RustyCarPlacement[]
 
@@ -226,9 +261,11 @@ export function createRustyCars(options: RustyCarOptions): RustyCarResult {
       for (const mesh of modelMeshes) mesh.computeWorldMatrix(true)
 
       // Correct each differently scaled/yawed car from its own actual world
-      // minimum, so the lowest imported vertex rests exactly on the ground.
+      // minimum, so its lowest imported vertex rests exactly on the surface the
+      // placement declares: the snow for the shoulder wreck, and the midpoint
+      // of snow and asphalt for the one lying across the road edge.
       const initialBounds = getModelBounds(modelMeshes)
-      placementRoot.position.y -= initialBounds.minimum.y
+      placementRoot.position.y += placement.groundY - initialBounds.minimum.y
       placementRoot.computeWorldMatrix(true)
 
       for (const mesh of modelMeshes) {
