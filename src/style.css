@@ -575,7 +575,7 @@ body {
 
 #lookArea {
   position: absolute;
-  inset: 0 0 0 42%;
+  inset: 0 0 0 50%;
   z-index: 1;
   pointer-events: auto;
   touch-action: none;
@@ -658,13 +658,14 @@ body {
 
 .touchButton:disabled {
   opacity: 0.34;
+  pointer-events: none;
 }
 
 #fireButton {
-  right: calc(var(--mobile-safe-right) + 18px);
-  bottom: calc(var(--mobile-safe-bottom) + 18px);
-  width: clamp(86px, 22vh, 90px);
-  height: clamp(86px, 22vh, 90px);
+  right: calc(var(--mobile-safe-right) + 14px);
+  bottom: calc(var(--mobile-safe-bottom) + 14px);
+  width: clamp(80px, 22vh, 92px);
+  height: clamp(80px, 22vh, 92px);
   border-color: rgb(226 231 217 / 62%);
 }
 
@@ -698,20 +699,56 @@ body {
   transform: translateY(-1px);
 }
 
+#aimButton {
+  right: calc(var(--mobile-safe-right) + 18px);
+  bottom: calc(var(--mobile-safe-bottom) + 116px);
+  width: clamp(52px, 14vh, 60px);
+  height: clamp(52px, 14vh, 60px);
+}
+
+.aimMark {
+  position: relative;
+  width: 25px;
+  height: 25px;
+  border: 2px solid currentcolor;
+  border-radius: 50%;
+  opacity: 0.92;
+}
+
+.aimMark::before,
+.aimMark::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  background: currentcolor;
+  content: "";
+  transform: translate(-50%, -50%);
+}
+
+.aimMark::before {
+  width: 31px;
+  height: 2px;
+}
+
+.aimMark::after {
+  width: 2px;
+  height: 31px;
+}
+
 #reloadButton {
-  right: calc(var(--mobile-safe-right) + 116px);
-  bottom: calc(var(--mobile-safe-bottom) + 66px);
-  width: clamp(62px, 16vh, 66px);
-  height: clamp(62px, 16vh, 66px);
-  font-size: 30px;
+  right: calc(var(--mobile-safe-right) + 110px);
+  bottom: calc(var(--mobile-safe-bottom) + 86px);
+  width: clamp(48px, 13vh, 54px);
+  height: clamp(48px, 13vh, 54px);
+  font-size: 25px;
 }
 
 #weaponSwitchButton {
-  right: calc(var(--mobile-safe-right) + 63px);
-  bottom: calc(var(--mobile-safe-bottom) + 120px);
-  width: clamp(56px, 14vh, 60px);
-  height: clamp(56px, 14vh, 60px);
-  font-size: 27px;
+  right: calc(var(--mobile-safe-right) + 116px);
+  bottom: calc(var(--mobile-safe-bottom) + 16px);
+  width: clamp(46px, 12vh, 52px);
+  height: clamp(46px, 12vh, 52px);
+  font-size: 23px;
 }
 
 #useButton {

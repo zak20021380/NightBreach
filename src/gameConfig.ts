@@ -4,6 +4,9 @@ export const VIEW_MODEL_RENDER_LAYER_MASK = 0x10000000
 export const TOUCH_CONFIG = {
   lookSensitivity: 0.00215,
   adsLookSensitivityMultiplier: 0.72,
+  lookDragThresholdPixels: 4,
+  maxLookDeltaPixels: 72,
+  pitchLimit: Math.PI * 0.47,
   joystickDeadZone: 0.14,
   automaticFireInterval: 0.1,
   hipFov: 72 * Math.PI / 180,

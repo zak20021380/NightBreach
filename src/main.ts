@@ -280,6 +280,7 @@ const lookArea = getElement<HTMLDivElement>('#lookArea')
 const movementControl = getElement<HTMLDivElement>('#movementControl')
 const joystickBase = getElement<HTMLDivElement>('#joystickBase')
 const joystickKnob = getElement<HTMLDivElement>('#joystickKnob')
+const aimButton = getElement<HTMLButtonElement>('#aimButton')
 const fireButton = getElement<HTMLButtonElement>('#fireButton')
 const reloadButton = getElement<HTMLButtonElement>('#reloadButton')
 const weaponSwitchButton = getElement<HTMLButtonElement>('#weaponSwitchButton')
@@ -7800,6 +7801,7 @@ resetDirtyMedkit = () => {
 publishDirtyMedkitState()
 let movementPointerId: number | null = null
 let aimPointerId: number | null = null
+let adsPointerId: number | null = null
 let firePointerId: number | null = null
 let moveInputX = 0
 let moveInputY = 0
@@ -7807,8 +7809,11 @@ let joystickCenterX = 0
 let joystickCenterY = 0
 let joystickRadius = 1
 let joystickKnobTravelRadius = 0
+let aimStartX = 0
+let aimStartY = 0
 let aimLastX = 0
 let aimLastY = 0
+let aimDragActive = false
 let automaticFireHeld = false
 let automaticFireCooldown = 0
 let adsHeld = false
@@ -8348,17 +8353,27 @@ function stopAutomaticFire(pointerId?: number) {
 }
 
 releaseAds = () => {
+  if (!adsHeld) return
   adsHeld = false
   applyDesktopMouseSensitivity()
   playImportedWeaponAnimation('ads', false, true)
   document.body.classList.remove('ads-active')
 }
 
+function stopMobileAds(pointerId?: number) {
+  if (pointerId !== undefined && pointerId !== adsPointerId) return
+  const capturedPointerId = adsPointerId
+  adsPointerId = null
+  releasePointerCaptureSafely(aimButton, capturedPointerId)
+  aimButton.classList.remove('active')
+  releaseAds()
+}
+
 cancelMobileInput = () => {
   resetJoystick()
   resetAim()
   stopAutomaticFire()
-  releaseAds()
+  stopMobileAds()
   useButton.classList.remove('active')
 }
 
@@ -8410,8 +8425,11 @@ lookArea.addEventListener('pointerdown', (event) => {
   ) return
   event.preventDefault()
   aimPointerId = event.pointerId
+  aimStartX = event.clientX
+  aimStartY = event.clientY
   aimLastX = event.clientX
   aimLastY = event.clientY
+  aimDragActive = false
   capturePointerSafely(lookArea, event.pointerId)
 }, { passive: false })
 
@@ -8422,13 +8440,36 @@ lookArea.addEventListener('pointermove', (event) => {
   const deltaY = event.clientY - aimLastY
   aimLastX = event.clientX
   aimLastY = event.clientY
+
+  // A short activation threshold filters resting-thumb jitter. Once crossed,
+  // rotation stays synchronous with pointer events so aiming gains no buffered
+  // frame or low-pass-filter latency.
+  if (!aimDragActive) {
+    const dragDistance = Math.hypot(
+      event.clientX - aimStartX,
+      event.clientY - aimStartY,
+    )
+    if (dragDistance < TOUCH_CONFIG.lookDragThresholdPixels) return
+    aimDragActive = true
+  }
+
   const sensitivity = TOUCH_CONFIG.lookSensitivity
     * (1 - adsBlend * (1 - TOUCH_CONFIG.adsLookSensitivityMultiplier))
-  camera.rotation.y += deltaX * sensitivity
+  const controlledDeltaX = clamp(
+    deltaX,
+    -TOUCH_CONFIG.maxLookDeltaPixels,
+    TOUCH_CONFIG.maxLookDeltaPixels,
+  )
+  const controlledDeltaY = clamp(
+    deltaY,
+    -TOUCH_CONFIG.maxLookDeltaPixels,
+    TOUCH_CONFIG.maxLookDeltaPixels,
+  )
+  camera.rotation.y += controlledDeltaX * sensitivity
   camera.rotation.x = clamp(
-    camera.rotation.x + deltaY * sensitivity,
-    -Math.PI * 0.47,
-    Math.PI * 0.47,
+    camera.rotation.x + controlledDeltaY * sensitivity,
+    -TOUCH_CONFIG.pitchLimit,
+    TOUCH_CONFIG.pitchLimit,
   )
 }, { passive: false })
 
@@ -8436,6 +8477,7 @@ function resetAim(pointerId?: number) {
   if (pointerId !== undefined && pointerId !== aimPointerId) return
   const capturedPointerId = aimPointerId
   aimPointerId = null
+  aimDragActive = false
   releasePointerCaptureSafely(lookArea, capturedPointerId)
 }
 
@@ -8447,6 +8489,25 @@ const endAim = (event: PointerEvent) => {
 lookArea.addEventListener('pointerup', endAim, { passive: false })
 lookArea.addEventListener('pointercancel', endAim, { passive: false })
 lookArea.addEventListener('lostpointercapture', endAim)
+
+aimButton.addEventListener('pointerdown', (event) => {
+  if (!isTouchDevice || !gameplayInputEnabled() || adsPointerId !== null) return
+  event.preventDefault()
+  event.stopPropagation()
+  adsPointerId = event.pointerId
+  aimButton.classList.add('active')
+  capturePointerSafely(aimButton, event.pointerId)
+  engageAds()
+}, { passive: false })
+
+const endMobileAds = (event: PointerEvent) => {
+  if (event.pointerId !== adsPointerId) return
+  event.preventDefault()
+  stopMobileAds(event.pointerId)
+}
+aimButton.addEventListener('pointerup', endMobileAds, { passive: false })
+aimButton.addEventListener('pointercancel', endMobileAds, { passive: false })
+aimButton.addEventListener('lostpointercapture', endMobileAds)
 
 fireButton.addEventListener('pointerdown', (event) => {
   if (!isTouchDevice || !gameplayInputEnabled() || firePointerId !== null) return
@@ -8475,6 +8536,7 @@ fireButton.addEventListener('lostpointercapture', endAutomaticFire)
 const endMobilePointer = (event: PointerEvent) => {
   endJoystick(event)
   endAim(event)
+  endMobileAds(event)
   endAutomaticFire(event)
 }
 window.addEventListener('pointerup', endMobilePointer, { passive: false })
@@ -8912,6 +8974,7 @@ if (import.meta.env.DEV) {
           activeWeapon: activeWeaponId,
           activeZombieCount,
           adsHeld,
+          adsPointerId,
           aimPointerId,
           ammo: `${magazineAmmo}/${reserveAmmo}`,
           automaticFireHeld,
