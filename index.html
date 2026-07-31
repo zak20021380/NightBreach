@@ -6,9 +6,10 @@
       name="viewport"
       content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#8f9da0" />
+    <meta name="theme-color" content="#080d12" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Night Breach</title>
+    <script src="https://telegram.org/js/telegram-web-app.js?63"></script>
     <!--
       Critical boot styles are inline on purpose: src/style.css is imported by
       main.ts, so it only arrives once the game module has downloaded. Inlining
@@ -26,15 +27,30 @@
         afterwards and the original page background is left untouched.
       */
       html {
-        background: #0b0f0d;
+        background: #080d12;
       }
 
       #nbLoading {
+        --loading-safe-right: max(
+          env(safe-area-inset-right, 0px),
+          var(--tg-safe-area-inset-right, 0px),
+          var(--tg-content-safe-area-inset-right, 0px)
+        );
+        --loading-safe-bottom: max(
+          env(safe-area-inset-bottom, 0px),
+          var(--tg-safe-area-inset-bottom, 0px),
+          var(--tg-content-safe-area-inset-bottom, 0px)
+        );
+        --loading-safe-left: max(
+          env(safe-area-inset-left, 0px),
+          var(--tg-safe-area-inset-left, 0px),
+          var(--tg-content-safe-area-inset-left, 0px)
+        );
         position: fixed;
         inset: 0;
         z-index: 200;
         /* Fallback behind the poster: covers the decode gap and any 404. */
-        background: #0b0f0d;
+        background: #080d12;
         opacity: 1;
         transition: opacity 340ms ease;
       }
@@ -71,7 +87,7 @@
         position: absolute;
         /* Lower-centre, then nudged left so the bar clears the weapon in the
            poster's bottom-right corner. Offsets stay inside the safe area. */
-        bottom: max(18px, calc(env(safe-area-inset-bottom, 0px) + 14px));
+        bottom: max(18px, calc(var(--loading-safe-bottom) + 14px));
         left: 50%;
         display: grid;
         justify-items: start;
@@ -79,7 +95,7 @@
         /* Spec width band; the max() guard keeps it usable on narrow phones. */
         width: max(240px, 54vw);
         max-width: calc(
-          100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 32px
+          100vw - var(--loading-safe-left) - var(--loading-safe-right) - 32px
         );
         transform: translateX(-58%);
         color: #e7eadb;

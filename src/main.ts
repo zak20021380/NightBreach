@@ -125,6 +125,140 @@ import {
   type ZombieAnimationMap,
 } from './zombieHelpers'
 
+type TelegramSafeAreaSide = 'top' | 'right' | 'bottom' | 'left'
+
+interface TelegramSafeAreaInset {
+  top?: number
+  right?: number
+  bottom?: number
+  left?: number
+}
+
+type TelegramWebAppEventHandler = (event?: unknown) => void
+
+interface TelegramWebApp {
+  readonly version?: string
+  readonly platform?: string
+  readonly isFullscreen?: boolean
+  readonly safeAreaInset?: TelegramSafeAreaInset
+  readonly contentSafeAreaInset?: TelegramSafeAreaInset
+  ready: () => void
+  expand: () => void
+  isVersionAtLeast: (version: string) => boolean
+  requestFullscreen?: () => void
+  setHeaderColor: (color: string) => void
+  setBackgroundColor: (color: string) => void
+  setBottomBarColor?: (color: string) => void
+  onEvent?: (eventType: string, eventHandler: TelegramWebAppEventHandler) => void
+}
+
+const telegramWebApp = (window as Window & {
+  Telegram?: { WebApp?: TelegramWebApp }
+}).Telegram?.WebApp
+const TELEGRAM_CHROME_COLOR = '#080d12'
+const TELEGRAM_SAFE_AREA_SIDES: readonly TelegramSafeAreaSide[] = [
+  'top',
+  'right',
+  'bottom',
+  'left',
+]
+let telegramFullscreenRequestHandled = false
+
+function telegramVersionAtLeast(version: string) {
+  if (!telegramWebApp) return false
+  try {
+    return telegramWebApp.isVersionAtLeast(version)
+  } catch (error) {
+    logRuntimeWarning(`Telegram WebApp version check for ${version} failed.`, error)
+    return false
+  }
+}
+
+function updateTelegramSafeAreaCssVariables() {
+  if (!telegramWebApp) return
+  try {
+    const rootStyle = document.documentElement.style
+    const insetGroups = [
+      ['--tg-safe-area-inset', telegramWebApp.safeAreaInset],
+      ['--tg-content-safe-area-inset', telegramWebApp.contentSafeAreaInset],
+    ] as const
+
+    for (const [propertyPrefix, insets] of insetGroups) {
+      for (const side of TELEGRAM_SAFE_AREA_SIDES) {
+        const rawValue = insets?.[side]
+        const value = typeof rawValue === 'number' && Number.isFinite(rawValue)
+          ? Math.max(0, rawValue)
+          : 0
+        rootStyle.setProperty(`${propertyPrefix}-${side}`, `${value}px`)
+      }
+    }
+  } catch (error) {
+    logRuntimeWarning('Telegram safe-area values could not be refreshed.', error)
+  }
+}
+
+function registerTelegramWebAppEvent(
+  eventType: string,
+  eventHandler: TelegramWebAppEventHandler,
+) {
+  if (!telegramWebApp?.onEvent) return
+  try {
+    telegramWebApp.onEvent(eventType, eventHandler)
+  } catch (error) {
+    logRuntimeWarning(`Telegram ${eventType} listener could not be registered.`, error)
+  }
+}
+
+function setTelegramChromeColors() {
+  if (!telegramWebApp) return
+  try {
+    telegramWebApp.setHeaderColor(TELEGRAM_CHROME_COLOR)
+  } catch (error) {
+    logRuntimeWarning('Telegram header color could not be set.', error)
+  }
+  try {
+    telegramWebApp.setBackgroundColor(TELEGRAM_CHROME_COLOR)
+  } catch (error) {
+    logRuntimeWarning('Telegram background color could not be set.', error)
+  }
+  if (telegramVersionAtLeast('7.10')) {
+    try {
+      telegramWebApp.setBottomBarColor?.(TELEGRAM_CHROME_COLOR)
+    } catch (error) {
+      logRuntimeWarning('Telegram bottom bar color could not be set.', error)
+    }
+  }
+}
+
+function requestTelegramFullscreenFromDeployGesture() {
+  if (!telegramWebApp || telegramFullscreenRequestHandled) return
+  telegramFullscreenRequestHandled = true
+
+  if (telegramWebApp.isFullscreen) {
+    console.info('[Night Breach][Telegram] Deploy began with isFullscreen=true; no additional fullscreen request was needed.')
+    return
+  }
+
+  if (!telegramVersionAtLeast('8.0')
+    || typeof telegramWebApp.requestFullscreen !== 'function') {
+    console.error(
+      '[Night Breach][Telegram] fullscreenFailed: UNSUPPORTED. Telegram WebApp 8.0+ is required; continuing safely in expanded mode.',
+      { version: telegramWebApp.version, platform: telegramWebApp.platform },
+    )
+    return
+  }
+
+  try {
+    telegramWebApp.requestFullscreen()
+    console.info('[Night Breach][Telegram] True fullscreen requested from the Deploy user gesture.')
+  } catch (error) {
+    logRuntimeError(
+      'Telegram fullscreen request threw an error; continuing safely in expanded mode.',
+      error,
+    )
+  }
+}
+
 const canvas = getElement<HTMLCanvasElement>('#renderCanvas')
 const assetLoading = getElement<HTMLDivElement>('#assetLoading')
 const loadingScreen = createLoadingScreenController()
@@ -148,6 +282,33 @@ const fireButton = getElement<HTMLButtonElement>('#fireButton')
 const reloadButton = getElement<HTMLButtonElement>('#reloadButton')
 const weaponSwitchButton = getElement<HTMLButtonElement>('#weaponSwitchButton')
 const useButton = getElement<HTMLButtonElement>('#useButton')
+
+if (telegramWebApp) {
+  console.info('[Night Breach][Telegram] WebApp API detected.', {
+    version: telegramWebApp.version ?? 'unknown',
+    platform: telegramWebApp.platform ?? 'unknown',
+    isFullscreen: telegramWebApp.isFullscreen === true,
+  })
+  setTelegramChromeColors()
+  updateTelegramSafeAreaCssVariables()
+  try {
+    telegramWebApp.ready()
+  } catch (error) {
+    logRuntimeWarning(
+      'Telegram WebApp ready initialization was unavailable; browser gameplay will continue.',
+      error,
+    )
+  }
+  try {
+    telegramWebApp.expand()
+  } catch (error) {
+    logRuntimeWarning(
+      'Telegram WebApp expand initialization was unavailable; browser gameplay will continue.',
+      error,
+    )
+  }
+}
+
 // The poster overlay above is the single startup UI. Keep the older all-asset
 // indicator hidden so optional background scenery can never look like it is
 // blocking a ready game or reappear after a Telegram viewport update.
@@ -313,12 +474,14 @@ function deployGame() {
 
 instructions.addEventListener('click', () => {
   console.info('[Night Breach][Deploy] Click received.')
+  requestTelegramFullscreenFromDeployGesture()
   deployGame()
 })
 instructions.addEventListener('pointerup', (event) => {
   if (event.pointerType === 'mouse') return
   event.preventDefault()
   console.info(`[Night Breach][Deploy] ${event.pointerType || 'touch'} activation received.`)
+  requestTelegramFullscreenFromDeployGesture()
   deployGame()
 }, { passive: false })
 
@@ -383,10 +546,6 @@ try {
       preserveDrawingBuffer: false,
       stencil: false,
     }, false)
-  }
-
-  type TelegramViewportWebApp = {
-    onEvent?: (eventType: 'viewportChanged', eventHandler: () => void) => void
   }
 
   const MOBILE_MIN_RENDER_SCALE = 1
@@ -458,6 +617,7 @@ try {
   function applySettledResolutionPolicy() {
     settledResizeFrameOne = 0
     settledResizeFrameTwo = 0
+    updateTelegramSafeAreaCssVariables()
     updateOrientationState()
 
     const cssSize = getCanvasCssSize()
@@ -506,10 +666,40 @@ try {
   window.addEventListener('resize', scheduleSettledResize)
   window.addEventListener('orientationchange', scheduleSettledResize)
   window.visualViewport?.addEventListener('resize', scheduleSettledResize)
-  const telegramWebApp = (window as Window & {
-    Telegram?: { WebApp?: TelegramViewportWebApp }
-  }).Telegram?.WebApp
-  telegramWebApp?.onEvent?.('viewportChanged', scheduleSettledResize)
+
+  const handleTelegramFullscreenChanged: TelegramWebAppEventHandler = () => {
+    const isFullscreen = telegramWebApp?.isFullscreen === true
+    document.documentElement.classList.toggle('telegram-fullscreen', isFullscreen)
+    console.info(
+      `[Night Breach][Telegram] fullscreenChanged: isFullscreen=${String(isFullscreen)}.`,
+    )
+    // The shared scheduler waits two animation frames, then refreshes both
+    // Telegram safe areas, reapplies mobile render scale, and resizes once.
+    scheduleSettledResize()
+  }
+
+  const handleTelegramFullscreenFailed: TelegramWebAppEventHandler = (event) => {
+    const error = typeof event === 'object'
+      && event !== null
+      && 'error' in event
+      && typeof event.error === 'string'
+      ? event.error
+      : 'UNKNOWN'
+    console.error(
+      `[Night Breach][Telegram] fullscreenFailed: ${error}. Continuing safely in expanded mode.`,
+      event,
+    )
+  }
+
+  registerTelegramWebAppEvent('viewportChanged', scheduleSettledResize)
+  registerTelegramWebAppEvent('safeAreaChanged', scheduleSettledResize)
+  registerTelegramWebAppEvent('contentSafeAreaChanged', scheduleSettledResize)
+  registerTelegramWebAppEvent('fullscreenChanged', handleTelegramFullscreenChanged)
+  registerTelegramWebAppEvent('fullscreenFailed', handleTelegramFullscreenFailed)
+  document.documentElement.classList.toggle(
+    'telegram-fullscreen',
+    telegramWebApp?.isFullscreen === true,
+  )
   if (document.readyState === 'complete') {
     scheduleSettledResize()
   } else {
