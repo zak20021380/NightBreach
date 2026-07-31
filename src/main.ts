@@ -139,6 +139,7 @@ const retryOverlay = getElement<HTMLDivElement>('#retryOverlay')
 const retryButton = getElement<HTMLButtonElement>('#retryButton')
 const lookArea = getElement<HTMLDivElement>('#lookArea')
 const movementControl = getElement<HTMLDivElement>('#movementControl')
+const joystickBase = getElement<HTMLDivElement>('#joystickBase')
 const joystickKnob = getElement<HTMLDivElement>('#joystickKnob')
 const fireButton = getElement<HTMLButtonElement>('#fireButton')
 const adsButton = getElement<HTMLButtonElement>('#adsButton')
@@ -7381,6 +7382,7 @@ let moveInputY = 0
 let joystickCenterX = 0
 let joystickCenterY = 0
 let joystickRadius = 1
+let joystickKnobTravelRadius = 0
 let aimLastX = 0
 let aimLastY = 0
 let automaticFireHeld = false
@@ -7848,36 +7850,62 @@ function capturePointerSafely(element: HTMLElement, pointerId: number) {
   }
 }
 
-function updateJoystick(clientX: number, clientY: number) {
-  let offsetX = clientX - joystickCenterX
-  let offsetY = clientY - joystickCenterY
-  const distance = Math.hypot(offsetX, offsetY)
-  if (distance > joystickRadius) {
-    const limitScale = joystickRadius / distance
-    offsetX *= limitScale
-    offsetY *= limitScale
+function releasePointerCaptureSafely(element: HTMLElement, pointerId: number | null) {
+  if (pointerId === null) return
+  try {
+    if (element.hasPointerCapture(pointerId)) element.releasePointerCapture(pointerId)
+  } catch {
+    // Pointer capture may already have been released by the browser.
   }
+}
 
-  joystickKnob.style.setProperty('--stick-x', `${offsetX}px`)
-  joystickKnob.style.setProperty('--stick-y', `${offsetY}px`)
+function updateJoystick(clientX: number, clientY: number) {
+  const offsetX = clientX - joystickCenterX
+  const offsetY = clientY - joystickCenterY
+  const distance = Math.hypot(offsetX, offsetY)
+  const normalizedDistance = clamp(distance / joystickRadius, 0, 1)
+  const directionX = distance > 0 ? offsetX / distance : 0
+  const directionY = distance > 0 ? offsetY / distance : 0
 
-  const limitedDistance = Math.min(distance, joystickRadius)
-  const normalizedDistance = limitedDistance / joystickRadius
+  // Input uses the full visible base radius. The smaller knob has a separate
+  // visual travel radius so its centre reaches the base edge only when the
+  // touch reaches the edge, rather than making that short pixel travel equal
+  // full movement speed.
+  joystickKnob.style.setProperty(
+    '--stick-x',
+    `${directionX * normalizedDistance * joystickKnobTravelRadius}px`,
+  )
+  joystickKnob.style.setProperty(
+    '--stick-y',
+    `${directionY * normalizedDistance * joystickKnobTravelRadius}px`,
+  )
+
   if (normalizedDistance <= TOUCH_CONFIG.joystickDeadZone || distance === 0) {
     moveInputX = 0
     moveInputY = 0
     return
   }
 
-  const strength = (normalizedDistance - TOUCH_CONFIG.joystickDeadZone)
-    / (1 - TOUCH_CONFIG.joystickDeadZone)
-  moveInputX = offsetX / Math.max(limitedDistance, 0.001) * strength
-  moveInputY = -offsetY / Math.max(limitedDistance, 0.001) * strength
+  const responseProgress = clamp(
+    (normalizedDistance - TOUCH_CONFIG.joystickDeadZone)
+      / (1 - TOUCH_CONFIG.joystickDeadZone),
+    0,
+    1,
+  )
+  const strength = clamp(
+    responseProgress * responseProgress * (3 - 2 * responseProgress),
+    0,
+    1,
+  )
+  moveInputX = directionX * strength
+  moveInputY = -directionY * strength
 }
 
 function resetJoystick(pointerId?: number) {
   if (pointerId !== undefined && pointerId !== movementPointerId) return
+  const capturedPointerId = movementPointerId
   movementPointerId = null
+  releasePointerCaptureSafely(movementControl, capturedPointerId)
   moveInputX = 0
   moveInputY = 0
   joystickKnob.classList.add('returning')
@@ -7887,7 +7915,9 @@ function resetJoystick(pointerId?: number) {
 
 function stopAutomaticFire(pointerId?: number) {
   if (pointerId !== undefined && pointerId !== firePointerId) return
+  const capturedPointerId = firePointerId
   firePointerId = null
+  releasePointerCaptureSafely(fireButton, capturedPointerId)
   automaticFireHeld = false
   automaticFireCooldown = 0
   fireButton.classList.remove('active')
@@ -7895,7 +7925,9 @@ function stopAutomaticFire(pointerId?: number) {
 
 releaseAds = (pointerId?: number) => {
   if (pointerId !== undefined && pointerId !== adsPointerId) return
+  const capturedPointerId = adsPointerId
   adsPointerId = null
+  releasePointerCaptureSafely(adsButton, capturedPointerId)
   adsHeld = false
   applyDesktopMouseSensitivity()
   playImportedWeaponAnimation('ads', false, true)
@@ -7905,7 +7937,7 @@ releaseAds = (pointerId?: number) => {
 
 cancelMobileInput = () => {
   resetJoystick()
-  aimPointerId = null
+  resetAim()
   stopAutomaticFire()
   releaseAds()
   useButton.classList.remove('active')
@@ -7917,10 +7949,15 @@ movementControl.addEventListener('pointerdown', (event) => {
   event.stopPropagation()
   movementPointerId = event.pointerId
   capturePointerSafely(movementControl, event.pointerId)
-  const bounds = movementControl.getBoundingClientRect()
+  const bounds = joystickBase.getBoundingClientRect()
+  const knobBounds = joystickKnob.getBoundingClientRect()
   joystickCenterX = bounds.left + bounds.width * 0.5
   joystickCenterY = bounds.top + bounds.height * 0.5
-  joystickRadius = Math.max(1, bounds.width * 0.28)
+  joystickRadius = Math.max(1, Math.min(bounds.width, bounds.height) * 0.5)
+  joystickKnobTravelRadius = Math.max(
+    0,
+    joystickRadius - Math.min(knobBounds.width, knobBounds.height) * 0.5 - 1,
+  )
   joystickKnob.classList.remove('returning')
   updateJoystick(event.clientX, event.clientY)
 }, { passive: false })
@@ -7940,8 +7977,18 @@ movementControl.addEventListener('pointerup', endJoystick, { passive: false })
 movementControl.addEventListener('pointercancel', endJoystick, { passive: false })
 movementControl.addEventListener('lostpointercapture', endJoystick)
 
+function isAimControlTarget(target: EventTarget | null) {
+  return target instanceof Element
+    && target.closest('#movementControl, .touchButton, #useButton') !== null
+}
+
 lookArea.addEventListener('pointerdown', (event) => {
-  if (!isTouchDevice || !gameplayInputEnabled() || aimPointerId !== null) return
+  if (
+    !isTouchDevice
+    || !gameplayInputEnabled()
+    || aimPointerId !== null
+    || isAimControlTarget(event.target)
+  ) return
   event.preventDefault()
   aimPointerId = event.pointerId
   aimLastX = event.clientX
@@ -7966,10 +8013,17 @@ lookArea.addEventListener('pointermove', (event) => {
   )
 }, { passive: false })
 
+function resetAim(pointerId?: number) {
+  if (pointerId !== undefined && pointerId !== aimPointerId) return
+  const capturedPointerId = aimPointerId
+  aimPointerId = null
+  releasePointerCaptureSafely(lookArea, capturedPointerId)
+}
+
 const endAim = (event: PointerEvent) => {
   if (event.pointerId !== aimPointerId) return
   event.preventDefault()
-  aimPointerId = null
+  resetAim(event.pointerId)
 }
 lookArea.addEventListener('pointerup', endAim, { passive: false })
 lookArea.addEventListener('pointercancel', endAim, { passive: false })
@@ -8013,6 +8067,19 @@ const endAds = (event: PointerEvent) => {
 adsButton.addEventListener('pointerup', endAds, { passive: false })
 adsButton.addEventListener('pointercancel', endAds, { passive: false })
 adsButton.addEventListener('lostpointercapture', endAds)
+
+// Window-level fallbacks cover browsers that fail pointer capture or lose the
+// originating element before delivering the end event. Pointer IDs keep one
+// finger ending from interrupting simultaneous movement, aim, fire, or ADS.
+const endMobilePointer = (event: PointerEvent) => {
+  endJoystick(event)
+  endAim(event)
+  endAutomaticFire(event)
+  endAds(event)
+}
+window.addEventListener('pointerup', endMobilePointer, { passive: false })
+window.addEventListener('pointercancel', endMobilePointer, { passive: false })
+window.addEventListener('touchcancel', () => cancelMobileInput(), { passive: true })
 
 reloadButton.addEventListener('pointerdown', (event) => {
   if (!isTouchDevice || !gameplayInputEnabled() || reloadButton.disabled) return
@@ -8124,7 +8191,9 @@ scene.onBeforeRenderObservable.add(() => {
     if (moveInputX !== 0 || moveInputY !== 0) {
       const yawSine = Math.sin(camera.rotation.y)
       const yawCosine = Math.cos(camera.rotation.y)
-      const movementScale = camera.speed * Math.min(deltaSeconds * 60, 1.5)
+      // camera.speed remains the existing 60 Hz maximum-speed baseline; delta
+      // time makes the mobile impulse independent of render frequency.
+      const movementScale = camera.speed * deltaSeconds * 60
       camera.cameraDirection.x += (
         yawCosine * moveInputX + yawSine * moveInputY
       ) * movementScale
@@ -8383,7 +8452,8 @@ function handleWebViewBlur() {
   // Mobile Safari can blur the page while its browser chrome is focused even
   // though the game remains fully visible. Visibility/pagehide handle real
   // mobile backgrounding without leaving a visible canvas permanently paused.
-  if (isDesktop) setWebViewActive(false)
+  if (isTouchDevice) cancelMobileInput()
+  else if (isDesktop) setWebViewActive(false)
 }
 
 function handleWebViewFocus() {
