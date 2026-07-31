@@ -9,6 +9,141 @@
     <meta name="theme-color" content="#8f9da0" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Night Breach</title>
+    <!--
+      Critical boot styles are inline on purpose: src/style.css is imported by
+      main.ts, so it only arrives once the game module has downloaded. Inlining
+      keeps the loading screen painted on the first frame.
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+      }
+
+      /*
+        Anti-flash colour for the frames before style.css (imported by main.ts)
+        arrives. Scoped to html so style.css's `:root` rule wins on specificity
+        afterwards and the original page background is left untouched.
+      */
+      html {
+        background: #0b0f0d;
+      }
+
+      #nbLoading {
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        /* Fallback behind the poster: covers the decode gap and any 404. */
+        background: #0b0f0d;
+        opacity: 1;
+        transition: opacity 260ms ease;
+      }
+
+      #nbLoading.is-complete {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      #nbLoadingPoster {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        /* cover + center keeps the 16:9 composition filling any phone or
+           Telegram landscape viewport without distortion. */
+        object-fit: cover;
+        object-position: center center;
+      }
+
+      #nbLoadingScrim {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+          to top,
+          rgb(6 9 8 / 88%) 0%,
+          rgb(6 9 8 / 62%) 18%,
+          rgb(6 9 8 / 18%) 40%,
+          rgb(6 9 8 / 0%) 62%
+        );
+      }
+
+      #nbLoadingUi {
+        position: absolute;
+        /* Lower-centre, then nudged left so the bar clears the weapon in the
+           poster's bottom-right corner. Offsets stay inside the safe area. */
+        bottom: max(18px, calc(env(safe-area-inset-bottom, 0px) + 14px));
+        left: 50%;
+        display: grid;
+        justify-items: start;
+        gap: clamp(6px, 1.1vh, 10px);
+        /* Spec width band; the max() guard keeps it usable on narrow phones. */
+        width: max(240px, 54vw);
+        max-width: calc(
+          100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 32px
+        );
+        transform: translateX(-58%);
+        color: #e7eadb;
+        font-family: "Segoe UI", Arial, sans-serif;
+        text-shadow: 0 1px 3px rgb(0 0 0 / 70%);
+      }
+
+      #nbLoadingMeta {
+        display: flex;
+        gap: 12px;
+        align-items: baseline;
+        justify-content: space-between;
+        width: 100%;
+        font-size: clamp(10px, 1.5vw, 13px);
+        font-weight: 650;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      #nbLoadingPercent {
+        color: #b3c08d;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #nbLoadingTrack {
+        position: relative;
+        width: 100%;
+        height: 3px;
+        overflow: hidden;
+        border: 1px solid rgb(215 222 201 / 22%);
+        background: rgb(8 11 9 / 72%);
+      }
+
+      #nbLoadingFill {
+        width: 0%;
+        height: 100%;
+        background: linear-gradient(90deg, #6f7d55 0%, #99a877 100%);
+        box-shadow: 0 0 6px rgb(153 168 119 / 45%);
+        transition: width 240ms ease;
+      }
+
+      #nbLoadingTip {
+        max-width: 46ch;
+        color: rgb(231 234 219 / 62%);
+        font-size: clamp(9px, 1.25vw, 12px);
+        letter-spacing: 0.07em;
+      }
+
+      #nbLoading.is-error #nbLoadingStage {
+        color: #e0a07a;
+      }
+
+      #nbLoading.is-error #nbLoadingFill {
+        background: #b4623c;
+        box-shadow: none;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #nbLoading,
+        #nbLoadingFill {
+          transition: none;
+        }
+      }
+    </style>
   </head>
   <body>
     <canvas id="renderCanvas" tabindex="0" aria-label="Night Breach FPS game"></canvas>
@@ -60,6 +195,41 @@
       </div>
     </div>
     <div id="orientationNotice" role="status">Rotate your phone<br /><span>Landscape orientation required</span></div>
+    <!--
+      Boot loading screen. Declared ahead of the module script so it paints
+      while main.ts is still downloading. The poster is decorative and is not
+      awaited: no preload hint and no blocking decode, so it never competes with
+      critical JavaScript or game assets for bandwidth.
+    -->
+    <div id="nbLoading">
+      <img
+        id="nbLoadingPoster"
+        src="/assets/ui/loading/nightbreach-loading.png"
+        alt=""
+        aria-hidden="true"
+        decoding="async"
+        fetchpriority="low"
+        draggable="false"
+      />
+      <div id="nbLoadingScrim" aria-hidden="true"></div>
+      <div id="nbLoadingUi">
+        <div id="nbLoadingMeta">
+          <span id="nbLoadingStage" role="status" aria-live="polite">INITIALIZING</span>
+          <span id="nbLoadingPercent">0%</span>
+        </div>
+        <div
+          id="nbLoadingTrack"
+          role="progressbar"
+          aria-label="Loading progress"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <div id="nbLoadingFill"></div>
+        </div>
+        <p id="nbLoadingTip">Tip: Aim for the head - it drops walkers in a single shot.</p>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
