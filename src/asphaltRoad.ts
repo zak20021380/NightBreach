@@ -144,7 +144,7 @@ function createSnowTexture(scene: Scene) {
     'asphaltRoadEdgeSnowTexture',
     { width: size, height: size },
     scene,
-    false,
+    true,
   )
   const context = texture.getContext()
   const pixels = context.getImageData(0, 0, size, size)
@@ -169,7 +169,8 @@ function createSnowTexture(scene: Scene) {
   texture.wrapV = Texture.WRAP_ADDRESSMODE
   texture.uScale = 2.6
   texture.vScale = 1
-  texture.anisotropicFilteringLevel = 2
+  texture.updateSamplingMode(Texture.TRILINEAR_SAMPLINGMODE, true)
+  texture.anisotropicFilteringLevel = 8
   return texture
 }
 

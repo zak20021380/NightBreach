@@ -67,7 +67,6 @@ function clampByte(value: number) {
 }
 
 export function createProceduralSurfaceHelpers({
-  isLowEndMobile,
   isMobile,
   logRuntimeWarning,
   scene,
@@ -111,12 +110,17 @@ export function createProceduralSurfaceHelpers({
     material.emissiveColor.copyFrom(emissive)
   }
 
-  function prepareProceduralTexture(texture: DynamicTexture, scale: number) {
+  function prepareProceduralTexture(
+    texture: DynamicTexture,
+    scale: number,
+    importantMobileSurface: boolean,
+  ) {
     texture.wrapU = Texture.WRAP_ADDRESSMODE
     texture.wrapV = Texture.WRAP_ADDRESSMODE
     texture.uScale = scale
     texture.vScale = scale
-    texture.anisotropicFilteringLevel = isLowEndMobile ? 1 : isMobile ? 2 : 4
+    texture.updateSamplingMode(Texture.TRILINEAR_SAMPLINGMODE, true)
+    texture.anisotropicFilteringLevel = isMobile && importantMobileSurface ? 8 : 4
   }
 
   /**
@@ -258,9 +262,10 @@ export function createProceduralSurfaceHelpers({
     albedo.update(false)
     normal.update(false)
     packed.update(false)
-    prepareProceduralTexture(albedo, options.textureScale)
-    prepareProceduralTexture(normal, options.textureScale)
-    prepareProceduralTexture(packed, options.textureScale)
+    const importantMobileSurface = options.kind === 'ground' || options.kind === 'wood'
+    prepareProceduralTexture(albedo, options.textureScale, importantMobileSurface)
+    prepareProceduralTexture(normal, options.textureScale, importantMobileSurface)
+    prepareProceduralTexture(packed, options.textureScale, importantMobileSurface)
     normal.level = 0.65
 
     if (material instanceof PBRMaterial) {

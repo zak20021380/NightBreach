@@ -574,9 +574,10 @@ try {
     }, false)
   }
 
-  const MOBILE_MIN_RENDER_SCALE = 1
-  const MOBILE_MAX_RENDER_SCALE = 1.25
-  const MOBILE_TARGET_RENDER_PIXELS = 960 * 540
+  // A 1x CSS-pixel backing buffer is visibly upscaled by high-density Android
+  // WebViews. Retain native device density up to 2x: this is a deliberate
+  // Telegram-safe ceiling, not an FPS-driven or low-end quality fallback.
+  const MOBILE_MAX_RENDER_DENSITY = 2
   let settledResizeFrameOne = 0
   let settledResizeFrameTwo = 0
   let initialResolutionSettled = false
@@ -588,29 +589,23 @@ try {
     return {
       width: Math.max(
         1,
-        bounds.width
-          || canvas.clientWidth
+        canvas.clientWidth
+          || bounds.width
           || window.visualViewport?.width
           || window.innerWidth,
       ),
       height: Math.max(
         1,
-        bounds.height
-          || canvas.clientHeight
+        canvas.clientHeight
+          || bounds.height
           || window.visualViewport?.height
           || window.innerHeight,
       ),
     }
   }
 
-  function getMobileRenderScale(cssWidth: number, cssHeight: number) {
-    if (isLowEndMobile) return MOBILE_MIN_RENDER_SCALE
-    const cssPixelCount = Math.max(1, cssWidth * cssHeight)
-    return clamp(
-      Math.sqrt(MOBILE_TARGET_RENDER_PIXELS / cssPixelCount),
-      MOBILE_MIN_RENDER_SCALE,
-      MOBILE_MAX_RENDER_SCALE,
-    )
+  function getMobileRenderScale() {
+    return clamp(window.devicePixelRatio || 1, 1, MOBILE_MAX_RENDER_DENSITY)
   }
 
   function logInitialResolutionIfReady() {
@@ -646,19 +641,18 @@ try {
     updateTelegramSafeAreaCssVariables()
     updateOrientationState()
 
-    const cssSize = getCanvasCssSize()
     const renderScale = isMobile
-      ? getMobileRenderScale(cssSize.width, cssSize.height)
+      ? getMobileRenderScale()
       : 1
-    // Babylon hardware scaling is the inverse of render scale. DPR is
-    // deliberately excluded so Telegram cannot request a 2x-4x backing buffer.
+    // Babylon hardware scaling is the inverse of render density. The value is
+    // reapplied after every settled Telegram/VisualViewport resize, and no
+    // SceneOptimizer or low-end branch is allowed to replace it later.
     const hardwareScalingLevel = 1 / renderScale
 
     try {
       if (Math.abs(engine.getHardwareScalingLevel() - hardwareScalingLevel) > 0.0001) {
-        // This is the only runtime writer of hardwareScalingLevel. There is no
-        // SceneOptimizer or FPS feedback loop allowed to alter resolution. The
-        // setter performs this settled resize internally.
+        // This is the only runtime writer of hardwareScalingLevel. The setter
+        // performs the settled resize internally.
         engine.setHardwareScalingLevel(hardwareScalingLevel)
       } else {
         // Re-read the settled CSS dimensions after Telegram has updated its
@@ -5446,17 +5440,10 @@ function configureFirstPersonMesh(mesh: AbstractMesh) {
 
 function optimizeImportedWeapon(meshes: readonly AbstractMesh[]) {
   const materials = new Set(meshes.map((mesh) => mesh.material).filter((material) => material !== null))
-  const anisotropy = isLowEndMobile ? 2 : isMobile ? 4 : 8
   for (const material of materials) {
     if (material instanceof PBRMaterial || material instanceof StandardMaterial) {
       // Sky + sun + the muzzle flash light, so the flash actually lights the gun.
       material.maxSimultaneousLights = 3
-    }
-    for (const texture of material.getActiveTextures()) {
-      texture.anisotropicFilteringLevel = Math.min(
-        texture.anisotropicFilteringLevel,
-        anisotropy,
-      )
     }
   }
 }

@@ -148,7 +148,8 @@ function createProceduralSnowMaterial(scene: Scene) {
     texture.wrapV = Texture.WRAP_ADDRESSMODE
     texture.uScale = 4
     texture.vScale = 4
-    texture.anisotropicFilteringLevel = 2
+    texture.updateSamplingMode(Texture.TRILINEAR_SAMPLINGMODE, true)
+    texture.anisotropicFilteringLevel = 8
   }
 
   const material = new PBRMaterial('proceduralWinterSnow', scene)

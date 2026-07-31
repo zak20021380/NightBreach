@@ -8,6 +8,7 @@ import {
   type LocalAssetDefinitions,
   type LocalAssetKey,
 } from './assetConfig'
+import { configureImportedTextureQuality } from './textureQuality'
 
 export interface AssetProgressSnapshot {
   readonly activeKey: LocalAssetKey | null
@@ -152,6 +153,8 @@ export class LocalAssetManager {
         container.dispose()
         throw new Error(`The GLB at ${config.path} contains no meshes`)
       }
+
+      configureImportedTextureQuality(container, key)
 
       console.info(
         `[Night Breach][Assets] ${config.label}: local GLB loaded once and cached (${config.path}; ${container.meshes.length} meshes).`,
