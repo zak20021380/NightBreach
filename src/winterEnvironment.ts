@@ -36,6 +36,7 @@ export interface WeatherShelter {
 interface WinterEnvironmentOptions {
   scene: Scene
   camera: Camera
+  isMobile: boolean
   skyLight: HemisphericLight
   sunLight: DirectionalLight
   surfaces: readonly WinterSurface[]
@@ -92,7 +93,7 @@ function snowNoise(x: number, y: number, seed: number) {
  * Creates two tiny local textures once. Wind-scoured bands and crystalline
  * grain keep the broad white surfaces readable without adding image assets.
  */
-function createProceduralSnowMaterial(scene: Scene) {
+function createProceduralSnowMaterial(scene: Scene, isMobile: boolean) {
   const size = 128
   const albedo = new DynamicTexture('winterSnowAlbedo', { width: size, height: size }, scene, true)
   const normal = new DynamicTexture('winterSnowNormal', { width: size, height: size }, scene, true)
@@ -149,7 +150,7 @@ function createProceduralSnowMaterial(scene: Scene) {
     texture.uScale = 4
     texture.vScale = 4
     texture.updateSamplingMode(Texture.TRILINEAR_SAMPLINGMODE, true)
-    texture.anisotropicFilteringLevel = 8
+    texture.anisotropicFilteringLevel = isMobile ? 2 : 4
   }
 
   const material = new PBRMaterial('proceduralWinterSnow', scene)
@@ -167,8 +168,9 @@ function createSnowSurface(
   scene: Scene,
   surfaces: readonly WinterSurface[],
   layerMask: number,
+  isMobile: boolean,
 ) {
-  const material = createProceduralSnowMaterial(scene)
+  const material = createProceduralSnowMaterial(scene, isMobile)
   const pieces = surfaces.map((surface) => {
     const piece = MeshBuilder.CreateGround(
       `winterSnow_${surface.name}`,
@@ -250,7 +252,7 @@ export class WinterEnvironment {
     }
 
     this.surfaceMeshCount = surfaces.length
-    this.snowSurface = createSnowSurface(scene, surfaces, worldLayerMask)
+    this.snowSurface = createSnowSurface(scene, surfaces, worldLayerMask, options.isMobile)
 
     const particleSettings = WINTER_CONFIG.snow[performanceTier]
     this.particleCapacity = particleSettings.capacity

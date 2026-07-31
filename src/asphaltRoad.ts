@@ -17,6 +17,7 @@ import { ASPHALT_ROAD_ROUTE } from './roadLayout'
 interface AsphaltRoadOptions {
   readonly config: AsphaltRoadAssetDefinition
   readonly container: AssetContainer
+  readonly isMobile: boolean
   readonly scene: Scene
   readonly worldLayerMask: number
 }
@@ -138,7 +139,7 @@ function getModelBounds(meshes: readonly AbstractMesh[]): ModelBounds {
   return { minimum, maximum }
 }
 
-function createSnowTexture(scene: Scene) {
+function createSnowTexture(scene: Scene, isMobile: boolean) {
   const size = 64
   const texture = new DynamicTexture(
     'asphaltRoadEdgeSnowTexture',
@@ -170,7 +171,7 @@ function createSnowTexture(scene: Scene) {
   texture.uScale = 2.6
   texture.vScale = 1
   texture.updateSamplingMode(Texture.TRILINEAR_SAMPLINGMODE, true)
-  texture.anisotropicFilteringLevel = 8
+  texture.anisotropicFilteringLevel = isMobile ? 2 : 4
   return texture
 }
 
@@ -316,7 +317,7 @@ function createRoadTreatment(
     -2,
     options.scene,
   )
-  snowMaterial.albedoTexture = createSnowTexture(options.scene)
+  snowMaterial.albedoTexture = createSnowTexture(options.scene, options.isMobile)
   const compactedMaterial = createTreatmentMaterial(
     'asphaltRoadCompactedCenterMaterial',
     new Color3(0.12, 0.15, 0.17),

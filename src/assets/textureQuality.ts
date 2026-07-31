@@ -12,7 +12,15 @@ const IMPORTANT_IMPORTED_TEXTURE_ASSETS = new Set<LocalAssetKey>([
   'hospitalExterior',
 ])
 
-const IMPORTANT_TEXTURE_ANISOTROPY = 8
+const MOBILE_MEDIUM_ANISOTROPY_ASSETS = new Set<LocalAssetKey>([
+  'rifle',
+  'shotgun',
+  'zombie',
+])
+
+const DESKTOP_IMPORTANT_TEXTURE_ANISOTROPY = 8
+const MOBILE_MEDIUM_TEXTURE_ANISOTROPY = 4
+const MOBILE_ENVIRONMENT_TEXTURE_ANISOTROPY = 2
 
 /**
  * Applies the high-value imported-texture policy once, while the GLB container
@@ -24,14 +32,20 @@ const IMPORTANT_TEXTURE_ANISOTROPY = 8
 export function configureImportedTextureQuality(
   container: AssetContainer,
   key: LocalAssetKey,
+  isMobile: boolean,
 ) {
   if (!IMPORTANT_IMPORTED_TEXTURE_ASSETS.has(key)) return
+  const anisotropy = !isMobile
+    ? DESKTOP_IMPORTANT_TEXTURE_ANISOTROPY
+    : MOBILE_MEDIUM_ANISOTROPY_ASSETS.has(key)
+      ? MOBILE_MEDIUM_TEXTURE_ANISOTROPY
+      : MOBILE_ENVIRONMENT_TEXTURE_ANISOTROPY
 
   for (const texture of container.textures) {
     // Request (and retain) mipmaps explicitly when enforcing the trilinear
     // sampler. This keeps distant/oblique surfaces stable instead of replacing
     // shimmer with a uniformly blurred bilinear sample.
     texture.updateSamplingMode(Texture.TRILINEAR_SAMPLINGMODE, true)
-    texture.anisotropicFilteringLevel = IMPORTANT_TEXTURE_ANISOTROPY
+    texture.anisotropicFilteringLevel = anisotropy
   }
 }

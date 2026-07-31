@@ -100,15 +100,18 @@ export class LocalAssetManager {
   private readonly scene: Scene
   private readonly definitions: LocalAssetDefinitions
   private readonly onProgress: AssetProgressListener
+  private readonly isMobile: boolean
 
   constructor(
     scene: Scene,
     definitions: LocalAssetDefinitions,
     onProgress: AssetProgressListener,
+    isMobile: boolean,
   ) {
     this.scene = scene
     this.definitions = definitions
     this.onProgress = onProgress
+    this.isMobile = isMobile
     installLocalResourceGuard()
     for (const key of Object.keys(definitions) as LocalAssetKey[]) {
       this.progress.set(key, 0)
@@ -154,7 +157,7 @@ export class LocalAssetManager {
         throw new Error(`The GLB at ${config.path} contains no meshes`)
       }
 
-      configureImportedTextureQuality(container, key)
+      configureImportedTextureQuality(container, key, this.isMobile)
 
       console.info(
         `[Night Breach][Assets] ${config.label}: local GLB loaded once and cached (${config.path}; ${container.meshes.length} meshes).`,

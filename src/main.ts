@@ -560,29 +560,31 @@ try {
 
   let engine: Engine
   try {
-    engine = new Engine(canvas, true, {
+    engine = new Engine(canvas, !isMobile, {
       adaptToDeviceRatio: false,
       preserveDrawingBuffer: false,
       stencil: false,
     }, false)
   } catch (error) {
-    logRuntimeWarning('Antialiased WebGL initialization failed; retrying safely.', error)
-    engine = new Engine(canvas, false, {
+    logRuntimeWarning('WebGL initialization failed; retrying safely.', error)
+    engine = new Engine(canvas, !isMobile, {
       adaptToDeviceRatio: false,
       preserveDrawingBuffer: false,
       stencil: false,
     }, false)
   }
 
-  // A 1x CSS-pixel backing buffer is visibly upscaled by high-density Android
-  // WebViews. Retain native device density up to 2x: this is a deliberate
-  // Telegram-safe ceiling, not an FPS-driven or low-end quality fallback.
-  const MOBILE_MAX_RENDER_DENSITY = 2
+  const RENDER_SCALE = 1
+  const HARDWARE_SCALING_LEVEL = 1
+  const MATERIAL_CSS_SIZE_CHANGE_PX = 0.5
   let settledResizeFrameOne = 0
   let settledResizeFrameTwo = 0
   let initialResolutionSettled = false
   let initialResolutionLogged = false
   let renderLoopRegistrationCount = 0
+  let lastAppliedCssWidth: number | null = null
+  let lastAppliedCssHeight: number | null = null
+  let lastAppliedHardwareScalingLevel: number | null = null
 
   function getCanvasCssSize() {
     const bounds = canvas.getBoundingClientRect()
@@ -604,10 +606,6 @@ try {
     }
   }
 
-  function getMobileRenderScale() {
-    return clamp(window.devicePixelRatio || 1, 1, MOBILE_MAX_RENDER_DENSITY)
-  }
-
   function logInitialResolutionIfReady() {
     if (!import.meta.env.DEV
       || initialResolutionLogged
@@ -617,7 +615,6 @@ try {
     initialResolutionLogged = true
     const cssSize = getCanvasCssSize()
     console.info('[Night Breach][Resolution] Settled initial render size.', {
-      devicePixelRatio: window.devicePixelRatio,
       canvasCssDimensions: {
         width: Number(cssSize.width.toFixed(2)),
         height: Number(cssSize.height.toFixed(2)),
@@ -641,26 +638,32 @@ try {
     updateTelegramSafeAreaCssVariables()
     updateOrientationState()
 
-    const renderScale = isMobile
-      ? getMobileRenderScale()
-      : 1
-    // Babylon hardware scaling is the inverse of render density. The value is
-    // reapplied after every settled Telegram/VisualViewport resize, and no
-    // SceneOptimizer or low-end branch is allowed to replace it later.
-    const hardwareScalingLevel = 1 / renderScale
+    const cssSize = getCanvasCssSize()
+    const cssSizeChanged = lastAppliedCssWidth === null
+      || lastAppliedCssHeight === null
+      || Math.abs(cssSize.width - lastAppliedCssWidth) >= MATERIAL_CSS_SIZE_CHANGE_PX
+      || Math.abs(cssSize.height - lastAppliedCssHeight) >= MATERIAL_CSS_SIZE_CHANGE_PX
+    const hardwareScalingChanged = lastAppliedHardwareScalingLevel === null
+      || Math.abs(lastAppliedHardwareScalingLevel - HARDWARE_SCALING_LEVEL) > 0.0001
+      || Math.abs(engine.getHardwareScalingLevel() - HARDWARE_SCALING_LEVEL) > 0.0001
 
     try {
-      if (Math.abs(engine.getHardwareScalingLevel() - hardwareScalingLevel) > 0.0001) {
+      if (Math.abs(engine.getHardwareScalingLevel() - HARDWARE_SCALING_LEVEL) > 0.0001) {
         // This is the only runtime writer of hardwareScalingLevel. The setter
         // performs the settled resize internally.
-        engine.setHardwareScalingLevel(hardwareScalingLevel)
-      } else {
+        engine.setHardwareScalingLevel(HARDWARE_SCALING_LEVEL)
+      } else if (cssSizeChanged || hardwareScalingChanged) {
         // Re-read the settled CSS dimensions after Telegram has updated its
         // viewport. Babylon derives the backing buffer from client size / HSL.
         engine.resize()
       }
-      canvas.dataset.renderScale = renderScale.toFixed(3)
-      canvas.dataset.hardwareScalingLevel = hardwareScalingLevel.toFixed(3)
+      if (cssSizeChanged || hardwareScalingChanged) {
+        lastAppliedCssWidth = cssSize.width
+        lastAppliedCssHeight = cssSize.height
+        lastAppliedHardwareScalingLevel = HARDWARE_SCALING_LEVEL
+      }
+      canvas.dataset.renderScale = RENDER_SCALE.toFixed(3)
+      canvas.dataset.hardwareScalingLevel = HARDWARE_SCALING_LEVEL.toFixed(3)
       initialResolutionSettled = true
     } catch (error) {
       logRuntimeWarning('Settled canvas render sizing was unavailable.', error)
@@ -694,7 +697,7 @@ try {
       `[Night Breach][Telegram] fullscreenChanged: isFullscreen=${String(isFullscreen)}.`,
     )
     // The shared scheduler waits two animation frames, then refreshes both
-    // Telegram safe areas, reapplies mobile render scale, and resizes once.
+    // Telegram safe areas, reapplies the fixed render scale, and resizes once.
     scheduleSettledResize()
   }
 
@@ -731,6 +734,7 @@ const localAssetManager = new LocalAssetManager(
   scene,
   ASSET_CONFIG.assets,
   updateAssetLoadingIndicator,
+  isMobile,
 )
 scene.clearColor = new Color4(0.06, 0.082, 0.092, 1)
 scene.collisionsEnabled = true
@@ -1302,6 +1306,7 @@ await yieldToIdleWork()
 const asphaltRoad = createAsphaltRoad({
   config: asphaltRoadAssetResult.config,
   container: asphaltRoadAssetResult.container,
+  isMobile,
   scene,
   worldLayerMask: WORLD_RENDER_LAYER_MASK,
 })
@@ -1901,6 +1906,7 @@ const winterSurfaces: WinterSurface[] = [
 const winterEnvironment = new WinterEnvironment({
   scene,
   camera,
+  isMobile,
   skyLight,
   sunLight,
   surfaces: winterSurfaces,
