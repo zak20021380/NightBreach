@@ -631,16 +631,16 @@ body {
 }
 
 #reloadButton {
-  right: calc(var(--mobile-safe-right) + 122px);
-  bottom: calc(var(--mobile-safe-bottom) + 68px);
+  right: calc(var(--mobile-safe-right) + 116px);
+  bottom: calc(var(--mobile-safe-bottom) + 66px);
   width: clamp(62px, 16vh, 66px);
   height: clamp(62px, 16vh, 66px);
   font-size: 30px;
 }
 
 #weaponSwitchButton {
-  right: calc(var(--mobile-safe-right) + 82px);
-  bottom: calc(var(--mobile-safe-bottom) + 150px);
+  right: calc(var(--mobile-safe-right) + 63px);
+  bottom: calc(var(--mobile-safe-bottom) + 120px);
   width: clamp(56px, 14vh, 60px);
   height: clamp(56px, 14vh, 60px);
   font-size: 27px;
