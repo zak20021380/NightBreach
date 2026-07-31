@@ -17,7 +17,7 @@ export const LOADING_STAGES = {
 
 export type LoadingStageLabel = (typeof LOADING_STAGES)[keyof typeof LOADING_STAGES]
 
-const FADE_OUT_DURATION = 260
+const FADE_OUT_DURATION = 340
 
 interface LoadingScreenElements {
   fill: HTMLElement | null
@@ -84,8 +84,7 @@ export function createLoadingScreenController(): LoadingScreenController {
     root.setAttribute('aria-hidden', 'true')
     // Drop the poster with the overlay so the decoded full-screen bitmap is not
     // retained behind the live scene.
-    removalTimer = window.setTimeout(() => {
-      removalTimer = undefined
+    window.setTimeout(() => {
       root.remove()
     }, FADE_OUT_DURATION)
   }

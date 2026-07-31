@@ -32,6 +32,10 @@ import {
   type AssetProgressSnapshot,
   LocalAssetManager,
 } from './assets/localAssetManager'
+import {
+  createLoadingScreenController,
+  LOADING_STAGES,
+} from './loadingScreen'
 import { createAbandonedStructures } from './abandonedStructures'
 import { createAmmoCrate } from './ammoCrate'
 import {
@@ -123,8 +127,7 @@ import {
 
 const canvas = getElement<HTMLCanvasElement>('#renderCanvas')
 const assetLoading = getElement<HTMLDivElement>('#assetLoading')
-const assetLoadingLabel = getElement<HTMLSpanElement>('#assetLoadingLabel')
-const assetLoadingProgress = getElement<HTMLProgressElement>('#assetLoadingProgress')
+const loadingScreen = createLoadingScreenController()
 const ammoDisplay = getElement<HTMLDivElement>('#ammo')
 const instructions = getElement<HTMLButtonElement>('#instructions')
 const crosshair = getElement<HTMLDivElement>('#crosshair')
@@ -145,24 +148,45 @@ const fireButton = getElement<HTMLButtonElement>('#fireButton')
 const reloadButton = getElement<HTMLButtonElement>('#reloadButton')
 const weaponSwitchButton = getElement<HTMLButtonElement>('#weaponSwitchButton')
 const useButton = getElement<HTMLButtonElement>('#useButton')
-const assetLoadingStartedAt = performance.now()
-let assetLoadingHideTimer: number | undefined
+// The poster overlay above is the single startup UI. Keep the older all-asset
+// indicator hidden so optional background scenery can never look like it is
+// blocking a ready game or reappear after a Telegram viewport update.
+assetLoading.hidden = true
 
-function updateAssetLoadingIndicator(snapshot: AssetProgressSnapshot) {
-  assetLoadingProgress.value = snapshot.ratio
-  assetLoadingLabel.textContent = snapshot.completed === snapshot.total
-    ? 'Local assets ready'
-    : `Loading local assets ${snapshot.completed}/${snapshot.total}`
+function updateAssetLoadingIndicator(_snapshot: AssetProgressSnapshot) {
+  // LocalAssetManager retains this callback for its own error isolation. Its
+  // byte-level progress includes optional assets, so it must not drive the
+  // critical-task progress shown by the loading screen.
+}
 
-  if (snapshot.completed !== snapshot.total || snapshot.total === 0) return
-  if (assetLoadingHideTimer !== undefined) return
-  const minimumDisplayTime = Math.max(0, 450 - (performance.now() - assetLoadingStartedAt))
-  assetLoadingHideTimer = window.setTimeout(() => {
-    assetLoading.classList.add('complete')
-    window.setTimeout(() => {
-      assetLoading.hidden = true
-    }, 200)
-  }, minimumDisplayTime)
+const CRITICAL_STARTUP_TASKS = [
+  'engineAndScene',
+  'cameraControlsAndHud',
+  'spawnAreaEnvironmentAndCollisions',
+  'equippedWeapon',
+  'waveOneZombieTemplate',
+  'combatAndWaveSystems',
+] as const
+
+type CriticalStartupTask = (typeof CRITICAL_STARTUP_TASKS)[number]
+
+const completedCriticalStartupTasks = new Set<CriticalStartupTask>()
+
+function completeCriticalStartupTask(
+  task: CriticalStartupTask,
+  stage: string,
+) {
+  if (!loadingScreen.isActive || completedCriticalStartupTasks.has(task)) return
+  completedCriticalStartupTasks.add(task)
+  loadingScreen.setStage(stage)
+  loadingScreen.setProgress(
+    completedCriticalStartupTasks.size,
+    CRITICAL_STARTUP_TASKS.length,
+  )
+}
+
+function showCriticalStartupError() {
+  loadingScreen.showError('Unable to start. Please reopen Night Breach.')
 }
 const isTouchDevice = navigator.maxTouchPoints > 0
   || window.matchMedia('(pointer: coarse)').matches
@@ -869,6 +893,12 @@ canvas.dataset.ammoCrateCabin = abandonedStructures.enterableHouse.cabinId
 canvas.dataset.ammoCrateSource = 'glb'
 canvas.dataset.ammoCrateVisualMeshCount = String(ammoCrate.visualMeshCount)
 
+let dirtyMedkit: DirtyMedkitResult | null = null
+let utilityPoles: ReturnType<typeof createBrokenUtilityPoles> | null = null
+let rustyStreetlights: ReturnType<typeof createRustyStreetlights> | null = null
+let bloodDecalSurfaces: Set<AbstractMesh> | null = null
+
+async function initializeNonCriticalEnvironmentAssets() {
 // The second cabin is the one without the ammo crate, so it is the one that
 // receives the table. The first cabin's interior is deliberately left alone.
 canvas.dataset.oldWoodenTableSource = 'unavailable'
@@ -925,7 +955,6 @@ if (oldWoodenTableAssetResult.status === 'loaded') {
 // Exactly one medkit, and only when the table it rests on was actually placed:
 // its whole placement is derived from that table's own tabletop vertices.
 canvas.dataset.dirtyMedkitSource = 'unavailable'
-let dirtyMedkit: DirtyMedkitResult | null = null
 if (placedOldWoodenTable !== null) {
   const dirtyMedkitAssetResult = await localAssetManager.load('dirtyMedkit')
   if (dirtyMedkitAssetResult.status === 'loaded') {
@@ -982,7 +1011,7 @@ if (utilityPoleAssetResult.status !== 'loaded') {
     `Required broken utility pole GLB failed to load: ${utilityPoleAssetResult.reason}`,
   )
 }
-const utilityPoles = createBrokenUtilityPoles({
+const loadedUtilityPoles = createBrokenUtilityPoles({
   castShadows: !isMobile && shadowGenerator !== null,
   config: utilityPoleAssetResult.config,
   container: utilityPoleAssetResult.container,
@@ -993,12 +1022,13 @@ const utilityPoles = createBrokenUtilityPoles({
   shadowGenerator,
   worldLayerMask: WORLD_RENDER_LAYER_MASK,
 })
-canvas.dataset.utilityPoleCount = String(utilityPoles.placements.length)
+utilityPoles = loadedUtilityPoles
+canvas.dataset.utilityPoleCount = String(loadedUtilityPoles.placements.length)
 canvas.dataset.utilityPoleSource = 'glb'
 canvas.dataset.utilityPoleSharing = 'instanced-shared-geometry-materials-textures'
-canvas.dataset.utilityPoleCollisionCount = String(utilityPoles.collisionMeshCount)
-canvas.dataset.utilityPoleVisualMeshCount = String(utilityPoles.visualMeshCount)
-canvas.dataset.utilityPoleLocations = utilityPoles.placements
+canvas.dataset.utilityPoleCollisionCount = String(loadedUtilityPoles.collisionMeshCount)
+canvas.dataset.utilityPoleVisualMeshCount = String(loadedUtilityPoles.visualMeshCount)
+canvas.dataset.utilityPoleLocations = loadedUtilityPoles.placements
   .map(({ position }) => position.join(','))
   .join('|')
 
@@ -1044,6 +1074,9 @@ const asphaltRoad = createAsphaltRoad({
   scene,
   worldLayerMask: WORLD_RENDER_LAYER_MASK,
 })
+for (const mesh of asphaltRoad.visualMeshes) {
+  if (mesh.metadata?.asphaltRoadSegment === true) bloodDecalSurfaces?.add(mesh)
+}
 canvas.dataset.asphaltRoadSource = 'glb'
 canvas.dataset.asphaltRoadSharing =
   'mitred-static-segments-shared-materials-textures'
@@ -1105,7 +1138,7 @@ if (streetlightAssetResult.status !== 'loaded') {
     `Required rusty streetlight GLB failed to load: ${streetlightAssetResult.reason}`,
   )
 }
-const rustyStreetlights = createRustyStreetlights({
+rustyStreetlights = createRustyStreetlights({
   config: streetlightAssetResult.config,
   container: streetlightAssetResult.container,
   registerCollisionMesh(mesh) {
@@ -1114,7 +1147,7 @@ const rustyStreetlights = createRustyStreetlights({
   scene,
   worldLayerMask: WORLD_RENDER_LAYER_MASK,
 })
-scene.onDisposeObservable.addOnce(() => rustyStreetlights.dispose())
+scene.onDisposeObservable.addOnce(() => rustyStreetlights?.dispose())
 canvas.dataset.streetlightCount = String(rustyStreetlights.placements.length)
 canvas.dataset.streetlightSource = 'glb'
 canvas.dataset.streetlightSharing =
@@ -1139,6 +1172,8 @@ canvas.dataset.streetlightPlacements = rustyStreetlights.placements
     `${position.join(',')},${rotationY},${lightMode}`
   ))
   .join('|')
+
+}
 
 // One binding per cabin. Every cabin keeps its own door reference, doorway
 // position, and interaction range, so the prompt and the toggle always act on
@@ -1185,6 +1220,9 @@ if (secondaryCabinDoor) {
     `${secondaryCabinDoor.doorwayPosition.x.toFixed(3)},`
     + `${secondaryCabinDoor.doorwayPosition.z.toFixed(3)}`
 }
+
+async function initializeNonCriticalForestAsset() {
+if (!utilityPoles || !rustyStreetlights) return
 
 canvas.dataset.snowForestSource = 'unavailable'
 // Both prop systems are already built, so the forest reuses their authored
@@ -1275,6 +1313,7 @@ if (snowPinePackAssetResult.status === 'loaded') {
     'Snow pine forest asset was unavailable; gameplay will continue without forest vegetation.',
     snowPinePackAssetResult.reason,
   )
+}
 }
 
 let activeCabinDoor: CabinDoorBinding | null = null
@@ -1551,7 +1590,7 @@ console.info(
 // while the two imported sheds deliberately keep their render meshes out of
 // that registry. Build a dedicated surface set from the visible procedural map
 // and both authored shed instances.
-const bloodDecalSurfaces = new Set<AbstractMesh>(
+bloodDecalSurfaces = new Set<AbstractMesh>(
   proceduralEnvironmentMeshes.filter(
     (mesh) => mesh.isVisible && mesh.visibility > 0,
   ),
@@ -1562,13 +1601,10 @@ for (const mesh of scene.meshes) {
     && mesh.metadata?.abandonedStructureCollider !== true
   ) bloodDecalSurfaces.add(mesh)
 }
-for (const mesh of asphaltRoad.visualMeshes) {
-  if (mesh.metadata?.asphaltRoadSegment === true) bloodDecalSurfaces.add(mesh)
-}
 
 function isBloodDecalSurface(mesh: AbstractMesh) {
   return (
-    bloodDecalSurfaces.has(mesh)
+    bloodDecalSurfaces?.has(mesh) === true
     && !mesh.isDisposed()
     && mesh.isEnabled()
     && mesh.isVisible
@@ -1612,7 +1648,7 @@ async function initializeLocalEnvironment() {
       mesh.checkCollisions = false
       mesh.receiveShadows = true
       if (!isLowEndMobile) shadowGenerator?.addShadowCaster(mesh)
-      bloodDecalSurfaces.add(mesh)
+      bloodDecalSurfaces?.add(mesh)
     }
     applyImportedMaterialSettings(modelMeshes, ENVIRONMENT_ASSET_CONFIG.material)
 
@@ -1646,10 +1682,17 @@ async function initializeLocalEnvironment() {
 }
 
 canvas.dataset.environmentSource = 'procedural'
-void initializeLocalEnvironment().catch((error) => {
-  canvas.dataset.environmentSource = 'procedural'
-  logRuntimeWarning('Environment source: procedural fallback active.', error)
-})
+const localEnvironmentInitialization = initializeLocalEnvironment()
+void localEnvironmentInitialization.then(
+  () => completeCriticalStartupTask(
+    'spawnAreaEnvironmentAndCollisions',
+    LOADING_STAGES.environment,
+  ),
+  (error) => {
+    canvas.dataset.environmentSource = 'procedural'
+    logRuntimeWarning('Environment source: procedural fallback active.', error)
+  },
+)
 
 const {
   playZombieAttackSound,
@@ -4814,9 +4857,14 @@ function resetZombieWave() {
 
 updateWaveDisplay()
 scene.onDisposeObservable.add(stopZombieWaveTimers)
-void initializeZombies().catch((error) => {
-  logRuntimeError('[Zombies] Initialization failed:', error)
-})
+const zombieInitialization = initializeZombies()
+void zombieInitialization.then(
+  () => completeCriticalStartupTask(
+    'waveOneZombieTemplate',
+    LOADING_STAGES.enemies,
+  ),
+  (error) => logRuntimeError('[Zombies] Initialization failed:', error),
+)
 
 scene.onBeforeRenderObservable.add(() => {
   for (const binding of cabinDoors) {
@@ -6177,11 +6225,15 @@ async function loadLocalRifleModel(parent: TransformNode) {
   }
 }
 
-void loadLocalRifleModel(viewModelPivot).catch((error) => {
-  canvas.dataset.weaponSource = 'procedural'
-  canvas.dataset.rifleReady = 'procedural'
-  logRuntimeWarning('[Rifle] Unexpected load failure; procedural fallback remains active.', error)
-})
+const rifleModelInitialization = loadLocalRifleModel(viewModelPivot)
+void rifleModelInitialization.then(
+  () => completeCriticalStartupTask('equippedWeapon', LOADING_STAGES.weapon),
+  (error) => {
+    canvas.dataset.weaponSource = 'procedural'
+    canvas.dataset.rifleReady = 'procedural'
+    logRuntimeWarning('[Rifle] Unexpected load failure; procedural fallback remains active.', error)
+  },
+)
 
 function activateProceduralRifleFallback(context: string, error: unknown) {
   importedRifleRoot?.setEnabled(false)
@@ -7837,6 +7889,7 @@ reloadWeapon = () => {
   if (activeWeaponId === 'shotgun') beginShotgunReload()
   else beginReload()
 }
+completeCriticalStartupTask('combatAndWaveSystems', LOADING_STAGES.initializing)
 
 function capturePointerSafely(element: HTMLElement, pointerId: number) {
   try {
@@ -8066,6 +8119,8 @@ function deactivateReloadButton() {
   reloadButton.classList.remove('active')
 }
 
+completeCriticalStartupTask('cameraControlsAndHud', LOADING_STAGES.initializing)
+
 const previousCameraPosition = camera.position.clone()
 const previousCameraRotation = camera.rotation.clone()
 let swayX = 0
@@ -8127,7 +8182,7 @@ function restartPrototype() {
 
   // Restart the one slow irregular timer from a known state without recreating
   // or accumulating either of the two streetlight spot lights.
-  rustyStreetlights.resetLighting()
+  rustyStreetlights?.resetLighting()
   startZombieWave()
   document.body.classList.remove('game-over')
   retryOverlay.setAttribute('aria-hidden', 'true')
@@ -8297,6 +8352,7 @@ scene.onBeforeRenderObservable.add(() => {
 let renderRecoveryAttempted = false
 let renderLoopRunning = false
 let firstFrameRendered = false
+let resolveNextValidFrame: (() => void) | undefined
 let renderFailureCount = 0
 const pausedWeaponAnimations: AnimationGroup[] = []
 
@@ -8304,6 +8360,8 @@ function renderFrame() {
   try {
     scene.render()
     renderFailureCount = 0
+    resolveNextValidFrame?.()
+    resolveNextValidFrame = undefined
     if (!firstFrameRendered) {
       firstFrameRendered = true
       canvas.dataset.firstFrameRendered = 'true'
@@ -8342,10 +8400,24 @@ function renderFrame() {
       return
     }
 
+    if (!firstFrameRendered) showCriticalStartupError()
     if (renderFailureCount === 1 || renderFailureCount % 120 === 0) {
       logRuntimeError('Render frame failed; the render loop remains active for recovery:', error)
     }
   }
+}
+
+function waitForSceneReady() {
+  if (scene.isReady()) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    scene.executeWhenReady(resolve)
+  })
+}
+
+function waitForNextValidFrame() {
+  return new Promise<void>((resolve) => {
+    resolveNextValidFrame = resolve
+  })
 }
 
 function setRenderLoopActive(active: boolean) {
@@ -8959,11 +9031,29 @@ if (import.meta.env.DEV) {
   })
 }
 
+  await Promise.all([
+    localEnvironmentInitialization,
+    rifleModelInitialization,
+    zombieInitialization,
+  ])
+  await waitForSceneReady()
+  await waitForNextValidFrame()
+  completeCriticalStartupTask('engineAndScene', LOADING_STAGES.finalizing)
+
   gameReady = true
   canvas.dataset.sceneReady = 'true'
   console.info(
     `[Night Breach][Scene] Ready: ${scene.meshes.length} meshes, ${scene.lights.length} lights, map=${canvas.dataset.mapReady}, zombies=${canvas.dataset.zombieSource ?? 'loading'}, rifle=${canvas.dataset.weaponSource}.`,
   )
+  loadingScreen.complete()
+  void initializeNonCriticalEnvironmentAssets()
+    .then(() => initializeNonCriticalForestAsset())
+    .catch((error) => {
+      logRuntimeWarning(
+        'Optional environment assets stopped loading; gameplay remains available.',
+        error,
+      )
+    })
   if (deployRequested) deployGame()
 
   // Local screenshot/validation harness. It is compiled out of production and
@@ -9121,6 +9211,7 @@ if (import.meta.env.DEV) {
   }
 } catch (error) {
   logRuntimeError('Startup failed:', error)
+  showCriticalStartupError()
   instructions.disabled = true
   instructions.classList.add('error')
   instructions.textContent = 'STARTUP FAILED - CHECK BROWSER CONSOLE'
