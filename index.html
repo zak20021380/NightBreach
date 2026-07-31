@@ -41,11 +41,16 @@
           <div id="joystickKnob"></div>
         </div>
       </div>
-      <button id="adsButton" class="touchButton" type="button" aria-label="Hold to aim down sights">ADS</button>
-      <button id="reloadButton" class="touchButton" type="button" aria-label="Reload weapon">RELOAD</button>
-      <button id="weaponSwitchButton" class="touchButton" type="button" aria-label="Switch weapon, unavailable" disabled>AK</button>
+      <button id="reloadButton" class="touchButton" type="button" aria-label="Reload weapon">
+        <span class="actionGlyph" aria-hidden="true">↻</span>
+      </button>
+      <button id="weaponSwitchButton" class="touchButton" type="button" aria-label="Switch weapon, unavailable" disabled>
+        <span class="actionGlyph" aria-hidden="true">⇆</span>
+      </button>
       <button id="useButton" type="button" aria-label="Use door" aria-hidden="true">USE</button>
-      <button id="fireButton" class="touchButton" type="button" aria-label="Hold to fire">FIRE</button>
+      <button id="fireButton" class="touchButton" type="button" aria-label="Hold to fire">
+        <span class="fireMark" aria-hidden="true"></span>
+      </button>
     </div>
     <div id="retryOverlay" role="dialog" aria-modal="true" aria-labelledby="retryTitle" aria-hidden="true">
       <div class="retryPanel">

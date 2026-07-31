@@ -142,7 +142,6 @@ const movementControl = getElement<HTMLDivElement>('#movementControl')
 const joystickBase = getElement<HTMLDivElement>('#joystickBase')
 const joystickKnob = getElement<HTMLDivElement>('#joystickKnob')
 const fireButton = getElement<HTMLButtonElement>('#fireButton')
-const adsButton = getElement<HTMLButtonElement>('#adsButton')
 const reloadButton = getElement<HTMLButtonElement>('#reloadButton')
 const weaponSwitchButton = getElement<HTMLButtonElement>('#weaponSwitchButton')
 const useButton = getElement<HTMLButtonElement>('#useButton')
@@ -198,7 +197,7 @@ let equipWeapon: () => void = () => undefined
 let switchWeaponSlot: (weaponId: 'rifle' | 'shotgun') => boolean = () => false
 let unlockShotgunAudio: () => void = () => undefined
 let engageAds: () => void = () => undefined
-let releaseAds: (pointerId?: number) => void = () => undefined
+let releaseAds: () => void = () => undefined
 let cancelMobileInput: () => void = () => undefined
 let stopZombieWaveTimers: () => void = () => undefined
 let startZombieWave: () => void = () => undefined
@@ -7206,7 +7205,6 @@ function toggleWeaponSelection() {
 }
 
 function updateWeaponSwitchControl() {
-  weaponSwitchButton.textContent = WEAPON_LABELS[activeWeaponId]
   weaponSwitchButton.disabled = !shotgunReady
   weaponSwitchButton.setAttribute(
     'aria-label',
@@ -7376,7 +7374,6 @@ publishDirtyMedkitState()
 let movementPointerId: number | null = null
 let aimPointerId: number | null = null
 let firePointerId: number | null = null
-let adsPointerId: number | null = null
 let moveInputX = 0
 let moveInputY = 0
 let joystickCenterX = 0
@@ -7402,7 +7399,6 @@ engageAds = () => {
   adsHeld = true
   applyDesktopMouseSensitivity()
   playImportedWeaponAnimation('ads')
-  adsButton.classList.add('active')
   document.body.classList.add('ads-active')
 }
 
@@ -7923,15 +7919,10 @@ function stopAutomaticFire(pointerId?: number) {
   fireButton.classList.remove('active')
 }
 
-releaseAds = (pointerId?: number) => {
-  if (pointerId !== undefined && pointerId !== adsPointerId) return
-  const capturedPointerId = adsPointerId
-  adsPointerId = null
-  releasePointerCaptureSafely(adsButton, capturedPointerId)
+releaseAds = () => {
   adsHeld = false
   applyDesktopMouseSensitivity()
   playImportedWeaponAnimation('ads', false, true)
-  adsButton.classList.remove('active')
   document.body.classList.remove('ads-active')
 }
 
@@ -8050,32 +8041,13 @@ fireButton.addEventListener('pointerup', endAutomaticFire, { passive: false })
 fireButton.addEventListener('pointercancel', endAutomaticFire, { passive: false })
 fireButton.addEventListener('lostpointercapture', endAutomaticFire)
 
-adsButton.addEventListener('pointerdown', (event) => {
-  if (!isTouchDevice || !gameplayInputEnabled() || adsPointerId !== null) return
-  event.preventDefault()
-  event.stopPropagation()
-  adsPointerId = event.pointerId
-  engageAds()
-  capturePointerSafely(adsButton, event.pointerId)
-}, { passive: false })
-
-const endAds = (event: PointerEvent) => {
-  if (event.pointerId !== adsPointerId) return
-  event.preventDefault()
-  releaseAds(event.pointerId)
-}
-adsButton.addEventListener('pointerup', endAds, { passive: false })
-adsButton.addEventListener('pointercancel', endAds, { passive: false })
-adsButton.addEventListener('lostpointercapture', endAds)
-
 // Window-level fallbacks cover browsers that fail pointer capture or lose the
 // originating element before delivering the end event. Pointer IDs keep one
-// finger ending from interrupting simultaneous movement, aim, fire, or ADS.
+// finger ending from interrupting simultaneous movement, aim, or fire.
 const endMobilePointer = (event: PointerEvent) => {
   endJoystick(event)
   endAim(event)
   endAutomaticFire(event)
-  endAds(event)
 }
 window.addEventListener('pointerup', endMobilePointer, { passive: false })
 window.addEventListener('pointercancel', endMobilePointer, { passive: false })
