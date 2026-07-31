@@ -449,23 +449,35 @@ body {
   pointer-events: none;
 }
 
+/* ---------------------------------------------------------------------------
+   Deploy panel
+   The pre-entry screen. One button, so the entire panel is a single large touch
+   target, and its only motion is the CSS opacity/border pulse on the DEPLOY
+   label below: no filters, no canvas work, no JavaScript animation loop, so the
+   background asset queue keeps the main thread while this panel is on screen.
+   --------------------------------------------------------------------------- */
+
 #instructions {
+  --deploy-edge: rgb(131 144 109 / 58%);
   position: fixed;
   top: 50%;
   left: 50%;
   z-index: 9;
-  transform: translate(-50%, 70px);
-  width: min(90vw, 520px);
-  padding: 14px 20px;
-  border: 1px solid rgb(215 222 201 / 38%);
-  background: rgb(25 31 27 / 76%);
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+  width: min(84vw, 320px);
+  min-height: 88px;
+  padding: 13px 22px 14px;
+  border: 1px solid var(--deploy-edge);
+  background: linear-gradient(180deg, rgb(30 37 32 / 82%), rgb(12 17 14 / 88%));
+  box-shadow:
+    inset 0 1px rgb(233 240 220 / 10%),
+    0 8px 26px rgb(0 0 0 / 38%);
   color: #e7eadb;
-  font-size: clamp(16px, 2.3vw, 22px);
-  font-weight: 600;
-  letter-spacing: 1px;
   text-align: center;
-  text-transform: uppercase;
-  transition: opacity 160ms ease;
+  transform: translate(-50%, 70px);
+  transition: opacity 200ms ease;
   appearance: none;
   cursor: pointer;
   font-family: inherit;
@@ -473,14 +485,62 @@ body {
   pointer-events: auto;
 }
 
-#instructions span {
-  color: #aab394;
-  font-size: 0.58em;
-  font-weight: 500;
+/* The button owns every press; the lines inside it are never a target. */
+#instructions > span {
+  display: block;
+  pointer-events: none;
 }
 
-#instructions.hidden {
+#instructions[hidden] {
+  display: none;
+}
+
+#deployLabel {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--deploy-edge);
+  color: #f2f4e9;
+  font-size: clamp(19px, 4.4vh, 26px);
+  font-weight: 800;
+  line-height: 1.06;
+  letter-spacing: 0.34em;
+  /* Balances the trailing letter-space so the word stays optically centred. */
+  text-indent: 0.34em;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 72%);
+  animation: deployPulse 2.2s ease-in-out infinite;
+}
+
+#deployHint {
+  color: rgb(231 234 219 / 74%);
+  font-size: clamp(11px, 2.4vh, 13px);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+#deployControls {
+  color: rgb(170 179 148 / 82%);
+  font-size: clamp(9px, 1.9vh, 11px);
+  font-weight: 650;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+@keyframes deployPulse {
+  0%,
+  100% {
+    border-bottom-color: rgb(131 144 109 / 32%);
+    opacity: 0.78;
+  }
+
+  50% {
+    border-bottom-color: rgb(160 175 128 / 78%);
+    opacity: 1;
+  }
+}
+
+/* Tap transition: the panel fades, then main.ts enables player input. */
+#instructions.is-dismissing {
   opacity: 0;
+  pointer-events: none;
 }
 
 #instructions:focus-visible {
@@ -492,6 +552,9 @@ body {
   cursor: default;
   color: #fff;
   background: rgb(96 28 24 / 88%);
+  font-size: clamp(13px, 2vw, 16px);
+  font-weight: 650;
+  letter-spacing: 0.08em;
 }
 
 #mobileControls {
@@ -785,11 +848,20 @@ body {
   }
 }
 
+/*
+  Touch placement: lower third, horizontally centred. The bottom anchor keeps
+  the panel clear of the weapon view model in the lower-right corner and of the
+  joystick/fire pads that appear once .game-deployed is set, and the max() guard
+  keeps it above the Telegram/Android bottom inset.
+*/
 .touch-device #instructions {
+  top: auto;
+  bottom: max(84px, calc(var(--mobile-safe-bottom) + 72px));
+  width: min(78vw, 300px);
   max-width: calc(
     100vw - var(--mobile-safe-left) - var(--mobile-safe-right) - 24px
   );
-  transform: translate(-50%, 58px);
+  transform: translateX(-50%);
 }
 
 .touch-device #ammo {
@@ -844,11 +916,29 @@ body {
     min-width: 54px;
     height: 48px;
   }
+
+  /* Same specificity as the .touch-device rule above so this still wins. */
+  .touch-device #instructions {
+    bottom: max(56px, calc(var(--mobile-safe-bottom) + 44px));
+    min-height: 76px;
+    padding: 10px 18px 11px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   #healthHud.critical::after {
     animation: none;
     opacity: 0.72;
+  }
+
+  /* The tap still waits out DEPLOY_FADE_DURATION_MS; only the motion is cut. */
+  #instructions {
+    transition: none;
+  }
+
+  #deployLabel {
+    border-bottom-color: var(--deploy-edge);
+    opacity: 1;
+    animation: none;
   }
 }

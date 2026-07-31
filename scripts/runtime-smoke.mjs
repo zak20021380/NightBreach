@@ -363,6 +363,12 @@ try {
   }
 
   await cdp.evaluate(`document.querySelector('#instructions').click()`)
+  // The deploy panel now fades for DEPLOY_FADE_DURATION_MS before player input is
+  // enabled, so wait for that transition instead of asserting on the same tick.
+  await cdp.waitForExpression(
+    `window.__nightBreachTest.snapshot().deployed && document.querySelector('#instructions') === null`,
+    5_000,
+  )
   const beforeMovement = await cdp.evaluate(`window.__nightBreachTest.snapshot()`)
   assert(beforeMovement.deployed && beforeMovement.renderLoop === 'running',
     'Click to deploy did not activate gameplay while keeping the render loop active.')

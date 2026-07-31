@@ -264,6 +264,8 @@ const assetLoading = getElement<HTMLDivElement>('#assetLoading')
 const loadingScreen = createLoadingScreenController()
 const ammoDisplay = getElement<HTMLDivElement>('#ammo')
 const instructions = getElement<HTMLButtonElement>('#instructions')
+const deployHint = getElement<HTMLSpanElement>('#deployHint')
+const deployControls = getElement<HTMLSpanElement>('#deployControls')
 const crosshair = getElement<HTMLDivElement>('#crosshair')
 const doorPrompt = getElement<HTMLDivElement>('#doorPrompt')
 const hitMarker = getElement<HTMLDivElement>('#hitMarker')
@@ -361,13 +363,20 @@ const performanceTier = isLowEndMobile ? 'mobile-low' : isMobile ? 'mobile' : 'd
 
 document.body.classList.toggle('touch-device', isTouchDevice)
 canvas.dataset.performanceTier = performanceTier
-if (isTouchDevice) {
-  instructions.innerHTML = 'Tap to deploy<br /><span>Left stick to move &middot; swipe to aim</span>'
+// index.html ships the touch wording so the panel is already correct on the
+// first paint inside Telegram; only desktop needs its two secondary lines
+// swapped for keyboard/mouse copy. The DEPLOY label is shared.
+if (!isTouchDevice) {
+  deployHint.textContent = 'Click to enter the breach'
+  deployControls.textContent = 'WASD · MOUSE TO AIM · R TO RELOAD'
 }
 
 let gameReady = false
 let deployed = false
 let deployRequested = false
+// Quick dismissal of the deploy panel; player input is enabled once it elapses.
+const DEPLOY_FADE_DURATION_MS = 200
+let deployTransitionStarted = false
 let gameOver = false
 // Start active even when mobile Safari transiently reports `document.hidden`
 // during module evaluation. A later visibilitychange/pagehide event remains the
@@ -446,9 +455,9 @@ function requestPointerLockSafely() {
 }
 
 function deployGame() {
-  // Resume the already-preloaded Web Audio graph inside the activation gesture.
-  // This is required by mobile autoplay policies and keeps later pump/reload
-  // cues available even though they begin after the original pointer event.
+  // Safety net for the paths that do not come through requestDeployFromGesture
+  // (a queued activation, the test harness): the gesture handler already resumed
+  // the preloaded Web Audio graph, and resuming twice is harmless.
   unlockShotgunAudio()
   if (deployed) return
   if (!gameReady) {
@@ -472,17 +481,33 @@ function deployGame() {
   console.info(`[Night Breach][Deploy] Active with ${isTouchDevice ? 'mobile' : 'desktop'} controls.`)
 }
 
-instructions.addEventListener('click', () => {
-  console.info('[Night Breach][Deploy] Click received.')
+/**
+ * Starts the deploy transition from a real user gesture.
+ *
+ * Everything the browser only grants inside a gesture (Web Audio resume,
+ * Telegram fullscreen) runs synchronously here; the fade and the actual
+ * activation are deferred by DEPLOY_FADE_DURATION_MS. The latch means a second
+ * tap - or the `click` that follows a touch `pointerup` - can never start a
+ * second transition or deploy twice.
+ */
+function requestDeployFromGesture(source: string) {
+  unlockShotgunAudio()
   requestTelegramFullscreenFromDeployGesture()
-  deployGame()
+  if (deployTransitionStarted || deployed) return
+  deployTransitionStarted = true
+  console.info(`[Night Breach][Deploy] ${source} activation received; dismissing the deploy panel.`)
+  instructions.disabled = true
+  instructions.classList.add('is-dismissing')
+  window.setTimeout(deployGame, DEPLOY_FADE_DURATION_MS)
+}
+
+instructions.addEventListener('click', () => {
+  requestDeployFromGesture('Click')
 })
 instructions.addEventListener('pointerup', (event) => {
   if (event.pointerType === 'mouse') return
   event.preventDefault()
-  console.info(`[Night Breach][Deploy] ${event.pointerType || 'touch'} activation received.`)
-  requestTelegramFullscreenFromDeployGesture()
-  deployGame()
+  requestDeployFromGesture(event.pointerType || 'touch')
 }, { passive: false })
 
 canvas.addEventListener('pointerdown', (event) => {
@@ -1088,7 +1113,10 @@ let utilityPoles: ReturnType<typeof createBrokenUtilityPoles> | null = null
 let rustyStreetlights: ReturnType<typeof createRustyStreetlights> | null = null
 let bloodDecalSurfaces: Set<AbstractMesh> | null = null
 
-async function initializeNonCriticalEnvironmentAssets() {
+// Background group 1 of 7: cabin interior props. The table and the medkit stay
+// in one group because the medkit's entire placement is derived from the
+// tabletop vertices of the table that was actually accepted.
+async function initializeCabinPropAssets() {
 // The second cabin is the one without the ammo crate, so it is the one that
 // receives the table. The first cabin's interior is deliberately left alone.
 canvas.dataset.oldWoodenTableSource = 'unavailable'
@@ -1097,6 +1125,9 @@ canvas.dataset.oldWoodenTableSource = 'unavailable'
 let placedOldWoodenTable: OldWoodenTableResult | null = null
 const oldWoodenTableAssetResult = await localAssetManager.load('oldWoodenTable')
 if (oldWoodenTableAssetResult.status === 'loaded') {
+  // Instantiation is the expensive half of a group; hand the renderer a slice
+  // of the main thread back before it runs.
+  await yieldToIdleWork()
   try {
     const oldWoodenTable = createOldWoodenTable({
       cabin: abandonedStructures.secondaryHouse,
@@ -1146,8 +1177,10 @@ if (oldWoodenTableAssetResult.status === 'loaded') {
 // its whole placement is derived from that table's own tabletop vertices.
 canvas.dataset.dirtyMedkitSource = 'unavailable'
 if (placedOldWoodenTable !== null) {
+  await yieldToIdleWork()
   const dirtyMedkitAssetResult = await localAssetManager.load('dirtyMedkit')
   if (dirtyMedkitAssetResult.status === 'loaded') {
+    await yieldToIdleWork()
     try {
       dirtyMedkit = createDirtyMedkit({
         cabin: abandonedStructures.secondaryHouse,
@@ -1194,13 +1227,18 @@ if (placedOldWoodenTable !== null) {
     )
   }
 }
+}
 
+// Background group 2 of 7: broken utility poles. The forest group later reads
+// the ground outlines measured from these placed meshes.
+async function initializeUtilityPoleAssets() {
 const utilityPoleAssetResult = await localAssetManager.load('utilityPole')
 if (utilityPoleAssetResult.status !== 'loaded') {
   throw new Error(
     `Required broken utility pole GLB failed to load: ${utilityPoleAssetResult.reason}`,
   )
 }
+await yieldToIdleWork()
 const loadedUtilityPoles = createBrokenUtilityPoles({
   castShadows: !isMobile && shadowGenerator !== null,
   config: utilityPoleAssetResult.config,
@@ -1221,13 +1259,17 @@ canvas.dataset.utilityPoleVisualMeshCount = String(loadedUtilityPoles.visualMesh
 canvas.dataset.utilityPoleLocations = loadedUtilityPoles.placements
   .map(({ position }) => position.join(','))
   .join('|')
+}
 
+// Background group 3 of 7: rusty car wrecks.
+async function initializeRustyCarAssets() {
 const rustyCarAssetResult = await localAssetManager.load('rustyCar')
 if (rustyCarAssetResult.status !== 'loaded') {
   throw new Error(
     `Required old rusty car GLB failed to load: ${rustyCarAssetResult.reason}`,
   )
 }
+await yieldToIdleWork()
 const rustyCars = createRustyCars({
   castShadows: !isMobile && shadowGenerator !== null,
   config: rustyCarAssetResult.config,
@@ -1251,13 +1293,17 @@ canvas.dataset.rustyCarPlacements = rustyCars.placements
     `${position.join(',')},${rotationY},${scale}`
   ))
   .join('|')
+}
 
+// Background group 4 of 7: the asphalt road route.
+async function initializeAsphaltRoadAssets() {
 const asphaltRoadAssetResult = await localAssetManager.load('asphaltRoad')
 if (asphaltRoadAssetResult.status !== 'loaded') {
   throw new Error(
     `Required asphalt road GLB failed to load: ${asphaltRoadAssetResult.reason}`,
   )
 }
+await yieldToIdleWork()
 const asphaltRoad = createAsphaltRoad({
   config: asphaltRoadAssetResult.config,
   container: asphaltRoadAssetResult.container,
@@ -1279,7 +1325,11 @@ canvas.dataset.asphaltRoadRoute =
   asphaltRoad.route.points.map((point) => point.join(',')).join('|')
 canvas.dataset.asphaltRoadSnowTreatmentMeshCount =
   String(asphaltRoad.snowTreatmentMeshCount)
+}
 
+// Background group 5 of 7: the hospital exterior. The heaviest single GLB, so
+// it owns a group of its own.
+async function initializeHospitalExteriorAssets() {
 const hospitalExteriorAssetResult =
   await localAssetManager.load('hospitalExterior')
 if (hospitalExteriorAssetResult.status !== 'loaded') {
@@ -1288,6 +1338,7 @@ if (hospitalExteriorAssetResult.status !== 'loaded') {
     + hospitalExteriorAssetResult.reason,
   )
 }
+await yieldToIdleWork()
 const hospitalExterior = createHospitalExterior({
   castShadows: !isMobile && shadowGenerator !== null,
   config: hospitalExteriorAssetResult.config,
@@ -1321,13 +1372,18 @@ canvas.dataset.hospitalExteriorShadowCasterCount =
   String(hospitalExterior.shadowCasterCount)
 canvas.dataset.hospitalExteriorVisualMeshCount =
   String(hospitalExterior.visualMeshCount)
+}
 
+// Background group 6 of 7: rusty streetlights. The forest group also reads these
+// placements, so it is queued directly after this one.
+async function initializeStreetlightAssets() {
 const streetlightAssetResult = await localAssetManager.load('streetlight')
 if (streetlightAssetResult.status !== 'loaded') {
   throw new Error(
     `Required rusty streetlight GLB failed to load: ${streetlightAssetResult.reason}`,
   )
 }
+await yieldToIdleWork()
 rustyStreetlights = createRustyStreetlights({
   config: streetlightAssetResult.config,
   container: streetlightAssetResult.container,
@@ -1411,6 +1467,9 @@ if (secondaryCabinDoor) {
     + `${secondaryCabinDoor.doorwayPosition.z.toFixed(3)}`
 }
 
+// Background group 7 of 7: the snow pine forest. It is queued last because it
+// reads the footprints published by groups 2 and 6, and it is skipped outright
+// when either of those did not land.
 async function initializeNonCriticalForestAsset() {
 if (!utilityPoles || !rustyStreetlights) return
 
@@ -1442,6 +1501,7 @@ canvas.dataset.utilityPoleFootprintReach = utilityPoles.footprints
   .join(',')
 const snowPinePackAssetResult = await localAssetManager.load('snowPinePack')
 if (snowPinePackAssetResult.status === 'loaded') {
+  await yieldToIdleWork()
   try {
     const snowForest = createSnowPineForest({
       additionalExclusionZones: HOSPITAL_EXTERIOR_FOREST_EXCLUSIONS,
@@ -1504,6 +1564,131 @@ if (snowPinePackAssetResult.status === 'loaded') {
     snowPinePackAssetResult.reason,
   )
 }
+}
+
+// ---------------------------------------------------------------------------
+// Background asset queue
+//
+// Everything that is not spawn-area content is downloaded and instantiated
+// here, one group at a time, starting as soon as the first valid frame has been
+// presented. The deploy panel is only an input gate: it neither starts this
+// queue nor blocks it. Each group is contained, so a failed download can never
+// abort a later group or take down a live game.
+// ---------------------------------------------------------------------------
+
+interface BackgroundAssetGroup {
+  readonly id: string
+  readonly run: () => Promise<void>
+}
+
+// Serial order. Groups 2 and 6 publish the anchors group 7 measures against, so
+// the forest is queued last; nothing here is ever started in parallel.
+const BACKGROUND_ASSET_GROUPS: readonly BackgroundAssetGroup[] = [
+  { id: 'cabinProps', run: initializeCabinPropAssets },
+  { id: 'utilityPoles', run: initializeUtilityPoleAssets },
+  { id: 'rustyCars', run: initializeRustyCarAssets },
+  { id: 'asphaltRoad', run: initializeAsphaltRoadAssets },
+  { id: 'hospitalExterior', run: initializeHospitalExteriorAssets },
+  { id: 'streetlights', run: initializeStreetlightAssets },
+  { id: 'snowPineForest', run: initializeNonCriticalForestAsset },
+]
+
+const BACKGROUND_IDLE_TIMEOUT_MS = 240
+
+let backgroundQueueStarted = false
+let backgroundQueueIndex = 0
+let releaseBackgroundQueuePark: (() => void) | null = null
+
+/**
+ * One idle slice. requestIdleCallback is used where it exists - it is absent
+ * from iOS Safari and the iOS Telegram WebView - with a one-frame timeout as the
+ * fallback. The timeout option keeps a busy main thread from starving the queue.
+ */
+function scheduleIdleSlice() {
+  return new Promise<void>((resolve) => {
+    const idleScheduler = (window as unknown as {
+      requestIdleCallback?: (
+        callback: () => void,
+        options?: { timeout: number },
+      ) => number
+    }).requestIdleCallback
+    if (typeof idleScheduler === 'function') {
+      idleScheduler.call(window, () => resolve(), {
+        timeout: BACKGROUND_IDLE_TIMEOUT_MS,
+      })
+      return
+    }
+    window.setTimeout(() => resolve(), 16)
+  })
+}
+
+/**
+ * Parks the queue while the page is hidden or the WebView is inactive, and
+ * resolves when setWebViewActive(true) releases it. Nothing is discarded and no
+ * position is reset, so a Telegram suspend/resume continues where it stopped
+ * instead of restarting a group or the queue.
+ */
+function waitForActiveDocument() {
+  if (!document.hidden && webViewActive) return Promise.resolve()
+  canvas.dataset.backgroundAssetQueue = 'parked'
+  return new Promise<void>((resolve) => {
+    releaseBackgroundQueuePark = () => {
+      releaseBackgroundQueuePark = null
+      canvas.dataset.backgroundAssetQueue = 'running'
+      resolve()
+    }
+  })
+}
+
+/** Every yield point in a group is also a park point. */
+async function yieldToIdleWork() {
+  await scheduleIdleSlice()
+  await waitForActiveDocument()
+}
+
+function resumeBackgroundAssetQueue() {
+  releaseBackgroundQueuePark?.()
+}
+
+async function runBackgroundAssetQueue() {
+  canvas.dataset.backgroundAssetQueue = 'running'
+  while (backgroundQueueIndex < BACKGROUND_ASSET_GROUPS.length) {
+    const group = BACKGROUND_ASSET_GROUPS[backgroundQueueIndex]
+    await waitForActiveDocument()
+    canvas.dataset.backgroundAssetGroup = group.id
+    try {
+      await group.run()
+    } catch (error) {
+      logRuntimeWarning(
+        `Optional environment group "${group.id}" stopped loading; gameplay remains available.`,
+        error,
+      )
+    }
+    // The index advances only once a group has settled, so a park in the middle
+    // of one resumes that group rather than re-running a finished one.
+    backgroundQueueIndex += 1
+    canvas.dataset.backgroundAssetProgress =
+      `${backgroundQueueIndex}/${BACKGROUND_ASSET_GROUPS.length}`
+    await yieldToIdleWork()
+  }
+  canvas.dataset.backgroundAssetQueue = 'complete'
+  canvas.dataset.backgroundAssetGroup = 'none'
+  console.info('[Night Breach][Background] Optional environment groups finished loading.')
+}
+
+/**
+ * The single entry point, latched: a repeated call - a Telegram resume, a second
+ * first-frame settle, a queued deploy - can never create a second queue, and the
+ * shared localAssetManager cache means no asset is ever requested twice.
+ */
+function startBackgroundAssetQueue() {
+  if (backgroundQueueStarted) return
+  backgroundQueueStarted = true
+  canvas.dataset.backgroundAssetProgress = `0/${BACKGROUND_ASSET_GROUPS.length}`
+  console.info(
+    `[Night Breach][Background] Starting ${BACKGROUND_ASSET_GROUPS.length} optional environment groups after the first rendered frame.`,
+  )
+  void runBackgroundAssetQueue()
 }
 
 let activeCabinDoor: CabinDoorBinding | null = null
@@ -8677,6 +8862,9 @@ function setWebViewActive(active: boolean) {
       }
     }
     if (isDesktop && deployed && !gameOver) startCameraControls()
+    // Release a parked background queue from the one place every resume path
+    // (visibilitychange, pageshow, focus) already funnels through.
+    resumeBackgroundAssetQueue()
   }
 
   setRenderLoopActive(nextActive)
@@ -9236,14 +9424,10 @@ if (import.meta.env.DEV) {
     `[Night Breach][Scene] Ready: ${scene.meshes.length} meshes, ${scene.lights.length} lights, map=${canvas.dataset.mapReady}, zombies=${canvas.dataset.zombieSource ?? 'loading'}, rifle=${canvas.dataset.weaponSource}.`,
   )
   loadingScreen.complete()
-  void initializeNonCriticalEnvironmentAssets()
-    .then(() => initializeNonCriticalForestAsset())
-    .catch((error) => {
-      logRuntimeWarning(
-        'Optional environment assets stopped loading; gameplay remains available.',
-        error,
-      )
-    })
+  // The first valid frame is on screen and the critical spawn area is already
+  // built, so the optional groups start here - while the deploy panel is still
+  // up - rather than waiting for the player's activation gesture.
+  startBackgroundAssetQueue()
   if (deployRequested) deployGame()
 
   // Local screenshot/validation harness. It is compiled out of production and
@@ -9403,6 +9587,9 @@ if (import.meta.env.DEV) {
   logRuntimeError('Startup failed:', error)
   showCriticalStartupError()
   instructions.disabled = true
+  // A player who already tapped has faded the panel out; the failure message is
+  // the only actionable thing left, so make it visible again.
+  instructions.classList.remove('is-dismissing')
   instructions.classList.add('error')
   instructions.textContent = 'STARTUP FAILED - CHECK BROWSER CONSOLE'
 }

@@ -184,7 +184,16 @@
       <div class="healthTrack"><div id="healthFill"></div></div>
     </div>
     <div id="ammo" aria-label="Ammunition">30/120</div>
-    <button id="instructions" type="button">Click to deploy<br /><span>WASD to move - Mouse to aim - R to reload</span></button>
+    <!--
+      Deploy panel. The touch copy ships in the markup so the panel is already
+      correct on the first paint inside Telegram; main.ts swaps the two secondary
+      lines for the desktop wording. The whole button is the touch target.
+    -->
+    <button id="instructions" type="button">
+      <span id="deployLabel">DEPLOY</span>
+      <span id="deployHint">Tap to enter the breach</span>
+      <span id="deployControls">MOVE &middot; SWIPE TO AIM</span>
+    </button>
     <div id="mobileControls" aria-label="Mobile game controls">
       <div id="lookArea" aria-label="Swipe to aim"></div>
       <div id="movementControl" aria-label="Movement joystick">
